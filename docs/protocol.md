@@ -60,6 +60,20 @@ A client can request recent sanitized timing metrics without reading daemon logs
 
 `limit` defaults to 10 and is bounded to 1–50. Diagnostics expose only transaction IDs, timing/count fields, event names, and timestamps; repository paths, command output, credentials, and arbitrary local metric fields are not returned.
 
+## Doctor request
+
+A client can request a deliberately small, sanitized environment report:
+
+```json
+{
+  "protocol": 2,
+  "kind": "doctor",
+  "transaction_id": "tx-example-doctor"
+}
+```
+
+The report exposes only bridge/Python/Git/rclone version strings, transport type, persistent-RC health, the rclone backend type, and whether a Google Drive remote has an explicit custom OAuth client ID. It never returns the rclone configuration path, OAuth client ID value, client secret, refresh token, credentials, repository paths, or command output.
+
 ## Edit transaction
 
 Required fields:
@@ -91,4 +105,4 @@ Branch snapshot publication is deferred by default so a slow mailbox upload cann
 
 The daemon writes `v2/results/<transaction-id>.json`. A result contains `status: success` or `status: error`. Successful edit results include branch and commit information; by default they also report `snapshot_deferred: true`. If synchronous snapshot publication was explicitly requested and succeeds, the result contains the remote snapshot path. Successful materialisation results include the requested base or branch snapshot path.
 
-The remote result is the durable acknowledgement. The daemon also keeps a local published-result marker. At watcher startup it reconciles the remote result directory once and rebuilds any missing local markers before processing transactions. Normal polling then lists only the transaction directory, preserving replay safety across restarts without adding a result-directory listing to every first-seen transaction. Results include transport timings known before acknowledgement and identify whether transaction listing/download used persistent `rclone rcd` or the subprocess fallback. Result-upload duration and its transport mode are recorded in the daemon's local JSONL metrics.
+The remote result is the durable acknowledgement. Once that acknowledgement exists, the original transaction object is no longer durable state: the daemon best-effort deletes it from the transaction inbox and also reaps previously acknowledged requests during idle polls. This keeps the hot polling directory small without weakening replay protection; local request/result copies and the remote result remain available for diagnosis. The daemon also keeps a local published-result marker. At watcher startup it reconciles the remote result directory once and rebuilds any missing local markers before processing transactions. Normal polling then lists only the transaction directory, preserving replay safety across restarts without adding a result-directory listing to every first-seen transaction. Results include transport timings known before acknowledgement and identify whether transaction listing/download used persistent `rclone rcd` or the subprocess fallback. Result-upload duration and its transport mode are recorded in the daemon's local JSONL metrics.

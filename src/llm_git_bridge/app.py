@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import argparse
+import configparser
 import json
 import os
 import plistlib
@@ -24,12 +25,14 @@ from .core import (
     process_transaction,
     public_registry,
     repo_state,
+    run,
     resolve_repo,
     save_json,
     utc_now,
     validate_safe_branch_name,
 )
 from .transport import RcloneRCProcess, RcloneTransport, start_rclone_rcd
+from . import __version__
 
 APP_NAME = "llm-git-bridge"
 CONFIG_DIR = Path.home() / ".config" / APP_NAME
@@ -76,8 +79,6 @@ def save_config(cfg: dict[str, Any]) -> None:
 def detect_rclone_remote() -> str:
     if shutil.which("rclone") is None:
         raise BridgeError("rclone is not installed")
-    from .core import run
-
     proc = run(["rclone", "listremotes"], timeout=20)
     remotes = {line.strip().rstrip(":") for line in proc.stdout.splitlines() if line.strip()}
     if "llm-git-bridge" in remotes:
@@ -194,6 +195,9 @@ _METRIC_PUBLIC_KEYS = {
     "transaction_list_transport",
     "transaction_download_transport",
     "result_upload_transport",
+    "request_cleanup_s",
+    "request_cleanup_status",
+    "request_cleanup_transport",
 }
 
 
@@ -229,6 +233,79 @@ def _process_diagnostics_request(obj: dict[str, Any], filename: str) -> dict[str
         "transaction_id": txid,
         "status": "success",
         "metrics": _recent_metrics(limit),
+        "processed_at": utc_now(),
+    }
+
+
+def _version_line(argv: list[str]) -> str | None:
+    proc = run(argv, check=False, timeout=5)
+    if proc.returncode != 0:
+        return None
+    for line in proc.stdout.splitlines():
+        line = line.strip()
+        if line:
+            return line[:160]
+    return None
+
+
+def _rclone_remote_summary(remote: str) -> dict[str, Any]:
+    summary: dict[str, Any] = {
+        "remote_type": None,
+        "custom_drive_client_id_configured": None,
+        "config_inspected": False,
+    }
+    proc = run(["rclone", "config", "file"], check=False, timeout=5)
+    if proc.returncode != 0:
+        return summary
+    lines = [line.strip() for line in proc.stdout.splitlines() if line.strip()]
+    if not lines:
+        return summary
+    config_path = Path(lines[-1]).expanduser()
+    parser = configparser.RawConfigParser(interpolation=None)
+    try:
+        with config_path.open("r", encoding="utf-8") as fh:
+            parser.read_file(fh)
+    except (OSError, configparser.Error, UnicodeError):
+        return summary
+    if not parser.has_section(remote):
+        return summary
+    summary["config_inspected"] = True
+    remote_type = parser.get(remote, "type", fallback="").strip()
+    summary["remote_type"] = remote_type[:40] or None
+    if remote_type == "drive":
+        summary["custom_drive_client_id_configured"] = bool(parser.get(remote, "client_id", fallback="").strip())
+    return summary
+
+
+def _process_doctor_request(cfg: dict[str, Any], obj: dict[str, Any], filename: str) -> dict[str, Any]:
+    txid = _validate_request_identity(obj, filename)
+    transport_cfg = cfg.get("transport", {})
+    remote = str(transport_cfg.get("remote") or "")
+    rc_enabled = bool(transport_cfg.get("rc_enabled", True))
+    remote_summary = _rclone_remote_summary(remote) if remote else {
+        "remote_type": None,
+        "custom_drive_client_id_configured": None,
+        "config_inspected": False,
+    }
+    rc_healthy = False
+    if rc_enabled:
+        rc_healthy = RcloneRCProcess(RCLONE_RC_SOCKET, None).healthy(timeout=0.25)
+    return {
+        "protocol": PROTOCOL_VERSION,
+        "kind": "result",
+        "operation": "doctor",
+        "transaction_id": txid,
+        "status": "success",
+        "doctor": {
+            "bridge_version": __version__,
+            "python_version": f"{sys.version_info.major}.{sys.version_info.minor}.{sys.version_info.micro}",
+            "git_version": _version_line(["git", "--version"]),
+            "rclone_version": _version_line(["rclone", "version"]),
+            "transport_type": transport_cfg.get("type"),
+            "rc_enabled": rc_enabled,
+            "rc_socket_healthy": rc_healthy,
+            **remote_summary,
+        },
         "processed_at": utc_now(),
     }
 
@@ -301,6 +378,21 @@ def _append_metric(event: dict[str, Any]) -> None:
         pass
 
 
+def _cleanup_remote_request(transport: RcloneTransport, filename: str, *, allow_fallback: bool = True) -> tuple[str, float, str]:
+    started = time.monotonic()
+    status = "success"
+    try:
+        deleted = transport.delete_file(
+            f"{REMOTE_ROOT}/transactions/{filename}",
+            allow_fallback=allow_fallback,
+        )
+        if not deleted:
+            status = "deferred"
+    except Exception:
+        status = "error"
+    return status, round(time.monotonic() - started, 4), str(getattr(transport, "last_mode", "unknown"))
+
+
 def _publish_local_result(transport: RcloneTransport, filename: str, local_result: Path) -> float:
     result = load_json(local_result)
     started = time.monotonic()
@@ -311,10 +403,14 @@ def _publish_local_result(transport: RcloneTransport, filename: str, local_resul
     )
     elapsed = round(time.monotonic() - started, 4)
     _mark_published(filename, source="local-result")
+    cleanup_status, cleanup_s, cleanup_transport = _cleanup_remote_request(transport, filename)
     _append_metric({
         "event": "result-republish",
         "transaction_id": filename[:-5],
         "result_upload_s": elapsed,
+        "request_cleanup_status": cleanup_status,
+        "request_cleanup_s": cleanup_s,
+        "request_cleanup_transport": cleanup_transport,
         "recorded_at": utc_now(),
     })
     return elapsed
@@ -367,6 +463,13 @@ def process_pending_once(cfg: dict[str, Any]) -> int:
     # result directory is performed once at watcher startup instead of here.
     candidates = [name for name in tx_files if not _published_marker(name).exists()]
     if not candidates:
+        # The transaction directory is an inbox, not an audit log. Reap one old
+        # acknowledged request per idle poll so listing cost remains bounded even
+        # after long-lived use. RC-only cleanup avoids turning maintenance into a
+        # subprocess latency penalty; failed cleanup is simply retried later.
+        published = [name for name in tx_files if _published_marker(name).exists()]
+        if published:
+            _cleanup_remote_request(transport, published[0], allow_fallback=False)
         return 0
 
     processed = 0
@@ -408,6 +511,8 @@ def process_pending_once(cfg: dict[str, Any]) -> int:
                 registry = load_registry()
             elif kind == "diagnostics":
                 result = _process_diagnostics_request(obj, filename)
+            elif kind == "doctor":
+                result = _process_doctor_request(cfg, obj, filename)
             elif kind == "transaction":
                 repo_id, entry = resolve_repo(registry, obj.get("repo", ""))
                 commands = cfg.get("commands", {}).get(repo_id, {})
@@ -473,6 +578,7 @@ def process_pending_once(cfg: dict[str, Any]) -> int:
         result_upload_s = round(time.monotonic() - upload_started, 4)
         result_upload_transport = str(getattr(transport, "last_mode", "unknown"))
         _mark_published(filename, source="processed")
+        cleanup_status, cleanup_s, cleanup_transport = _cleanup_remote_request(transport, filename)
         _append_metric({
             "event": "transaction",
             "transaction_id": filename[:-5],
@@ -483,6 +589,9 @@ def process_pending_once(cfg: dict[str, Any]) -> int:
             "transaction_list_transport": transaction_list_transport,
             "transaction_download_transport": transaction_download_transport,
             "result_upload_transport": result_upload_transport,
+            "request_cleanup_status": cleanup_status,
+            "request_cleanup_s": cleanup_s,
+            "request_cleanup_transport": cleanup_transport,
             "request_total_s": round(time.monotonic() - request_started, 4),
             "poll_total_s": round(time.monotonic() - poll_started, 4),
             "recorded_at": utc_now(),

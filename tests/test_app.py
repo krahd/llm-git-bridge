@@ -22,6 +22,8 @@ class FakeTransport:
         self.files: dict[str, str] = {}
         self.list_calls: list[str] = []
         self.ensure_dir_calls: list[str] = []
+        self.delete_calls: list[tuple[str, bool]] = []
+        self.last_mode = "fake"
 
     def ensure_dir(self, rel: str) -> None:
         self.ensure_dir_calls.append(rel)
@@ -36,6 +38,11 @@ class FakeTransport:
                 if "/" not in rest:
                     out.append(rest)
         return sorted(out)
+
+    def delete_file(self, rel: str, *, allow_fallback: bool = True) -> bool:
+        self.delete_calls.append((rel, allow_fallback))
+        self.files.pop(rel, None)
+        return True
 
     def download_text(self, rel: str, local: Path) -> str:
         text = self.files[rel]
@@ -210,6 +217,8 @@ class AppTests(unittest.TestCase):
         event = json.loads(metrics[-1])
         self.assertEqual(event["event"], "transaction")
         self.assertIn("result_upload_s", event)
+        self.assertEqual(event["request_cleanup_status"], "success")
+        self.assertNotIn(f"v2/transactions/{txid}.json", self.fake.files)
         self.assertNotIn("path", json.dumps(event))
         self.fake.list_calls.clear()
         self.assertEqual(app.process_pending_once(self.cfg), 0)
@@ -257,6 +266,38 @@ class AppTests(unittest.TestCase):
         blob = json.dumps(result["metrics"])
         self.assertNotIn("/private/repo", blob)
         self.assertNotIn("secret", blob)
+
+    def test_idle_poll_reaps_acknowledged_request_without_subprocess_fallback(self):
+        txid = "tx-old-request"
+        filename = f"{txid}.json"
+        self.fake.files[f"v2/transactions/{filename}"] = "{}"
+        app._mark_published(filename, source="test")
+        self.assertEqual(app.process_pending_once(self.cfg), 0)
+        self.assertNotIn(f"v2/transactions/{filename}", self.fake.files)
+        self.assertEqual(self.fake.delete_calls[-1], (f"v2/transactions/{filename}", False))
+
+    def test_doctor_request_is_sanitized(self):
+        txid = "tx-doctor"
+        self.fake.files[f"v2/transactions/{txid}.json"] = json.dumps({
+            "protocol": 2, "kind": "doctor", "transaction_id": txid
+        })
+        with patch("llm_git_bridge.app._version_line", side_effect=["git version 2.51.0", "rclone v1.72.0"]):
+            with patch("llm_git_bridge.app._rclone_remote_summary", return_value={
+                "remote_type": "drive",
+                "custom_drive_client_id_configured": True,
+                "config_inspected": True,
+            }):
+                with patch("llm_git_bridge.app.RcloneRCProcess.healthy", return_value=True):
+                    self.assertEqual(app.process_pending_once(self.cfg), 1)
+        result = json.loads(self.fake.files[f"v2/results/{txid}.json"] )
+        self.assertEqual(result["operation"], "doctor")
+        self.assertEqual(result["doctor"]["remote_type"], "drive")
+        self.assertTrue(result["doctor"]["custom_drive_client_id_configured"])
+        self.assertTrue(result["doctor"]["rc_socket_healthy"])
+        blob = json.dumps(result)
+        self.assertNotIn("client_secret", blob)
+        self.assertNotIn("token", blob)
+        self.assertNotIn("/Users/", blob)
 
     def test_diagnostics_limit_is_bounded(self):
         txid = "tx-diagnostics-bad"
@@ -318,6 +359,29 @@ class TransportTests(unittest.TestCase):
             self.assertEqual(payload["srcRemote"], local.name)
             self.assertEqual(payload["dstFs"], "fake:")
             self.assertEqual(payload["dstRemote"], "v2/results/result.json")
+
+    def test_delete_uses_rc_without_subprocess_when_available(self):
+        with tempfile.TemporaryDirectory(prefix="llmgb-rc-") as tmp:
+            sock = Path(tmp) / "rclone.sock"
+            sock.touch()
+            transport = RcloneTransport("fake", rc_socket=sock)
+            with patch("llm_git_bridge.transport._rc_request", return_value={}) as mocked:
+                with patch("llm_git_bridge.transport.run") as fallback:
+                    self.assertTrue(transport.delete_file("v2/transactions/tx.json"))
+            fallback.assert_not_called()
+            self.assertEqual(transport.last_mode, "rcd")
+            self.assertEqual(mocked.call_args.args[1], "operations/deletefile")
+            self.assertEqual(mocked.call_args.args[2]["remote"], "v2/transactions/tx.json")
+
+    def test_delete_can_defer_instead_of_spawning_fallback(self):
+        with tempfile.TemporaryDirectory(prefix="llmgb-rc-") as tmp:
+            sock = Path(tmp) / "rclone.sock"
+            sock.touch()
+            transport = RcloneTransport("fake", rc_socket=sock)
+            with patch("llm_git_bridge.transport._rc_request", side_effect=BridgeError("rc down")):
+                with patch("llm_git_bridge.transport.run") as fallback:
+                    self.assertFalse(transport.delete_file("v2/transactions/tx.json", allow_fallback=False))
+            fallback.assert_not_called()
 
     def test_rc_is_enabled_by_default_but_can_be_disabled(self):
         self.assertTrue(app.default_config()["transport"]["rc_enabled"])

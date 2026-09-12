@@ -165,6 +165,8 @@ class RcloneTransport:
         list_timeout: float = 5,
         rc_list_timeout: float = 3,
         mkdir_timeout: float = 12,
+        delete_timeout: float = 3,
+        rc_delete_timeout: float = 2,
         rc_socket: Path | None = None,
     ):
         remote = remote.rstrip(":")
@@ -175,6 +177,8 @@ class RcloneTransport:
         self.list_timeout = max(1.0, min(float(list_timeout), float(timeout)))
         self.rc_list_timeout = max(0.5, min(float(rc_list_timeout), self.list_timeout, float(timeout)))
         self.mkdir_timeout = max(1.0, min(float(mkdir_timeout), float(timeout)))
+        self.delete_timeout = max(1.0, min(float(delete_timeout), float(timeout)))
+        self.rc_delete_timeout = max(0.5, min(float(rc_delete_timeout), self.delete_timeout, float(timeout)))
         self.rc_socket = rc_socket.expanduser() if rc_socket is not None else None
         self.last_mode = "subprocess"
 
@@ -269,6 +273,23 @@ class RcloneTransport:
         ) is None:
             self.last_mode = "subprocess"
             run(["rclone", "copyto", str(local_tmp), self._remote(rel)], timeout=self.timeout)
+
+    def delete_file(self, rel: str, *, allow_fallback: bool = True) -> bool:
+        rel = rel.lstrip("/")
+        if self._rc(
+            "operations/deletefile",
+            {"fs": f"{self.remote}:", "remote": rel},
+            timeout=self.rc_delete_timeout,
+        ) is not None:
+            return True
+        if not allow_fallback:
+            return False
+        self.last_mode = "subprocess"
+        proc = run(["rclone", "deletefile", self._remote(rel)], check=False, timeout=self.delete_timeout)
+        if proc.returncode != 0:
+            detail = (proc.stderr or proc.stdout).strip()
+            raise BridgeError(f"rclone delete failed for {rel!r}: {detail or 'unknown error'}")
+        return True
 
     def upload_json(self, rel: str, obj: Any, local_tmp: Path) -> None:
         self.upload_text(rel, json.dumps(obj, indent=2, sort_keys=True) + "\n", local_tmp)

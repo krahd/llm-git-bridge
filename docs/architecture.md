@@ -28,7 +28,7 @@ Bridge commits suppress Git hooks and local commit signing. Patch-created symlin
 
 ## Performance principle
 
-Drive round trips dominate latency. The watcher performs one transaction-directory listing per idle poll. Remote result reconciliation now happens once at watcher startup, rebuilding persistent local publication markers before any transaction is processed; newly observed transactions therefore do not pay a second result-directory listing. Materialising one repository refreshes only that repository rather than rescanning every configured root.
+Drive round trips dominate latency. The watcher performs one transaction-directory listing per idle poll. Processed requests are best-effort removed from that inbox after their durable result is published, with one older acknowledged request reaped during idle polls; this prevents polling cost from growing with the lifetime transaction count. Remote result reconciliation now happens once at watcher startup, rebuilding persistent local publication markers before any transaction is processed; newly observed transactions therefore do not pay a second result-directory listing. Materialising one repository refreshes only that repository rather than rescanning every configured root.
 
 Runtime registry and snapshot writes go directly through `rclone copyto` rather than issuing a separate `rclone mkdir` first. The mailbox's fixed top-level directories are created during setup, and explicit mkdir operations use the same short timeout policy as polling. Branch snapshot publication is also deferred by default, removing a non-critical Drive upload from the edit acknowledgement path.
 
