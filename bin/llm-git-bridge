@@ -1,0 +1,19 @@
+#!/bin/sh
+set -eu
+SCRIPT_DIR=$(CDPATH= cd -- "$(dirname -- "$0")" && pwd)
+ROOT=$(dirname -- "$SCRIPT_DIR")
+if [ -x /opt/homebrew/bin/python3 ]; then
+  PYTHON=/opt/homebrew/bin/python3
+else
+  PYTHON=$(command -v python3 || true)
+fi
+if [ -z "$PYTHON" ]; then
+  echo "python3 not found" >&2
+  exit 127
+fi
+if [ -n "${PYTHONPATH:-}" ]; then
+  export PYTHONPATH="$ROOT/src:$PYTHONPATH"
+else
+  export PYTHONPATH="$ROOT/src"
+fi
+exec "$PYTHON" -m llm_git_bridge "$@"

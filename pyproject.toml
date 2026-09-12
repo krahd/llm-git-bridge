@@ -1,0 +1,19 @@
+[build-system]
+requires = ["setuptools>=68"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "llm-git-bridge"
+version = "0.2.0a1"
+description = "Provider-agnostic bridge between LLM agents and local Git repositories"
+requires-python = ">=3.11"
+dependencies = []
+
+[project.scripts]
+llm-git-bridge = "llm_git_bridge.app:main"
+
+[tool.setuptools]
+package-dir = {"" = "src"}
+
+[tool.setuptools.packages.find]
+where = ["src"]
