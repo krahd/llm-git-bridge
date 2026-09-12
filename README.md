@@ -49,23 +49,26 @@ A transaction is one JSON object with an inline unified diff. This avoids the mu
 }
 ```
 
-The daemon does not execute arbitrary shell commands from a remote transaction. `run` contains symbolic names whose argv are configured locally.
+The daemon does not accept arbitrary shell commands or argv from a remote transaction. `run` contains symbolic names whose argv are configured locally. A configured test/build command can still execute code from the patched repository as the local user; this is an explicit trust boundary, not an OS sandbox. See `docs/security.md`.
 
 Push is a separate, local opt-in. Enable it per repository with `bin/llm-git-bridge configure-push <repo> enable`; a transaction must additionally request `"push": true`. The bridge then pushes only the validated safe-prefix branch to the hard-coded `origin` remote, with no force option and with Git hooks disabled.
 
 ## Safety defaults
 
 - repository paths stay local and are not included in the remote registry;
-- sensitive files and common credential formats are excluded from snapshots;
+- sensitive files, common credential formats, private-key/service-account content, and sensitive omission pathnames are excluded from snapshots;
 - `.git` history is not uploaded;
 - tracked local modifications block remote patch application;
 - remote branches must use the configured safe prefix (`ai/` by default);
+- transaction IDs/command names are restricted tokens; duplicate JSON keys and oversized requests are rejected;
+- symlink/submodule changes, `.gitmodules`, and common CI/automation control paths are protected;
 - push is disabled by default and can only be enabled per repository by local configuration;
 - when enabled and explicitly requested, only the transaction's validated safe-prefix branch is pushed to `origin`, without force;
 - merge, force-push, remote mutation, and repository administration are not implemented;
-- each transaction is processed in an isolated Git worktree;
+- each transaction is processed in an isolated Git worktree; only one mailbox watcher can run at a time;
+- configured-command output stays local and bounded, common secret environment variables are removed, and leftover child processes are terminated;
 - base SHA checks prevent silently applying stale patches.
 
 ## Documentation
 
-See `docs/architecture.md`, `docs/protocol.md`, `docs/security.md`, and `docs/project-state.md`.
+See `docs/architecture.md`, `docs/protocol.md`, `docs/security.md`, `docs/project-state.md`, and `docs/google-drive-oauth.md`.

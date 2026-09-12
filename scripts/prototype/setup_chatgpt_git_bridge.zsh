@@ -1,11 +1,11 @@
 #!/bin/zsh
 set -euo pipefail
 
-REPO_PATH="${CHATGPT_GIT_BRIDGE_REPO:-/Users/tom/tom-repos/projects/bridge-test}"
+REPO_PATH="${CHATGPT_GIT_BRIDGE_REPO:-$HOME/path/to/repository}"
 PYTHON_BIN="${CHATGPT_GIT_BRIDGE_PYTHON:-/opt/homebrew/bin/python3}"
 REMOTE_NAME="${CHATGPT_GIT_BRIDGE_REMOTE:-chatgpt-git-bridge}"
-BRIDGE_FOLDER_ID="${CHATGPT_GIT_BRIDGE_FOLDER_ID:-1Afal37kSb1bS_0h0sZnNjXPms1o1oxID}"
-EXPECTED_GOOGLE_ACCOUNT="${CHATGPT_GIT_BRIDGE_GOOGLE_ACCOUNT:-tola1460@colorado.edu}"
+BRIDGE_FOLDER_ID="${CHATGPT_GIT_BRIDGE_FOLDER_ID:-}"
+EXPECTED_GOOGLE_ACCOUNT="${CHATGPT_GIT_BRIDGE_GOOGLE_ACCOUNT:-}"
 CONFIG_ROOT="${XDG_CONFIG_HOME:-$HOME/.config}/chatgpt-git-bridge"
 STATE_ROOT="${XDG_STATE_HOME:-$HOME/.local/state}/chatgpt-git-bridge"
 MAX_TEXT_FILE_BYTES="${CHATGPT_GIT_BRIDGE_MAX_TEXT_FILE_BYTES:-2000000}"
@@ -28,6 +28,7 @@ log "Expected Google account: $EXPECTED_GOOGLE_ACCOUNT"
 print
 
 [[ "$(uname -s)" == "Darwin" ]] || die "This bootstrap script currently supports macOS only."
+[[ -n "$BRIDGE_FOLDER_ID" ]] || die "Set CHATGPT_GIT_BRIDGE_FOLDER_ID before using this historical prototype."
 [[ -d "$REPO_PATH" ]] || die "Repository directory does not exist: $REPO_PATH"
 git -C "$REPO_PATH" rev-parse --is-inside-work-tree >/dev/null 2>&1 || die "Not a Git working tree: $REPO_PATH"
 

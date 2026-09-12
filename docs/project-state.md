@@ -72,3 +72,21 @@ Self-hosting and opt-in safe pushing are now proven. The bridge has created, tes
 After activation, a no-test push transaction used persistent `rcd` for transaction listing and download: listing fell to 0.343 s, request download to 0.611 s, and result upload to 1.749 s. The complete daemon poll was 6.980 s including 4.089 s of local Git work and a 2.385 s GitHub push. A diagnostics-only request completed its daemon poll in 4.000 s. This validates the persistent transport as a material latency improvement over per-operation rclone subprocesses.
 
 A later explicit full materialisation exposed one transient RC-list failure: the automatic subprocess fallback succeeded but consumed 13.341 s before the request ran; the following poll was back on `rcd`. The next resilience step therefore bounds fallback list latency and restarts a dead RC process without changing mailbox semantics.
+
+## Repeated adversarial hardening audit (2026-09-12)
+
+A second adversarial pass treated the mailbox writer and proposed patch as hostile while preserving the explicit local-command trust boundary. The audit found and fixed several classes of defects that the earlier functional suite did not exercise:
+
+- transaction IDs can no longer contain dot/path-like components, and duplicate JSON keys are rejected;
+- request downloads, result uploads, metrics, and command-output capture are bounded;
+- sensitive rename/copy sources are validated independently, symlink/submodule deletion is rejected, high-confidence private-key/service-account content is filtered, and sensitive omission paths are not disclosed;
+- `.gitmodules` and common CI/automation control paths are protected;
+- configured commands now import/test the isolated worktree rather than the authoritative checkout, cannot silently change the staged tree/Git control state, receive a scrubbed ambient environment, produce local-only bounded logs, and have leftover process-group descendants terminated;
+- default transactions no longer build snapshots at all; explicit post-commit snapshot failures and push timeouts are secondary rather than misreporting a durable local commit as failed;
+- only one watcher can consume the mailbox at a time, and stale persistent-rclone processes are replaced on watcher startup;
+- RC download fallbacks use separate local temporary paths, while ambiguous mutating RC timeouts are never raced with an immediate second writer; recovery checks for an already-published remote result before retrying;
+- user config/state directories are tightened to user-only permissions and transient per-request local patch/inbox state is removed after acknowledgement;
+- the Google Drive OAuth migration helper installs no Google software, authenticates through a private temporary one-remote rclone config, preserves unrelated config bytes/non-OAuth settings, serializes concurrent migrations, rolls back on failure/cancellation, and validates the existing mailbox before installing the new token;
+- remote result acknowledgements are HMAC-authenticated with a local-only key before startup reconciliation can rebuild replay markers, preventing a mailbox writer from forging a result to suppress execution.
+
+The audit also makes the residual trust boundary explicit: a locally configured test/build command can execute code from the remotely patched worktree as the local user. Git-state verification, environment scrubbing, output/process bounds, and fixed argv reduce accidental/escalation paths but are not a substitute for OS-level sandboxing. Repositories requiring hostile-code execution isolation must run those commands in an external VM/container/low-privilege environment.

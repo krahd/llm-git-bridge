@@ -9,7 +9,7 @@ from unittest.mock import patch
 
 from llm_git_bridge import app
 from llm_git_bridge.core import BridgeError, build_registry, save_json
-from llm_git_bridge.transport import RcloneTransport
+from llm_git_bridge.transport import RcloneTransport, RemoteFileEntry
 
 
 def sh(cwd: Path, *args: str) -> str:
@@ -23,29 +23,35 @@ class FakeTransport:
         self.list_calls: list[str] = []
         self.ensure_dir_calls: list[str] = []
         self.delete_calls: list[tuple[str, bool]] = []
+        self.control_upload_calls: list[str] = []
         self.last_mode = "fake"
 
     def ensure_dir(self, rel: str) -> None:
         self.ensure_dir_calls.append(rel)
 
     def list_files(self, rel: str) -> list[str]:
+        return [entry.name for entry in self.list_entries(rel)]
+
+    def list_entries(self, rel: str) -> list[RemoteFileEntry]:
         self.list_calls.append(rel)
         prefix = rel.rstrip("/") + "/"
-        out = []
+        out: list[RemoteFileEntry] = []
         for path in self.files:
             if path.startswith(prefix):
                 rest = path[len(prefix):]
                 if "/" not in rest:
-                    out.append(rest)
-        return sorted(out)
+                    out.append(RemoteFileEntry(rest, len(self.files[path].encode("utf-8"))))
+        return sorted(out, key=lambda entry: entry.name)
 
     def delete_file(self, rel: str, *, allow_fallback: bool = True) -> bool:
         self.delete_calls.append((rel, allow_fallback))
         self.files.pop(rel, None)
         return True
 
-    def download_text(self, rel: str, local: Path) -> str:
+    def download_text(self, rel: str, local: Path, *, max_bytes: int | None = None) -> str:
         text = self.files[rel]
+        if max_bytes is not None and len(text.encode("utf-8")) > max_bytes:
+            raise BridgeError("remote request exceeds maximum allowed size")
         local.parent.mkdir(parents=True, exist_ok=True)
         local.write_text(text, encoding="utf-8")
         return text
@@ -55,6 +61,10 @@ class FakeTransport:
         text = json.dumps(obj, sort_keys=True) + "\n"
         local_tmp.write_text(text, encoding="utf-8")
         self.files[rel] = text
+
+    def upload_control_json(self, rel: str, obj, local_tmp: Path) -> None:
+        self.control_upload_calls.append(rel)
+        self.upload_json(rel, obj, local_tmp)
 
 
 class AppTests(unittest.TestCase):
@@ -219,17 +229,57 @@ class AppTests(unittest.TestCase):
         self.assertIn("result_upload_s", event)
         self.assertEqual(event["request_cleanup_status"], "success")
         self.assertNotIn(f"v2/transactions/{txid}.json", self.fake.files)
+        self.assertIn(f"v2/results/{txid}.json", self.fake.control_upload_calls)
+        self.assertFalse((app.STATE_DIR / "inbox" / f"{txid}.json").exists())
+        self.assertFalse((app.STATE_DIR / "transactions" / txid).exists())
         self.assertNotIn("path", json.dumps(event))
         self.fake.list_calls.clear()
         self.assertEqual(app.process_pending_once(self.cfg), 0)
         self.assertEqual(self.fake.list_calls, ["v2/transactions"])
+
+    def test_local_result_recovery_checks_remote_before_reupload(self):
+        txid = "tx-recovery-existing"
+        filename = f"{txid}.json"
+        self.fake.files[f"v2/transactions/{filename}"] = "{}"
+        local_result = app.STATE_DIR / "results" / filename
+        save_json(local_result, {"status": "success", "transaction_id": txid})
+        remote_result = app._sign_result(filename, {"status": "success", "transaction_id": txid})
+        self.fake.files[f"v2/results/{filename}"] = json.dumps(remote_result)
+        with patch.object(self.fake, "upload_json", wraps=self.fake.upload_json) as upload:
+            self.assertEqual(app.process_pending_once(self.cfg), 1)
+        upload.assert_not_called()
+        self.assertTrue((app.PUBLISHED_DIR / filename).exists())
+        self.assertNotIn(f"v2/transactions/{filename}", self.fake.files)
+
+    def test_young_local_result_is_not_immediately_reuploaded_after_ambiguous_failure(self):
+        txid = "tx-recovery-grace"
+        filename = f"{txid}.json"
+        self.fake.files[f"v2/transactions/{filename}"] = "{}"
+        local_result = app.STATE_DIR / "results" / filename
+        save_json(local_result, {"status": "success", "transaction_id": txid})
+        self.assertEqual(app.process_pending_once(self.cfg), 0)
+        self.assertFalse((app.PUBLISHED_DIR / filename).exists())
+        self.assertIn(f"v2/transactions/{filename}", self.fake.files)
+
+    def test_future_dated_local_result_does_not_block_recovery_forever(self):
+        txid = "tx-recovery-clock-skew"
+        filename = f"{txid}.json"
+        self.fake.files[f"v2/transactions/{filename}"] = "{}"
+        local_result = app.STATE_DIR / "results" / filename
+        save_json(local_result, {"status": "success", "transaction_id": txid})
+        future = __import__("time").time() + 3600
+        __import__("os").utime(local_result, (future, future))
+        self.assertEqual(app.process_pending_once(self.cfg), 1)
+        self.assertTrue((app.PUBLISHED_DIR / filename).exists())
 
     def test_startup_reconciliation_prevents_replay_after_local_state_loss(self):
         txid = "tx-already"
         self.fake.files[f"v2/transactions/{txid}.json"] = json.dumps({
             "protocol": 2, "kind": "materialize", "transaction_id": txid, "repo": "does-not-matter"
         })
-        self.fake.files[f"v2/results/{txid}.json"] = json.dumps({"status": "success"})
+        filename = f"{txid}.json"
+        remote_result = app._sign_result(filename, {"status": "success", "transaction_id": txid})
+        self.fake.files[f"v2/results/{filename}"] = json.dumps(remote_result)
         self.assertEqual(app.reconcile_remote_results(self.cfg), 1)
         self.assertTrue((app.PUBLISHED_DIR / f"{txid}.json").exists())
         self.fake.list_calls.clear()
@@ -238,12 +288,42 @@ class AppTests(unittest.TestCase):
 
     def test_reconciliation_is_idempotent(self):
         txid = "tx-already"
-        self.fake.files[f"v2/results/{txid}.json"] = json.dumps({"status": "success"})
+        filename = f"{txid}.json"
+        self.fake.files[f"v2/transactions/{filename}"] = json.dumps({
+            "protocol": 2, "kind": "doctor", "transaction_id": txid
+        })
+        remote_result = app._sign_result(filename, {"status": "success", "transaction_id": txid})
+        self.fake.files[f"v2/results/{filename}"] = json.dumps(remote_result)
         self.assertEqual(app.reconcile_remote_results(self.cfg), 1)
         self.assertEqual(app.reconcile_remote_results(self.cfg), 0)
         lines = (app.STATE_DIR / "metrics.jsonl").read_text(encoding="utf-8").splitlines()
         self.assertEqual(len(lines), 2)
         self.assertEqual(json.loads(lines[-1])["event"], "startup-reconcile")
+
+    def test_startup_reconciliation_rejects_forged_remote_result(self):
+        txid = "tx-forged-result"
+        filename = f"{txid}.json"
+        self.fake.files[f"v2/transactions/{filename}"] = json.dumps({
+            "protocol": 2, "kind": "doctor", "transaction_id": txid
+        })
+        self.fake.files[f"v2/results/{filename}"] = json.dumps({
+            "status": "success", "transaction_id": txid
+        })
+        self.assertEqual(app.reconcile_remote_results(self.cfg), 0)
+        self.assertFalse((app.PUBLISHED_DIR / filename).exists())
+
+    def test_local_result_recovery_refuses_forged_remote_conflict(self):
+        txid = "tx-forged-conflict"
+        filename = f"{txid}.json"
+        self.fake.files[f"v2/transactions/{filename}"] = "{}"
+        local_result = app.STATE_DIR / "results" / filename
+        save_json(local_result, {"status": "success", "transaction_id": txid})
+        self.fake.files[f"v2/results/{filename}"] = json.dumps({
+            "status": "success", "transaction_id": txid
+        })
+        with self.assertRaisesRegex(BridgeError, "unauthenticated remote result"):
+            app.process_pending_once(self.cfg)
+        self.assertFalse((app.PUBLISHED_DIR / filename).exists())
 
     def test_diagnostics_request_returns_only_sanitized_metrics(self):
         metrics = app.STATE_DIR / "metrics.jsonl"
@@ -310,6 +390,95 @@ class AppTests(unittest.TestCase):
         self.assertIn("diagnostics limit", result["error"])
 
 
+    def test_duplicate_json_keys_are_rejected(self):
+        txid = "tx-duplicate-json"
+        self.fake.files[f"v2/transactions/{txid}.json"] = (
+            '{"protocol":2,"kind":"diagnostics","transaction_id":"tx-duplicate-json",'
+            '"transaction_id":"tx-other"}'
+        )
+        self.assertEqual(app.process_pending_once(self.cfg), 1)
+        result = json.loads(self.fake.files[f"v2/results/{txid}.json"])
+        self.assertEqual(result["status"], "error")
+        self.assertIn("duplicate JSON key", result["error"])
+
+    def test_non_bridge_exception_is_not_exposed_remotely(self):
+        txid = "tx-internal-error"
+        self.fake.files[f"v2/transactions/{txid}.json"] = json.dumps({
+            "protocol": 2, "kind": "doctor", "transaction_id": txid
+        })
+        with patch("llm_git_bridge.app._process_doctor_request", side_effect=RuntimeError("/Users/tom/SECRET_TOKEN")):
+            self.assertEqual(app.process_pending_once(self.cfg), 1)
+        result = json.loads(self.fake.files[f"v2/results/{txid}.json"])
+        self.assertEqual(result["error"], "internal bridge error")
+        self.assertNotIn("SECRET_TOKEN", json.dumps(result))
+        self.assertNotIn("/Users/", json.dumps(result))
+
+    def test_oversized_request_is_rejected_before_json_parse(self):
+        txid = "tx-oversized"
+        self.fake.files[f"v2/transactions/{txid}.json"] = "x" * 100
+        with patch.object(self.fake, "download_text", wraps=self.fake.download_text) as download:
+            with patch.object(app, "MAX_REQUEST_BYTES", 16):
+                self.assertEqual(app.process_pending_once(self.cfg), 1)
+        download.assert_not_called()
+        result = json.loads(self.fake.files[f"v2/results/{txid}.json"])
+        self.assertEqual(result["status"], "error")
+        self.assertIn("maximum allowed size", result["error"])
+
+    def test_metric_log_rotates_when_bounded_size_is_reached(self):
+        path = app.STATE_DIR / "metrics.jsonl"
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text("x" * 100, encoding="utf-8")
+        with patch.object(app, "MAX_METRICS_BYTES", 50):
+            app._append_metric({"event": "test", "recorded_at": "now"})
+        self.assertTrue(path.with_name("metrics.jsonl.1").exists())
+        self.assertIn('"event": "test"', path.read_text(encoding="utf-8"))
+
+    def test_local_result_cache_is_bounded_without_removing_replay_markers(self):
+        result_dir = app.STATE_DIR / "results"
+        result_dir.mkdir(parents=True, exist_ok=True)
+        for index in range(5):
+            filename = f"tx-{index}.json"
+            (result_dir / filename).write_text("{}\n", encoding="utf-8")
+            app._mark_published(filename, source="test")
+        app._prune_local_results(limit=2)
+        self.assertEqual(len(list(result_dir.glob("*.json"))), 2)
+        self.assertEqual(len(list(app.PUBLISHED_DIR.glob("*.json"))), 5)
+
+    def test_local_request_cleanup_removes_command_logs_and_workspaces(self):
+        filename = "tx-clean.json"
+        txid = "tx-clean"
+        (app.STATE_DIR / "inbox").mkdir(parents=True, exist_ok=True)
+        (app.STATE_DIR / "inbox" / filename).write_text("{}\n", encoding="utf-8")
+        for parent in ("transactions", "command-logs", "command-runs", "command-homes"):
+            path = app.STATE_DIR / parent / txid
+            path.mkdir(parents=True, exist_ok=True)
+            (path / "artifact").write_text("x", encoding="utf-8")
+        app._cleanup_local_request_artifacts(filename)
+        self.assertFalse((app.STATE_DIR / "inbox" / filename).exists())
+        for parent in ("transactions", "command-logs", "command-runs", "command-homes"):
+            self.assertFalse((app.STATE_DIR / parent / txid).exists())
+
+    def test_request_identity_rejects_dot_transaction_ids(self):
+        with self.assertRaises(BridgeError):
+            app._validate_request_identity({"protocol": 2, "transaction_id": ".."}, "...json")
+
+
+class WatchLockTests(unittest.TestCase):
+    def test_watch_lock_rejects_second_consumer(self):
+        with tempfile.TemporaryDirectory(prefix="llmgb-lock-") as tmp:
+            old_state = app.STATE_DIR
+            app.STATE_DIR = Path(tmp)
+            first = None
+            try:
+                first = app._acquire_watch_lock()
+                with self.assertRaises(BridgeError):
+                    app._acquire_watch_lock()
+            finally:
+                if first is not None:
+                    app._release_watch_lock(first)
+                app.STATE_DIR = old_state
+
+
 class TransportTests(unittest.TestCase):
     def test_list_uses_persistent_rc_when_socket_is_available(self):
         with tempfile.TemporaryDirectory(prefix="llmgb-rc-") as tmp:
@@ -317,11 +486,15 @@ class TransportTests(unittest.TestCase):
             sock.touch()
             transport = RcloneTransport("fake", rc_socket=sock)
             response = {"list": [
-                {"Name": "b.json", "Path": "b.json", "IsDir": False},
-                {"Name": "a.json", "Path": "a.json", "IsDir": False},
+                {"Name": "b.json", "Path": "b.json", "IsDir": False, "Size": 2},
+                {"Name": "a.json", "Path": "a.json", "IsDir": False, "Size": 1},
             ]}
             with patch("llm_git_bridge.transport._rc_request", return_value=response) as mocked:
                 self.assertEqual(transport.list_files("v2/transactions"), ["a.json", "b.json"])
+                self.assertEqual(
+                    transport.list_entries("v2/transactions"),
+                    [RemoteFileEntry("a.json", 1), RemoteFileEntry("b.json", 2)],
+                )
             self.assertEqual(transport.last_mode, "rcd")
             self.assertEqual(mocked.call_args.args[1], "operations/list")
             self.assertEqual(mocked.call_args.args[2]["fs"], "fake:")
@@ -334,7 +507,13 @@ class TransportTests(unittest.TestCase):
             sock = Path(tmp) / "rclone.sock"
             sock.touch()
             transport = RcloneTransport("fake", rc_socket=sock)
-            proc = subprocess.CompletedProcess(["rclone"], 0, stdout="b.json\na.json\n", stderr="")
+            proc = subprocess.CompletedProcess(
+                ["rclone"],
+                0,
+                stdout='[{"Name":"b.json","Path":"b.json","Size":2,"IsDir":false},'
+                       '{"Name":"a.json","Path":"a.json","Size":1,"IsDir":false}]',
+                stderr="",
+            )
             with patch("llm_git_bridge.transport._rc_request", side_effect=BridgeError("rc down")):
                 with patch("llm_git_bridge.transport.run", return_value=proc) as mocked:
                     self.assertEqual(transport.list_files("v2/transactions"), ["a.json", "b.json"])
@@ -349,9 +528,10 @@ class TransportTests(unittest.TestCase):
             transport = RcloneTransport("fake", rc_socket=sock, download_timeout=8, rc_download_timeout=4)
             local = root / "inbox" / "tx.json"
 
-            def rc_side_effect(_socket, _command, _payload, **_kwargs):
-                local.parent.mkdir(parents=True, exist_ok=True)
-                local.write_text("{}\n", encoding="utf-8")
+            def rc_side_effect(_socket, _command, payload, **_kwargs):
+                dst = Path(payload["dstFs"]) / payload["dstRemote"]
+                dst.parent.mkdir(parents=True, exist_ok=True)
+                dst.write_text("{}\n", encoding="utf-8")
                 return {}
 
             with patch("llm_git_bridge.transport._rc_request", side_effect=rc_side_effect) as mocked:
@@ -369,10 +549,11 @@ class TransportTests(unittest.TestCase):
             transport = RcloneTransport("fake", rc_socket=sock, timeout=60, download_timeout=7, rc_download_timeout=3)
             local = root / "inbox" / "tx.json"
 
-            def fallback_side_effect(_argv, **_kwargs):
-                local.parent.mkdir(parents=True, exist_ok=True)
-                local.write_text("{}\n", encoding="utf-8")
-                return subprocess.CompletedProcess(_argv, 0, stdout="", stderr="")
+            def fallback_side_effect(argv, **_kwargs):
+                dst = Path(argv[-1])
+                dst.parent.mkdir(parents=True, exist_ok=True)
+                dst.write_text("{}\n", encoding="utf-8")
+                return subprocess.CompletedProcess(argv, 0, stdout="", stderr="")
 
             with patch("llm_git_bridge.transport._rc_request", side_effect=BridgeError("rc slow")):
                 with patch("llm_git_bridge.transport.run", side_effect=fallback_side_effect) as mocked:
@@ -443,7 +624,7 @@ class TransportTests(unittest.TestCase):
 
     def test_list_uses_short_poll_timeout(self):
         transport = RcloneTransport("fake", timeout=60, list_timeout=7)
-        proc = subprocess.CompletedProcess(["rclone"], 0, stdout="", stderr="")
+        proc = subprocess.CompletedProcess(["rclone"], 0, stdout="[]", stderr="")
         with patch("llm_git_bridge.transport.run", return_value=proc) as mocked:
             self.assertEqual(transport.list_files("v2/transactions"), [])
         self.assertEqual(mocked.call_args.kwargs["timeout"], 7)
@@ -457,6 +638,23 @@ class TransportTests(unittest.TestCase):
         self.assertEqual(transport.rc_list_timeout, 5)
         transport = RcloneTransport("fake", timeout=60, list_timeout=5, rc_list_timeout=2)
         self.assertEqual(transport.rc_list_timeout, 2)
+
+    def test_retire_existing_rcd_requests_quit_and_removes_socket(self):
+        from llm_git_bridge import transport as transport_mod
+
+        with tempfile.TemporaryDirectory(prefix="llmgb-rc-") as tmp:
+            sock = Path(tmp) / "rclone.sock"
+            sock.touch()
+            ready = [True, False]
+
+            def fake_ready(_path, **_kwargs):
+                return ready.pop(0) if ready else False
+
+            with patch("llm_git_bridge.transport._rc_ready", side_effect=fake_ready):
+                with patch("llm_git_bridge.transport._rc_request", return_value={}) as request:
+                    transport_mod._retire_existing_rcd(sock, timeout=0.1)
+            self.assertEqual(request.call_args.args[1], "core/quit")
+            self.assertFalse(sock.exists())
 
     def test_rc_process_health_detects_dead_owned_process(self):
         with tempfile.TemporaryDirectory(prefix="llmgb-rc-") as tmp:
@@ -477,6 +675,122 @@ class TransportTests(unittest.TestCase):
     def test_mkdir_timeout_is_capped_by_general_timeout(self):
         transport = RcloneTransport("fake", timeout=5, mkdir_timeout=12)
         self.assertEqual(transport.mkdir_timeout, 5)
+
+
+    def test_list_rejects_duplicate_names_from_rc(self):
+        with tempfile.TemporaryDirectory(prefix="llmgb-rc-") as tmp:
+            sock = Path(tmp) / "rclone.sock"
+            sock.touch()
+            transport = RcloneTransport("fake", rc_socket=sock)
+            response = {"list": [
+                {"Name": "tx.json", "Path": "tx.json", "IsDir": False},
+                {"Name": "tx.json", "Path": "tx.json", "IsDir": False},
+            ]}
+            with patch("llm_git_bridge.transport._rc_request", return_value=response):
+                with self.assertRaises(BridgeError):
+                    transport.list_files("v2/transactions")
+
+    def test_list_rejects_duplicate_names_from_subprocess(self):
+        transport = RcloneTransport("fake")
+        proc = subprocess.CompletedProcess(
+            ["rclone"],
+            0,
+            stdout='[{"Name":"tx.json","Path":"tx.json","Size":1,"IsDir":false},'
+                   '{"Name":"tx.json","Path":"tx.json","Size":1,"IsDir":false}]',
+            stderr="",
+        )
+        with patch("llm_git_bridge.transport.run", return_value=proc):
+            with self.assertRaises(BridgeError):
+                transport.list_files("v2/transactions")
+
+    def test_list_entries_preserves_remote_size_metadata(self):
+        transport = RcloneTransport("fake")
+        proc = subprocess.CompletedProcess(
+            ["rclone"],
+            0,
+            stdout='[{"Name":"tx.json","Path":"tx.json","Size":123,"IsDir":false}]',
+            stderr="",
+        )
+        with patch("llm_git_bridge.transport.run", return_value=proc):
+            self.assertEqual(
+                transport.list_entries("v2/transactions"),
+                [RemoteFileEntry("tx.json", 123)],
+            )
+
+    def test_download_rejects_oversized_file_and_removes_local_copy(self):
+        with tempfile.TemporaryDirectory(prefix="llmgb-rc-") as tmp:
+            root = Path(tmp)
+            sock = root / "rclone.sock"
+            sock.touch()
+            transport = RcloneTransport("fake", rc_socket=sock)
+            local = root / "inbox" / "tx.json"
+
+            def rc_side_effect(_socket, _command, payload, **_kwargs):
+                dst = Path(payload["dstFs"]) / payload["dstRemote"]
+                dst.parent.mkdir(parents=True, exist_ok=True)
+                dst.write_text("x" * 100, encoding="utf-8")
+                return {}
+
+            with patch("llm_git_bridge.transport._rc_request", side_effect=rc_side_effect):
+                with self.assertRaises(BridgeError):
+                    transport.download_text("v2/transactions/tx.json", local, max_bytes=16)
+            self.assertFalse(local.exists())
+
+    def test_control_upload_uses_bounded_rc_timeout(self):
+        with tempfile.TemporaryDirectory(prefix="llmgb-rc-") as tmp:
+            root = Path(tmp)
+            sock = root / "rclone.sock"
+            sock.touch()
+            transport = RcloneTransport(
+                "fake", rc_socket=sock, timeout=60, control_upload_timeout=9, rc_control_upload_timeout=4
+            )
+            with patch("llm_git_bridge.transport._rc_request", return_value={}) as mocked:
+                transport.upload_control_json("v2/results/tx.json", {}, root / "out.json")
+            self.assertEqual(mocked.call_args.kwargs["timeout"], 4)
+
+    def test_control_upload_does_not_race_ambiguous_rc_failure_with_fallback(self):
+        with tempfile.TemporaryDirectory(prefix="llmgb-rc-") as tmp:
+            root = Path(tmp)
+            sock = root / "rclone.sock"
+            sock.touch()
+            transport = RcloneTransport(
+                "fake", rc_socket=sock, timeout=60, control_upload_timeout=7, rc_control_upload_timeout=3
+            )
+            with patch("llm_git_bridge.transport._rc_request", side_effect=BridgeError("rc timeout")):
+                with patch("llm_git_bridge.transport.run") as fallback:
+                    with self.assertRaises(BridgeError):
+                        transport.upload_control_json("v2/results/tx.json", {}, root / "out.json")
+            fallback.assert_not_called()
+
+    def test_control_upload_can_fallback_when_rc_socket_never_connected(self):
+        from llm_git_bridge import transport as transport_mod
+
+        with tempfile.TemporaryDirectory(prefix="llmgb-rc-") as tmp:
+            root = Path(tmp)
+            sock = root / "rclone.sock"
+            sock.touch()
+            transport = RcloneTransport(
+                "fake", rc_socket=sock, timeout=60, control_upload_timeout=7, rc_control_upload_timeout=3
+            )
+            proc = subprocess.CompletedProcess(["rclone"], 0, stdout="", stderr="")
+            with patch(
+                "llm_git_bridge.transport._rc_request",
+                side_effect=transport_mod._RcloneRCUnavailable("not connected"),
+            ):
+                with patch("llm_git_bridge.transport.run", return_value=proc) as fallback:
+                    transport.upload_control_json("v2/results/tx.json", {}, root / "out.json")
+            self.assertEqual(fallback.call_args.kwargs["timeout"], 7)
+
+    def test_control_upload_subprocess_timeout_is_bounded_when_rc_is_absent(self):
+        with tempfile.TemporaryDirectory(prefix="llmgb-rc-") as tmp:
+            root = Path(tmp)
+            transport = RcloneTransport(
+                "fake", timeout=60, control_upload_timeout=7, rc_control_upload_timeout=3
+            )
+            proc = subprocess.CompletedProcess(["rclone"], 0, stdout="", stderr="")
+            with patch("llm_git_bridge.transport.run", return_value=proc) as mocked:
+                transport.upload_control_json("v2/results/tx.json", {}, root / "out.json")
+            self.assertEqual(mocked.call_args.kwargs["timeout"], 7)
 
 
 if __name__ == "__main__":

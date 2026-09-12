@@ -1,3 +1,3 @@
-This is a Bridge Test.
+This file records the historical proof-of-concept bridge test.
 
-[ChatGPT bridge test](https://eo5ngxfjr6t918s.m.pipedream.net)
+The original temporary webhook endpoint has been removed; it is not part of the v0.2 architecture.

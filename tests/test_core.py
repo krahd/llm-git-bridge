@@ -5,8 +5,14 @@ import os
 import subprocess
 import sys
 import tempfile
+import time
 import unittest
+from unittest.mock import patch
 from pathlib import Path
+
+import llm_git_bridge.core as core_mod
+
+import llm_git_bridge.core as core
 
 from llm_git_bridge.core import (
     BridgeError,
@@ -14,6 +20,7 @@ from llm_git_bridge.core import (
     build_snapshot,
     process_transaction,
     public_registry,
+    run_configured_command,
     validate_transaction,
 )
 
@@ -59,12 +66,89 @@ class CoreTests(unittest.TestCase):
         sh(repo, "git", "add", ".env", "notes.txt", "blob.bin")
         snap = build_snapshot(repo, "demo")
         paths = {item["path"] for item in snap["files"]}
-        omitted = {item["path"]: item["reason"] for item in snap["omitted"]}
+        omitted_paths = {item.get("path"): item["reason"] for item in snap["omitted"] if "path" in item}
         self.assertIn("README.md", paths)
         self.assertIn("notes.txt", paths)
         self.assertNotIn(".env", paths)
-        self.assertEqual(omitted[".env"], "sensitive-or-excluded")
-        self.assertEqual(omitted["blob.bin"], "binary")
+        self.assertNotIn(".env", json.dumps(snap))
+        self.assertTrue(any(item["reason"] == "sensitive-or-excluded" for item in snap["omitted"]))
+        self.assertEqual(omitted_paths["blob.bin"], "binary")
+
+    def test_snapshot_excludes_private_key_content_under_innocuous_name(self):
+        repo = self.make_repo()
+        (repo / "notes.txt").write_text(
+            "-----BEGIN PRIVATE KEY-----\nsecret\n-----END PRIVATE KEY-----\n",
+            encoding="utf-8",
+        )
+        sh(repo, "git", "add", "notes.txt")
+        snap = build_snapshot(repo, "demo")
+        self.assertNotIn("notes.txt", {item["path"] for item in snap["files"]})
+        self.assertIn("sensitive-content", {item["reason"] for item in snap["omitted"]})
+        self.assertNotIn("notes.txt", json.dumps(snap["omitted"]))
+
+    def test_snapshot_excludes_common_secret_paths(self):
+        repo = self.make_repo()
+        (repo / ".kube").mkdir()
+        (repo / ".kube" / "config").write_text("token: secret\n", encoding="utf-8")
+        (repo / "terraform.tfstate").write_text("{}\n", encoding="utf-8")
+        sh(repo, "git", "add", ".kube/config", "terraform.tfstate")
+        snap = build_snapshot(repo, "demo")
+        paths = {item["path"] for item in snap["files"]}
+        self.assertNotIn(".kube/config", paths)
+        self.assertNotIn("terraform.tfstate", paths)
+
+    def test_configured_command_environment_scrubs_common_credentials(self):
+        repo = self.make_repo()
+        with __import__("unittest.mock").mock.patch.dict(
+            os.environ,
+            {
+                "OPENAI_API_KEY": "secret",
+                "GITHUB_TOKEN": "secret",
+                "AWS_SECRET_ACCESS_KEY": "secret",
+                "SSH_AUTH_SOCK": "/tmp/agent.sock",
+                "RCLONE_CONFIG_PASS": "secret",
+                "KUBECONFIG": "/tmp/kubeconfig",
+                "LLMGB_SAFE_TEST_VAR": "visible",
+            },
+            clear=False,
+        ):
+            env = core_mod._command_environment(repo, repo / ".private-home")
+        self.assertNotIn("OPENAI_API_KEY", env)
+        self.assertNotIn("GITHUB_TOKEN", env)
+        self.assertNotIn("AWS_SECRET_ACCESS_KEY", env)
+        self.assertNotIn("SSH_AUTH_SOCK", env)
+        self.assertNotIn("RCLONE_CONFIG_PASS", env)
+        self.assertNotIn("KUBECONFIG", env)
+        self.assertEqual(env["LLMGB_SAFE_TEST_VAR"], "visible")
+        self.assertEqual(env["HOME"], str(repo / ".private-home"))
+        self.assertEqual(env["GIT_CONFIG_GLOBAL"], "/dev/null")
+
+    def test_configured_command_output_is_bounded(self):
+        repo = self.make_repo()
+        result = run_configured_command(
+            [sys.executable, "-c", "import sys; sys.stdout.write('x' * 200000); sys.stderr.write('y' * 200000)"],
+            cwd=repo,
+            env=os.environ.copy(),
+            timeout=5,
+            output_limit=4096,
+        )
+        self.assertEqual(result.returncode, 0)
+        self.assertLessEqual(len(result.stdout.encode()), 4096)
+        self.assertLessEqual(len(result.stderr.encode()), 4096)
+        self.assertTrue(result.stdout.endswith("x" * 100))
+        self.assertTrue(result.stderr.endswith("y" * 100))
+
+    def test_configured_command_timeout_kills_process_group(self):
+        repo = self.make_repo()
+        started = time.monotonic()
+        result = run_configured_command(
+            [sys.executable, "-c", "import time; time.sleep(10)"],
+            cwd=repo,
+            env=os.environ.copy(),
+            timeout=0.2,
+        )
+        self.assertTrue(result.timed_out)
+        self.assertLess(time.monotonic() - started, 3)
 
     def test_transaction_validation_rejects_bad_branch(self):
         tx = {
@@ -100,6 +184,7 @@ class CoreTests(unittest.TestCase):
             ),
             "run": [],
             "commit_message": "bridge change",
+            "publish_snapshot": True,
         }
         state = Path(tempfile.mkdtemp(prefix="llmgb-state-"))
         outcome = process_transaction(
@@ -338,6 +423,7 @@ class CoreTests(unittest.TestCase):
                 "+safe\n"
             ),
             "run": ["generate"],
+            "publish_snapshot": True,
         }
         outcome = process_transaction(
             repo,
@@ -535,6 +621,559 @@ class CoreTests(unittest.TestCase):
         }
         with self.assertRaises(BridgeError):
             validate_transaction(tx, safe_branch_prefix="ai/")
+
+
+    def test_transaction_id_rejects_dot_and_dotdot(self):
+        base = {
+            "protocol": 2,
+            "kind": "transaction",
+            "repo": "demo",
+            "base_sha": "a" * 40,
+            "branch": "ai/test",
+            "patch": "x",
+            "run": [],
+        }
+        for txid in (".", "..", "tx.with.dot"):
+            tx = {**base, "transaction_id": txid}
+            with self.assertRaises(BridgeError):
+                validate_transaction(tx, safe_branch_prefix="ai/")
+
+    def test_run_command_names_are_safe_tokens(self):
+        tx = {
+            "protocol": 2,
+            "kind": "transaction",
+            "transaction_id": "tx-run-name",
+            "repo": "demo",
+            "base_sha": "a" * 40,
+            "branch": "ai/test",
+            "patch": "x",
+            "run": ["../test"],
+        }
+        with self.assertRaises(BridgeError):
+            validate_transaction(tx, safe_branch_prefix="ai/")
+
+    def test_sensitive_source_cannot_be_renamed_to_public_path(self):
+        repo = self.make_repo()
+        (repo / ".env").write_text("TOKEN=secret\n", encoding="utf-8")
+        sh(repo, "git", "add", ".env")
+        sh(repo, "git", "commit", "-qm", "add secret")
+        head = sh(repo, "git", "rev-parse", "HEAD")
+        patch_text = (
+            "diff --git a/.env b/.env\n"
+            "deleted file mode 100644\n"
+            "--- a/.env\n"
+            "+++ /dev/null\n"
+            "@@ -1 +0,0 @@\n"
+            "-TOKEN=secret\n"
+            "diff --git a/public.txt b/public.txt\n"
+            "new file mode 100644\n"
+            "--- /dev/null\n"
+            "+++ b/public.txt\n"
+            "@@ -0,0 +1 @@\n"
+            "+TOKEN=secret\n"
+        )
+        tx = {
+            "protocol": 2,
+            "kind": "transaction",
+            "transaction_id": "tx-secret-rename",
+            "repo": "demo",
+            "base_sha": head,
+            "branch": "ai/secret-rename",
+            "patch": patch_text,
+            "run": [],
+        }
+        with self.assertRaises(BridgeError):
+            process_transaction(
+                repo,
+                "demo",
+                tx,
+                state_dir=Path(tempfile.mkdtemp(prefix="llmgb-state-")),
+                safe_branch_prefix="ai/",
+                commands={},
+            )
+
+    def test_transaction_rejects_symlink_deletion(self):
+        repo = self.make_repo()
+        os.symlink("README.md", repo / "link")
+        sh(repo, "git", "add", "link")
+        sh(repo, "git", "commit", "-qm", "add link")
+        head = sh(repo, "git", "rev-parse", "HEAD")
+        patch_text = (
+            "diff --git a/link b/link\n"
+            "deleted file mode 120000\n"
+            "--- a/link\n"
+            "+++ /dev/null\n"
+            "@@ -1 +0,0 @@\n"
+            "-README.md\n"
+            "\\ No newline at end of file\n"
+        )
+        tx = {
+            "protocol": 2,
+            "kind": "transaction",
+            "transaction_id": "tx-delete-link",
+            "repo": "demo",
+            "base_sha": head,
+            "branch": "ai/delete-link",
+            "patch": patch_text,
+            "run": [],
+        }
+        with self.assertRaises(BridgeError):
+            process_transaction(
+                repo,
+                "demo",
+                tx,
+                state_dir=Path(tempfile.mkdtemp(prefix="llmgb-state-")),
+                safe_branch_prefix="ai/",
+                commands={},
+            )
+
+    def test_transaction_rejects_gitmodules_changes(self):
+        repo = self.make_repo()
+        head = sh(repo, "git", "rev-parse", "HEAD")
+        tx = {
+            "protocol": 2,
+            "kind": "transaction",
+            "transaction_id": "tx-gitmodules",
+            "repo": "demo",
+            "base_sha": head,
+            "branch": "ai/gitmodules",
+            "patch": (
+                "diff --git a/.gitmodules b/.gitmodules\n"
+                "new file mode 100644\n"
+                "--- /dev/null\n"
+                "+++ b/.gitmodules\n"
+                "@@ -0,0 +1 @@\n"
+                "+[submodule \"evil\"]\n"
+            ),
+            "run": [],
+        }
+        with self.assertRaises(BridgeError):
+            process_transaction(
+                repo,
+                "demo",
+                tx,
+                state_dir=Path(tempfile.mkdtemp(prefix="llmgb-state-")),
+                safe_branch_prefix="ai/",
+                commands={},
+            )
+
+    def test_transaction_rejects_ci_automation_paths(self):
+        repo = self.make_repo()
+        head = sh(repo, "git", "rev-parse", "HEAD")
+        patch_text = (
+            "diff --git a/.github/workflows/pwn.yml b/.github/workflows/pwn.yml\n"
+            "new file mode 100644\n"
+            "--- /dev/null\n"
+            "+++ b/.github/workflows/pwn.yml\n"
+            "@@ -0,0 +1 @@\n"
+            "+name: unsafe\n"
+        )
+        tx = {
+            "protocol": 2,
+            "kind": "transaction",
+            "transaction_id": "tx-ci",
+            "repo": "demo",
+            "base_sha": head,
+            "branch": "ai/ci",
+            "patch": patch_text,
+            "run": [],
+        }
+        with self.assertRaises(BridgeError):
+            process_transaction(
+                repo,
+                "demo",
+                tx,
+                state_dir=Path(tempfile.mkdtemp(prefix="llmgb-state-")),
+                safe_branch_prefix="ai/",
+                commands={},
+            )
+
+    def test_command_cannot_change_staged_tree(self):
+        repo = self.make_repo()
+        head = sh(repo, "git", "rev-parse", "HEAD")
+        tx = {
+            "protocol": 2,
+            "kind": "transaction",
+            "transaction_id": "tx-index-mutation",
+            "repo": "demo",
+            "base_sha": head,
+            "branch": "ai/index-mutation",
+            "patch": (
+                "diff --git a/README.md b/README.md\n"
+                "--- a/README.md\n"
+                "+++ b/README.md\n"
+                "@@ -1 +1,2 @@\n hello\n+safe\n"
+            ),
+            "run": ["mutate"],
+        }
+        script = "import subprocess; open('extra.txt','w').write('x'); subprocess.run(['git','add','extra.txt'],check=True)"
+        with self.assertRaises(BridgeError):
+            process_transaction(
+                repo,
+                "demo",
+                tx,
+                state_dir=Path(tempfile.mkdtemp(prefix="llmgb-state-")),
+                safe_branch_prefix="ai/",
+                commands={"mutate": [sys.executable, "-c", script]},
+            )
+
+    def test_command_cannot_commit_or_move_refs(self):
+        repo = self.make_repo()
+        head = sh(repo, "git", "rev-parse", "HEAD")
+        tx = {
+            "protocol": 2,
+            "kind": "transaction",
+            "transaction_id": "tx-command-commit",
+            "repo": "demo",
+            "base_sha": head,
+            "branch": "ai/command-commit",
+            "patch": (
+                "diff --git a/README.md b/README.md\n"
+                "--- a/README.md\n"
+                "+++ b/README.md\n"
+                "@@ -1 +1,2 @@\n hello\n+safe\n"
+            ),
+            "run": ["commit"],
+        }
+        with self.assertRaises(BridgeError):
+            process_transaction(
+                repo,
+                "demo",
+                tx,
+                state_dir=Path(tempfile.mkdtemp(prefix="llmgb-state-")),
+                safe_branch_prefix="ai/",
+                commands={"commit": ["git", "commit", "-m", "unexpected"]},
+            )
+
+    def test_command_output_stays_local(self):
+        repo = self.make_repo()
+        head = sh(repo, "git", "rev-parse", "HEAD")
+        state = Path(tempfile.mkdtemp(prefix="llmgb-state-"))
+        tx = {
+            "protocol": 2,
+            "kind": "transaction",
+            "transaction_id": "tx-output-local",
+            "repo": "demo",
+            "base_sha": head,
+            "branch": "ai/output-local",
+            "patch": (
+                "diff --git a/README.md b/README.md\n"
+                "--- a/README.md\n"
+                "+++ b/README.md\n"
+                "@@ -1 +1,2 @@\n hello\n+safe\n"
+            ),
+            "run": ["show"],
+        }
+        outcome = process_transaction(
+            repo,
+            "demo",
+            tx,
+            state_dir=state,
+            safe_branch_prefix="ai/",
+            commands={"show": [sys.executable, "-c", "print('TOKEN_SHOULD_NOT_LEAK')"]},
+        )
+        self.assertNotIn("TOKEN_SHOULD_NOT_LEAK", json.dumps(outcome.result))
+        log = (state / "command-logs" / "tx-output-local" / "01.log").read_text(encoding="utf-8")
+        self.assertIn("TOKEN_SHOULD_NOT_LEAK", log)
+
+
+    def test_configured_commands_run_without_git_metadata_or_sensitive_paths(self):
+        repo = self.make_repo()
+        (repo / ".env").write_text("TOKEN=secret\n", encoding="utf-8")
+        sh(repo, "git", "add", ".env")
+        sh(repo, "git", "commit", "-qm", "add sensitive tracked file")
+        head = sh(repo, "git", "rev-parse", "HEAD")
+        state = Path(tempfile.mkdtemp(prefix="llmgb-state-"))
+        txid = "tx-command-isolation"
+        tx = {
+            "protocol": 2,
+            "kind": "transaction",
+            "transaction_id": txid,
+            "repo": "demo",
+            "base_sha": head,
+            "branch": "ai/command-isolation",
+            "patch": (
+                "diff --git a/README.md b/README.md\n"
+                "--- a/README.md\n"
+                "+++ b/README.md\n"
+                "@@ -1 +1,2 @@\n hello\n+safe\n"
+            ),
+            "run": ["inspect"],
+        }
+        script = (
+            "from pathlib import Path; "
+            "print('git=' + str(Path('.git').exists())); "
+            "print('env=' + str(Path('.env').exists())); "
+            "print('home=' + str(Path.home()))"
+        )
+        process_transaction(
+            repo,
+            "demo",
+            tx,
+            state_dir=state,
+            safe_branch_prefix="ai/",
+            commands={"inspect": [sys.executable, "-c", script]},
+        )
+        log = (state / "command-logs" / txid / "01.log").read_text(encoding="utf-8")
+        self.assertIn("git=False", log)
+        self.assertIn("env=False", log)
+        self.assertIn("home=" + str(state / "command-homes" / txid), log)
+        self.assertFalse((state / "command-runs" / txid).exists())
+        self.assertFalse((state / "command-homes" / txid).exists())
+
+    def test_configured_command_workspace_omits_symlinks_and_obvious_secret_content(self):
+        repo = self.make_repo()
+        (repo / "innocent.txt").write_text(
+            "-----BEGIN PRIVATE KEY-----\nsecret\n-----END PRIVATE KEY-----\n",
+            encoding="utf-8",
+        )
+        os.symlink("README.md", repo / "readme-link")
+        sh(repo, "git", "add", "innocent.txt", "readme-link")
+        sh(repo, "git", "commit", "-qm", "add command workspace hazards")
+        head = sh(repo, "git", "rev-parse", "HEAD")
+        state = Path(tempfile.mkdtemp(prefix="llmgb-state-"))
+        txid = "tx-command-workspace-filter"
+        tx = {
+            "protocol": 2,
+            "kind": "transaction",
+            "transaction_id": txid,
+            "repo": "demo",
+            "base_sha": head,
+            "branch": "ai/command-workspace-filter",
+            "patch": (
+                "diff --git a/README.md b/README.md\n"
+                "--- a/README.md\n"
+                "+++ b/README.md\n"
+                "@@ -1 +1,2 @@\n hello\n+safe\n"
+            ),
+            "run": ["inspect"],
+        }
+        script = (
+            "from pathlib import Path; "
+            "print('secret=' + str(Path('innocent.txt').exists())); "
+            "print('symlink=' + str(Path('readme-link').exists()))"
+        )
+        process_transaction(
+            repo,
+            "demo",
+            tx,
+            state_dir=state,
+            safe_branch_prefix="ai/",
+            commands={"inspect": [sys.executable, "-c", script]},
+        )
+        log = (state / "command-logs" / txid / "01.log").read_text(encoding="utf-8")
+        self.assertIn("secret=False", log)
+        self.assertIn("symlink=False", log)
+
+    def test_command_environment_uses_worktree_pythonpath(self):
+        repo = self.make_repo()
+        (repo / "src").mkdir()
+        (repo / "src" / "placeholder.txt").write_text("x\n", encoding="utf-8")
+        sh(repo, "git", "add", "src/placeholder.txt")
+        sh(repo, "git", "commit", "-qm", "add src")
+        head = sh(repo, "git", "rev-parse", "HEAD")
+        state = Path(tempfile.mkdtemp(prefix="llmgb-state-"))
+        txid = "tx-pythonpath"
+        tx = {
+            "protocol": 2,
+            "kind": "transaction",
+            "transaction_id": txid,
+            "repo": "demo",
+            "base_sha": head,
+            "branch": "ai/pythonpath",
+            "patch": (
+                "diff --git a/README.md b/README.md\n"
+                "--- a/README.md\n"
+                "+++ b/README.md\n"
+                "@@ -1 +1,2 @@\n hello\n+safe\n"
+            ),
+            "run": ["env"],
+        }
+        process_transaction(
+            repo,
+            "demo",
+            tx,
+            state_dir=state,
+            safe_branch_prefix="ai/",
+            commands={"env": [sys.executable, "-c", "import os; print(os.environ.get('PYTHONPATH',''))"]},
+        )
+        log = (state / "command-logs" / txid / "01.log").read_text(encoding="utf-8")
+        self.assertIn(str(state / "command-runs" / txid / "src"), log)
+        self.assertNotIn(str(repo / "src"), log)
+
+    def test_absolute_repo_command_is_remapped_to_worktree(self):
+        repo = self.make_repo()
+        script = repo / "check.sh"
+        script.write_text("#!/bin/sh\necho original\n", encoding="utf-8")
+        script.chmod(0o755)
+        sh(repo, "git", "add", "check.sh")
+        sh(repo, "git", "commit", "-qm", "add check")
+        head = sh(repo, "git", "rev-parse", "HEAD")
+        state = Path(tempfile.mkdtemp(prefix="llmgb-state-"))
+        txid = "tx-remap-command"
+        tx = {
+            "protocol": 2,
+            "kind": "transaction",
+            "transaction_id": txid,
+            "repo": "demo",
+            "base_sha": head,
+            "branch": "ai/remap-command",
+            "patch": (
+                "diff --git a/check.sh b/check.sh\n"
+                "--- a/check.sh\n"
+                "+++ b/check.sh\n"
+                "@@ -1,2 +1,2 @@\n #!/bin/sh\n-echo original\n+echo patched\n"
+            ),
+            "run": ["check"],
+        }
+        process_transaction(
+            repo,
+            "demo",
+            tx,
+            state_dir=state,
+            safe_branch_prefix="ai/",
+            commands={"check": [str(script)]},
+        )
+        log = (state / "command-logs" / txid / "01.log").read_text(encoding="utf-8")
+        self.assertIn("patched", log)
+        self.assertNotIn("\noriginal\n", log)
+
+    def test_push_timeout_is_secondary_to_local_commit(self):
+        repo = self.make_repo()
+        remote = Path(tempfile.mkdtemp(prefix="llmgb-remote-")) / "remote.git"
+        subprocess.run(["git", "init", "--bare", "-q", str(remote)], check=True)
+        sh(repo, "git", "remote", "add", "origin", str(remote))
+        head = sh(repo, "git", "rev-parse", "HEAD")
+        tx = {
+            "protocol": 2,
+            "kind": "transaction",
+            "transaction_id": "tx-push-timeout",
+            "repo": "demo",
+            "base_sha": head,
+            "branch": "ai/push-timeout",
+            "patch": (
+                "diff --git a/README.md b/README.md\n"
+                "--- a/README.md\n"
+                "+++ b/README.md\n"
+                "@@ -1 +1,2 @@\n hello\n+safe\n"
+            ),
+            "run": [],
+            "push": True,
+        }
+        original_run = core.run
+
+        def maybe_timeout(argv, **kwargs):
+            if "push" in argv:
+                raise BridgeError("command timed out after 120s")
+            return original_run(argv, **kwargs)
+
+        with patch("llm_git_bridge.core.run", side_effect=maybe_timeout):
+            outcome = process_transaction(
+                repo,
+                "demo",
+                tx,
+                state_dir=Path(tempfile.mkdtemp(prefix="llmgb-state-")),
+                safe_branch_prefix="ai/",
+                commands={},
+                allow_push=True,
+            )
+        self.assertEqual(outcome.result["status"], "success")
+        self.assertEqual(outcome.result["push"]["status"], "error")
+        self.assertEqual(sh(repo, "git", "rev-parse", "ai/push-timeout"), outcome.result["commit"])
+
+    def test_deferred_snapshot_is_not_built(self):
+        repo = self.make_repo()
+        head = sh(repo, "git", "rev-parse", "HEAD")
+        tx = {
+            "protocol": 2,
+            "kind": "transaction",
+            "transaction_id": "tx-no-snapshot-build",
+            "repo": "demo",
+            "base_sha": head,
+            "branch": "ai/no-snapshot-build",
+            "patch": (
+                "diff --git a/README.md b/README.md\n"
+                "--- a/README.md\n"
+                "+++ b/README.md\n"
+                "@@ -1 +1,2 @@\n hello\n+safe\n"
+            ),
+            "run": [],
+        }
+        with patch("llm_git_bridge.core.build_snapshot", side_effect=AssertionError("must not run")):
+            outcome = process_transaction(
+                repo,
+                "demo",
+                tx,
+                state_dir=Path(tempfile.mkdtemp(prefix="llmgb-state-")),
+                safe_branch_prefix="ai/",
+                commands={},
+            )
+        self.assertTrue(outcome.result["snapshot_deferred"])
+        self.assertIsNone(outcome.snapshot)
+
+    def test_requested_snapshot_failure_is_secondary(self):
+        repo = self.make_repo()
+        head = sh(repo, "git", "rev-parse", "HEAD")
+        tx = {
+            "protocol": 2,
+            "kind": "transaction",
+            "transaction_id": "tx-snapshot-secondary",
+            "repo": "demo",
+            "base_sha": head,
+            "branch": "ai/snapshot-secondary",
+            "patch": (
+                "diff --git a/README.md b/README.md\n"
+                "--- a/README.md\n"
+                "+++ b/README.md\n"
+                "@@ -1 +1,2 @@\n hello\n+safe\n"
+            ),
+            "run": [],
+            "publish_snapshot": True,
+        }
+        with patch("llm_git_bridge.core.build_snapshot", side_effect=OSError("/private/path")):
+            outcome = process_transaction(
+                repo,
+                "demo",
+                tx,
+                state_dir=Path(tempfile.mkdtemp(prefix="llmgb-state-")),
+                safe_branch_prefix="ai/",
+                commands={},
+            )
+        self.assertEqual(outcome.result["status"], "success")
+        self.assertEqual(outcome.result["snapshot_error"], "snapshot generation failed")
+        self.assertNotIn("/private/path", json.dumps(outcome.result))
+
+    def test_commits_disabled_fails_before_branch_creation(self):
+        repo = self.make_repo()
+        head = sh(repo, "git", "rev-parse", "HEAD")
+        tx = {
+            "protocol": 2,
+            "kind": "transaction",
+            "transaction_id": "tx-commit-disabled",
+            "repo": "demo",
+            "base_sha": head,
+            "branch": "ai/commit-disabled",
+            "patch": "diff --git a/README.md b/README.md\n--- a/README.md\n+++ b/README.md\n@@ -1 +1,2 @@\n hello\n+safe\n",
+            "run": [],
+        }
+        with self.assertRaises(BridgeError):
+            process_transaction(
+                repo,
+                "demo",
+                tx,
+                state_dir=Path(tempfile.mkdtemp(prefix="llmgb-state-")),
+                safe_branch_prefix="ai/",
+                commands={},
+                allow_commit=False,
+            )
+        self.assertNotEqual(
+            subprocess.run(
+                ["git", "-C", str(repo), "show-ref", "--verify", "refs/heads/ai/commit-disabled"],
+                stdout=subprocess.PIPE,
+                stderr=subprocess.PIPE,
+            ).returncode,
+            0,
+        )
 
 
 if __name__ == "__main__":
