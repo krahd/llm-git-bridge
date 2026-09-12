@@ -204,18 +204,37 @@ class AppTests(unittest.TestCase):
         self.assertEqual(self.fake.ensure_dir_calls, [])
         result = json.loads(self.fake.files[f"v2/results/{txid}.json"])
         self.assertTrue(result["snapshot_deferred"])
+        self.assertEqual(self.fake.list_calls, ["v2/transactions"])
+        self.assertIn("transport_timings", result)
+        metrics = (app.STATE_DIR / "metrics.jsonl").read_text(encoding="utf-8").splitlines()
+        event = json.loads(metrics[-1])
+        self.assertEqual(event["event"], "transaction")
+        self.assertIn("result_upload_s", event)
+        self.assertNotIn("path", json.dumps(event))
         self.fake.list_calls.clear()
         self.assertEqual(app.process_pending_once(self.cfg), 0)
         self.assertEqual(self.fake.list_calls, ["v2/transactions"])
 
-    def test_existing_remote_result_prevents_replay_after_local_state_loss(self):
+    def test_startup_reconciliation_prevents_replay_after_local_state_loss(self):
         txid = "tx-already"
         self.fake.files[f"v2/transactions/{txid}.json"] = json.dumps({
             "protocol": 2, "kind": "materialize", "transaction_id": txid, "repo": "does-not-matter"
         })
         self.fake.files[f"v2/results/{txid}.json"] = json.dumps({"status": "success"})
-        self.assertEqual(app.process_pending_once(self.cfg), 0)
+        self.assertEqual(app.reconcile_remote_results(self.cfg), 1)
         self.assertTrue((app.PUBLISHED_DIR / f"{txid}.json").exists())
+        self.fake.list_calls.clear()
+        self.assertEqual(app.process_pending_once(self.cfg), 0)
+        self.assertEqual(self.fake.list_calls, ["v2/transactions"])
+
+    def test_reconciliation_is_idempotent(self):
+        txid = "tx-already"
+        self.fake.files[f"v2/results/{txid}.json"] = json.dumps({"status": "success"})
+        self.assertEqual(app.reconcile_remote_results(self.cfg), 1)
+        self.assertEqual(app.reconcile_remote_results(self.cfg), 0)
+        lines = (app.STATE_DIR / "metrics.jsonl").read_text(encoding="utf-8").splitlines()
+        self.assertEqual(len(lines), 2)
+        self.assertEqual(json.loads(lines[-1])["event"], "startup-reconcile")
 
 
 class TransportTests(unittest.TestCase):

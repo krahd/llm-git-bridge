@@ -28,8 +28,8 @@ Bridge commits suppress Git hooks and local commit signing. Patch-created symlin
 
 ## Performance principle
 
-Drive round trips dominate latency. The watcher therefore performs one transaction-directory listing per idle poll. It lists results only when an unknown request first appears, using persistent local publication markers thereafter. Materialising one repository refreshes only that repository rather than rescanning every configured root.
+Drive round trips dominate latency. The watcher performs one transaction-directory listing per idle poll. Remote result reconciliation now happens once at watcher startup, rebuilding persistent local publication markers before any transaction is processed; newly observed transactions therefore do not pay a second result-directory listing. Materialising one repository refreshes only that repository rather than rescanning every configured root.
 
 Runtime registry and snapshot writes go directly through `rclone copyto` rather than issuing a separate `rclone mkdir` first. The mailbox's fixed top-level directories are created during setup, and explicit mkdir operations use the same short timeout policy as polling. Branch snapshot publication is also deferred by default, removing a non-critical Drive upload from the edit acknowledgement path.
 
-The target bridge overhead remains approximately 2–5 seconds for normal interactions, excluding model work and local tests. Incremental repository deltas are the next major latency/bandwidth optimisation after self-hosted v0.2 is stable.
+Each result reports transaction-list, transaction-download, and pre-result-upload timings. The daemon also appends local JSONL metrics including result-upload duration, allowing transport latency to be separated from Git/test time without exposing local paths. The target bridge overhead remains approximately 2–5 seconds for normal interactions, excluding model work and local tests. Incremental repository deltas are the next major latency/bandwidth optimisation after self-hosted v0.2 is stable.

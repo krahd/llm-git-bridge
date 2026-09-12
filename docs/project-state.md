@@ -61,6 +61,8 @@ The recovery audit also hardened the implementation before first self-hosting:
 - the macOS LaunchAgent receives a PATH that includes the Homebrew rclone location;
 - durable local publication markers preserve idempotency while reducing Drive round trips;
 - runtime registry and snapshot uploads no longer perform a redundant `rclone mkdir` before `copyto`; setup-only mkdir calls use a short timeout;
-- branch snapshots are no longer a mandatory synchronous edit step; safe-prefixed branches can be materialised on demand.
+- branch snapshots are no longer a mandatory synchronous edit step; safe-prefixed branches can be materialised on demand;
+- remote-result reconciliation moved to watcher startup, removing a Drive result-directory listing from the normal first-seen transaction path while preserving restart replay safety;
+- transport-stage timings are emitted in results and local JSONL metrics.
 
 Self-hosting and opt-in safe pushing are now proven. The bridge has created, tested, committed, and pushed an `ai/*` branch to `origin` without terminal intervention.

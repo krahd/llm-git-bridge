@@ -233,51 +233,91 @@ def _process_materialize_request(cfg: dict[str, Any], registry: dict[str, Any], 
     }
 
 
-def _publish_local_result(transport: RcloneTransport, filename: str, local_result: Path) -> None:
+def _append_metric(event: dict[str, Any]) -> None:
+    # Observability must never alter transaction or replay semantics.
+    try:
+        path = STATE_DIR / "metrics.jsonl"
+        path.parent.mkdir(parents=True, exist_ok=True)
+        with path.open("a", encoding="utf-8", newline="\n") as fh:
+            fh.write(json.dumps(event, sort_keys=True) + "\n")
+    except OSError:
+        pass
+
+
+def _publish_local_result(transport: RcloneTransport, filename: str, local_result: Path) -> float:
     result = load_json(local_result)
+    started = time.monotonic()
     transport.upload_json(
         f"{REMOTE_ROOT}/results/{filename}",
         result,
         STATE_DIR / "outbox" / f"result-{filename}",
     )
+    elapsed = round(time.monotonic() - started, 4)
     _mark_published(filename, source="local-result")
+    _append_metric({
+        "event": "result-republish",
+        "transaction_id": filename[:-5],
+        "result_upload_s": elapsed,
+        "recorded_at": utc_now(),
+    })
+    return elapsed
+
+
+def reconcile_remote_results(cfg: dict[str, Any]) -> int:
+    """Rebuild local publication markers once at process startup.
+
+    This keeps replay protection after local-state loss without putting a remote
+    result-directory listing on the normal first-seen transaction hot path.
+    """
+    transport = transport_from_config(cfg)
+    started = time.monotonic()
+    remote_results = [
+        name
+        for name in transport.list_files(f"{REMOTE_ROOT}/results")
+        if name.endswith(".json") and TX_FILENAME_RE.fullmatch(name)
+    ]
+    list_elapsed = round(time.monotonic() - started, 4)
+    marked = 0
+    for filename in remote_results:
+        marker = _published_marker(filename)
+        if marker.exists():
+            continue
+        _mark_published(filename, source="startup-remote-result")
+        marked += 1
+    _append_metric({
+        "event": "startup-reconcile",
+        "remote_results": len(remote_results),
+        "markers_added": marked,
+        "results_list_s": list_elapsed,
+        "recorded_at": utc_now(),
+    })
+    return marked
 
 
 def process_pending_once(cfg: dict[str, Any]) -> int:
     transport = transport_from_config(cfg)
+    poll_started = time.monotonic()
+    list_started = time.monotonic()
     tx_files = [
         name
         for name in transport.list_files(f"{REMOTE_ROOT}/transactions")
         if name.endswith(".json") and TX_FILENAME_RE.fullmatch(name)
     ]
+    transaction_list_s = round(time.monotonic() - list_started, 4)
 
-    # Steady state requires only the transaction listing. Local published markers
-    # make all already-acknowledged files disappear from the candidate set.
+    # Normal polling lists only transactions. Replay recovery against the remote
+    # result directory is performed once at watcher startup instead of here.
     candidates = [name for name in tx_files if not _published_marker(name).exists()]
     if not candidates:
         return 0
 
     processed = 0
-    unresolved: list[str] = []
+    still_pending: list[str] = []
     for filename in candidates:
         local_result = STATE_DIR / "results" / filename
         if local_result.exists():
             _publish_local_result(transport, filename, local_result)
             processed += 1
-        else:
-            unresolved.append(filename)
-
-    if not unresolved:
-        return processed
-
-    # On first sight of an unknown transaction, check remote results exactly once.
-    # This prevents replay after local state loss without paying a second Drive list
-    # operation on every polling cycle.
-    remote_results = set(transport.list_files(f"{REMOTE_ROOT}/results"))
-    still_pending: list[str] = []
-    for filename in unresolved:
-        if filename in remote_results:
-            _mark_published(filename, source="remote-result")
         else:
             still_pending.append(filename)
 
@@ -290,11 +330,15 @@ def process_pending_once(cfg: dict[str, Any]) -> int:
         registry = load_registry()
 
     for filename in still_pending:
+        request_started = time.monotonic()
         tx_local = STATE_DIR / "inbox" / filename
         local_result = STATE_DIR / "results" / filename
         result: dict[str, Any]
+        transaction_download_s = 0.0
         try:
+            download_started = time.monotonic()
             raw = transport.download_text(f"{REMOTE_ROOT}/transactions/{filename}", tx_local)
+            transaction_download_s = round(time.monotonic() - download_started, 4)
             obj = json.loads(raw.lstrip("\ufeff"))
             _validate_request_identity(obj, filename)
             kind = obj.get("kind")
@@ -345,15 +389,36 @@ def process_pending_once(cfg: dict[str, Any]) -> int:
                 "error": str(exc),
             }
 
+        # Include timings knowable before acknowledgement in the durable result.
+        # The result-upload duration itself is recorded locally after upload completes.
+        result["transport_timings"] = {
+            "transaction_list_s": transaction_list_s,
+            "transaction_download_s": transaction_download_s,
+            "pre_result_upload_s": round(time.monotonic() - request_started, 4),
+        }
+
         # Durable local result first; remote acknowledgement second. If upload fails,
         # the next poll republishes this result rather than re-executing the request.
         save_json(local_result, result)
+        upload_started = time.monotonic()
         transport.upload_json(
             f"{REMOTE_ROOT}/results/{filename}",
             result,
             STATE_DIR / "outbox" / f"result-{filename}",
         )
+        result_upload_s = round(time.monotonic() - upload_started, 4)
         _mark_published(filename, source="processed")
+        _append_metric({
+            "event": "transaction",
+            "transaction_id": filename[:-5],
+            "transaction_list_s": transaction_list_s,
+            "transaction_download_s": transaction_download_s,
+            "pre_result_upload_s": result["transport_timings"]["pre_result_upload_s"],
+            "result_upload_s": result_upload_s,
+            "request_total_s": round(time.monotonic() - request_started, 4),
+            "poll_total_s": round(time.monotonic() - poll_started, 4),
+            "recorded_at": utc_now(),
+        })
         processed += 1
     return processed
 
@@ -421,6 +486,7 @@ def cmd_status(_args: argparse.Namespace) -> int:
 def cmd_watch(args: argparse.Namespace) -> int:
     cfg = load_config()
     if args.once:
+        reconcile_remote_results(cfg)
         count = process_pending_once(cfg)
         print(f"processed: {count}")
         return 0
@@ -428,6 +494,7 @@ def cmd_watch(args: argparse.Namespace) -> int:
     interval = max(0.5, interval)
     print(f"watching every {interval:.1f}s; Ctrl-C to stop", flush=True)
     stop = False
+    reconciled = False
 
     def handle_stop(_sig: int, _frame: Any) -> None:
         nonlocal stop
@@ -437,9 +504,16 @@ def cmd_watch(args: argparse.Namespace) -> int:
     signal.signal(signal.SIGINT, handle_stop)
     while not stop:
         try:
-            # Reload local policy every cycle so configure-* commands take effect
-            # without restarting the long-running daemon.
-            count = process_pending_once(load_config())
+            # Fail closed until the one-time remote-result reconciliation succeeds.
+            # This preserves replay safety after local-state loss without charging
+            # every newly observed transaction for an extra Drive directory listing.
+            current_cfg = load_config()
+            if not reconciled:
+                marked = reconcile_remote_results(current_cfg)
+                reconciled = True
+                if marked:
+                    print(f"startup reconciliation: {marked} marker(s)", flush=True)
+            count = process_pending_once(current_cfg)
             if count:
                 print(f"processed: {count}", flush=True)
         except Exception as exc:
