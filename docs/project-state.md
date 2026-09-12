@@ -9,7 +9,7 @@
 - many repositories are represented by a tiny remote index and materialised on demand;
 - `.git` history is not uploaded by default;
 - remote transactions may request only symbolic locally configured commands;
-- safe-prefixed branches and commits are allowed; push/merge remain disabled;
+- safe-prefixed branches and commits are allowed; push is locally opt-in and transaction-explicit; merge remains disabled;
 - latency is a first-class product requirement.
 
 ## Proven proof of concept
@@ -41,7 +41,7 @@ Still planned after this safe point:
 - richer observability and remote latency measurements;
 - Homebrew packaging;
 - migration tooling for older prototype configurations;
-- optional safe push / draft-PR workflows after explicit user opt-in.
+- optional draft-PR workflows after explicit user opt-in.
 
 ## Bootstrap recovery / adversarial audit (2026-09-12)
 
