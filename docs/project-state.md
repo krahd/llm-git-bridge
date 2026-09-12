@@ -62,3 +62,7 @@ The recovery audit also hardened the implementation before first self-hosting:
 - durable local publication markers preserve idempotency while reducing Drive round trips.
 
 The next acceptance point is self-hosting: publish the `llm-git-bridge` snapshot through protocol v2, run the background watcher, and use an LLM-created v2 transaction to make the next repository change.
+
+## First protocol-v2 self-hosting milestone
+
+On 2026-09-12 the bootstrap branch reached self-hosting readiness: the remote repository index and `llm-git-bridge` snapshot were successfully published through protocol v2 and read back by the LLM client. The next validation step is to apply this documentation update through a protocol-v2 transaction handled by the background daemon itself.
