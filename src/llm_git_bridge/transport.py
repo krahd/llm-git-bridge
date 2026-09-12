@@ -164,6 +164,8 @@ class RcloneTransport:
         timeout: float = 60,
         list_timeout: float = 5,
         rc_list_timeout: float = 3,
+        download_timeout: float = 8,
+        rc_download_timeout: float = 5,
         mkdir_timeout: float = 12,
         delete_timeout: float = 3,
         rc_delete_timeout: float = 2,
@@ -176,6 +178,8 @@ class RcloneTransport:
         self.timeout = timeout
         self.list_timeout = max(1.0, min(float(list_timeout), float(timeout)))
         self.rc_list_timeout = max(0.5, min(float(rc_list_timeout), self.list_timeout, float(timeout)))
+        self.download_timeout = max(1.0, min(float(download_timeout), float(timeout)))
+        self.rc_download_timeout = max(0.5, min(float(rc_download_timeout), self.download_timeout, float(timeout)))
         self.mkdir_timeout = max(1.0, min(float(mkdir_timeout), float(timeout)))
         self.delete_timeout = max(1.0, min(float(delete_timeout), float(timeout)))
         self.rc_delete_timeout = max(0.5, min(float(rc_delete_timeout), self.delete_timeout, float(timeout)))
@@ -252,10 +256,10 @@ class RcloneTransport:
                 "dstFs": str(local.parent),
                 "dstRemote": local.name,
             },
-            timeout=self.timeout,
+            timeout=self.rc_download_timeout,
         ) is None:
             self.last_mode = "subprocess"
-            run(["rclone", "copyto", self._remote(rel), str(local)], timeout=self.timeout)
+            run(["rclone", "copyto", self._remote(rel), str(local)], timeout=self.download_timeout)
         return local.read_text(encoding="utf-8-sig")
 
     def upload_text(self, rel: str, text: str, local_tmp: Path) -> None:

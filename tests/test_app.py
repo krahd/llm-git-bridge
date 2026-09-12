@@ -341,6 +341,50 @@ class TransportTests(unittest.TestCase):
             self.assertEqual(transport.last_mode, "subprocess")
             self.assertEqual(mocked.call_args.kwargs["timeout"], transport.list_timeout)
 
+    def test_download_uses_bounded_rc_timeout(self):
+        with tempfile.TemporaryDirectory(prefix="llmgb-rc-") as tmp:
+            root = Path(tmp)
+            sock = root / "rclone.sock"
+            sock.touch()
+            transport = RcloneTransport("fake", rc_socket=sock, download_timeout=8, rc_download_timeout=4)
+            local = root / "inbox" / "tx.json"
+
+            def rc_side_effect(_socket, _command, _payload, **_kwargs):
+                local.parent.mkdir(parents=True, exist_ok=True)
+                local.write_text("{}\n", encoding="utf-8")
+                return {}
+
+            with patch("llm_git_bridge.transport._rc_request", side_effect=rc_side_effect) as mocked:
+                with patch("llm_git_bridge.transport.run") as fallback:
+                    self.assertEqual(transport.download_text("v2/transactions/tx.json", local), "{}\n")
+            fallback.assert_not_called()
+            self.assertEqual(mocked.call_args.kwargs["timeout"], 4)
+            self.assertEqual(transport.last_mode, "rcd")
+
+    def test_download_fallback_timeout_is_bounded(self):
+        with tempfile.TemporaryDirectory(prefix="llmgb-rc-") as tmp:
+            root = Path(tmp)
+            sock = root / "rclone.sock"
+            sock.touch()
+            transport = RcloneTransport("fake", rc_socket=sock, timeout=60, download_timeout=7, rc_download_timeout=3)
+            local = root / "inbox" / "tx.json"
+
+            def fallback_side_effect(_argv, **_kwargs):
+                local.parent.mkdir(parents=True, exist_ok=True)
+                local.write_text("{}\n", encoding="utf-8")
+                return subprocess.CompletedProcess(_argv, 0, stdout="", stderr="")
+
+            with patch("llm_git_bridge.transport._rc_request", side_effect=BridgeError("rc slow")):
+                with patch("llm_git_bridge.transport.run", side_effect=fallback_side_effect) as mocked:
+                    self.assertEqual(transport.download_text("v2/transactions/tx.json", local), "{}\n")
+            self.assertEqual(mocked.call_args.kwargs["timeout"], 7)
+            self.assertEqual(transport.last_mode, "subprocess")
+
+    def test_download_timeouts_are_capped(self):
+        transport = RcloneTransport("fake", timeout=6, download_timeout=20, rc_download_timeout=9)
+        self.assertEqual(transport.download_timeout, 6)
+        self.assertEqual(transport.rc_download_timeout, 6)
+
     def test_upload_uses_rc_copyfile_without_spawning_rclone_copyto(self):
         with tempfile.TemporaryDirectory(prefix="llmgb-rc-") as tmp:
             root = Path(tmp)
