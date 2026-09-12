@@ -29,7 +29,7 @@ from .core import (
     utc_now,
     validate_safe_branch_name,
 )
-from .transport import RcloneTransport
+from .transport import RcloneRCProcess, RcloneTransport, start_rclone_rcd
 
 APP_NAME = "llm-git-bridge"
 CONFIG_DIR = Path.home() / ".config" / APP_NAME
@@ -40,6 +40,7 @@ PUBLISHED_DIR = STATE_DIR / "published-results"
 LABEL = "io.llm-git-bridge.daemon"
 REMOTE_ROOT = "v2"
 PLIST_PATH = Path.home() / "Library" / "LaunchAgents" / f"{LABEL}.plist"
+RCLONE_RC_SOCKET = STATE_DIR / "rclone-rc.sock"
 TX_FILENAME_RE = re.compile(r"[A-Za-z0-9._-]{1,120}\.json")
 TX_ID_RE = re.compile(r"[A-Za-z0-9._-]{1,120}")
 
@@ -47,7 +48,7 @@ TX_ID_RE = re.compile(r"[A-Za-z0-9._-]{1,120}")
 def default_config() -> dict[str, Any]:
     return {
         "version": 1,
-        "transport": {"type": "rclone", "remote": None},
+        "transport": {"type": "rclone", "remote": None, "rc_enabled": True},
         "roots": [],
         "safe_branch_prefix": "ai/",
         "allow_commit": True,
@@ -91,7 +92,8 @@ def transport_from_config(cfg: dict[str, Any]) -> RcloneTransport:
     remote = transport.get("remote")
     if not remote:
         raise BridgeError("transport remote is not configured; run setup")
-    return RcloneTransport(str(remote))
+    rc_socket = RCLONE_RC_SOCKET if bool(transport.get("rc_enabled", True)) else None
+    return RcloneTransport(str(remote), rc_socket=rc_socket)
 
 
 def publish_registry(cfg: dict[str, Any], registry: dict[str, Any]) -> None:
@@ -189,6 +191,9 @@ _METRIC_PUBLIC_KEYS = {
     "remote_results",
     "markers_added",
     "recorded_at",
+    "transaction_list_transport",
+    "transaction_download_transport",
+    "result_upload_transport",
 }
 
 
@@ -356,6 +361,7 @@ def process_pending_once(cfg: dict[str, Any]) -> int:
         if name.endswith(".json") and TX_FILENAME_RE.fullmatch(name)
     ]
     transaction_list_s = round(time.monotonic() - list_started, 4)
+    transaction_list_transport = str(getattr(transport, "last_mode", "unknown"))
 
     # Normal polling lists only transactions. Replay recovery against the remote
     # result directory is performed once at watcher startup instead of here.
@@ -387,10 +393,12 @@ def process_pending_once(cfg: dict[str, Any]) -> int:
         local_result = STATE_DIR / "results" / filename
         result: dict[str, Any]
         transaction_download_s = 0.0
+        transaction_download_transport = "none"
         try:
             download_started = time.monotonic()
             raw = transport.download_text(f"{REMOTE_ROOT}/transactions/{filename}", tx_local)
             transaction_download_s = round(time.monotonic() - download_started, 4)
+            transaction_download_transport = str(getattr(transport, "last_mode", "unknown"))
             obj = json.loads(raw.lstrip("\ufeff"))
             _validate_request_identity(obj, filename)
             kind = obj.get("kind")
@@ -448,6 +456,8 @@ def process_pending_once(cfg: dict[str, Any]) -> int:
         result["transport_timings"] = {
             "transaction_list_s": transaction_list_s,
             "transaction_download_s": transaction_download_s,
+            "transaction_list_transport": transaction_list_transport,
+            "transaction_download_transport": transaction_download_transport,
             "pre_result_upload_s": round(time.monotonic() - request_started, 4),
         }
 
@@ -461,6 +471,7 @@ def process_pending_once(cfg: dict[str, Any]) -> int:
             STATE_DIR / "outbox" / f"result-{filename}",
         )
         result_upload_s = round(time.monotonic() - upload_started, 4)
+        result_upload_transport = str(getattr(transport, "last_mode", "unknown"))
         _mark_published(filename, source="processed")
         _append_metric({
             "event": "transaction",
@@ -469,6 +480,9 @@ def process_pending_once(cfg: dict[str, Any]) -> int:
             "transaction_download_s": transaction_download_s,
             "pre_result_upload_s": result["transport_timings"]["pre_result_upload_s"],
             "result_upload_s": result_upload_s,
+            "transaction_list_transport": transaction_list_transport,
+            "transaction_download_transport": transaction_download_transport,
+            "result_upload_transport": result_upload_transport,
             "request_total_s": round(time.monotonic() - request_started, 4),
             "poll_total_s": round(time.monotonic() - poll_started, 4),
             "recorded_at": utc_now(),
@@ -480,7 +494,9 @@ def process_pending_once(cfg: dict[str, Any]) -> int:
 def cmd_setup(args: argparse.Namespace) -> int:
     cfg = load_config()
     remote = args.remote or cfg.get("transport", {}).get("remote") or detect_rclone_remote()
-    cfg["transport"] = {"type": "rclone", "remote": remote.rstrip(":")}
+    transport_cfg = cfg.setdefault("transport", {})
+    transport_cfg.update({"type": "rclone", "remote": remote.rstrip(":")})
+    transport_cfg.setdefault("rc_enabled", True)
     save_config(cfg)
     transport = transport_from_config(cfg)
     for rel in ("meta", "repos", "transactions", "results"):
@@ -537,45 +553,62 @@ def cmd_status(_args: argparse.Namespace) -> int:
     return 0
 
 
+def _start_watch_rcd(cfg: dict[str, Any]) -> RcloneRCProcess | None:
+    transport = cfg.get("transport", {})
+    if transport.get("type") != "rclone" or not bool(transport.get("rc_enabled", True)):
+        return None
+    handle = start_rclone_rcd(RCLONE_RC_SOCKET)
+    if handle is None:
+        print("rclone rcd unavailable; using subprocess fallback", file=sys.stderr, flush=True)
+    else:
+        print("rclone rcd ready", flush=True)
+    return handle
+
+
 def cmd_watch(args: argparse.Namespace) -> int:
     cfg = load_config()
-    if args.once:
-        reconcile_remote_results(cfg)
-        count = process_pending_once(cfg)
-        print(f"processed: {count}")
+    rc_handle = _start_watch_rcd(cfg)
+    try:
+        if args.once:
+            reconcile_remote_results(cfg)
+            count = process_pending_once(cfg)
+            print(f"processed: {count}")
+            return 0
+        interval = float(args.interval or cfg.get("poll_interval", 1.0))
+        interval = max(0.5, interval)
+        print(f"watching every {interval:.1f}s; Ctrl-C to stop", flush=True)
+        stop = False
+        reconciled = False
+
+        def handle_stop(_sig: int, _frame: Any) -> None:
+            nonlocal stop
+            stop = True
+
+        signal.signal(signal.SIGTERM, handle_stop)
+        signal.signal(signal.SIGINT, handle_stop)
+        while not stop:
+            try:
+                # Fail closed until the one-time remote-result reconciliation succeeds.
+                # This preserves replay safety after local-state loss without charging
+                # every newly observed transaction for an extra Drive directory listing.
+                current_cfg = load_config()
+                if not reconciled:
+                    marked = reconcile_remote_results(current_cfg)
+                    reconciled = True
+                    if marked:
+                        print(f"startup reconciliation: {marked} marker(s)", flush=True)
+                count = process_pending_once(current_cfg)
+                if count:
+                    print(f"processed: {count}", flush=True)
+            except Exception as exc:
+                print(f"watch error: {exc}", file=sys.stderr, flush=True)
+            deadline = time.monotonic() + interval
+            while not stop and time.monotonic() < deadline:
+                time.sleep(min(0.1, max(0.0, deadline - time.monotonic())))
         return 0
-    interval = float(args.interval or cfg.get("poll_interval", 1.0))
-    interval = max(0.5, interval)
-    print(f"watching every {interval:.1f}s; Ctrl-C to stop", flush=True)
-    stop = False
-    reconciled = False
-
-    def handle_stop(_sig: int, _frame: Any) -> None:
-        nonlocal stop
-        stop = True
-
-    signal.signal(signal.SIGTERM, handle_stop)
-    signal.signal(signal.SIGINT, handle_stop)
-    while not stop:
-        try:
-            # Fail closed until the one-time remote-result reconciliation succeeds.
-            # This preserves replay safety after local-state loss without charging
-            # every newly observed transaction for an extra Drive directory listing.
-            current_cfg = load_config()
-            if not reconciled:
-                marked = reconcile_remote_results(current_cfg)
-                reconciled = True
-                if marked:
-                    print(f"startup reconciliation: {marked} marker(s)", flush=True)
-            count = process_pending_once(current_cfg)
-            if count:
-                print(f"processed: {count}", flush=True)
-        except Exception as exc:
-            print(f"watch error: {exc}", file=sys.stderr, flush=True)
-        deadline = time.monotonic() + interval
-        while not stop and time.monotonic() < deadline:
-            time.sleep(min(0.1, max(0.0, deadline - time.monotonic())))
-    return 0
+    finally:
+        if rc_handle is not None:
+            rc_handle.stop()
 
 
 def _launchctl(*args: str, check: bool = True) -> int:

@@ -270,6 +270,61 @@ class AppTests(unittest.TestCase):
 
 
 class TransportTests(unittest.TestCase):
+    def test_list_uses_persistent_rc_when_socket_is_available(self):
+        with tempfile.TemporaryDirectory(prefix="llmgb-rc-") as tmp:
+            sock = Path(tmp) / "rclone.sock"
+            sock.touch()
+            transport = RcloneTransport("fake", rc_socket=sock)
+            response = {"list": [
+                {"Name": "b.json", "Path": "b.json", "IsDir": False},
+                {"Name": "a.json", "Path": "a.json", "IsDir": False},
+            ]}
+            with patch("llm_git_bridge.transport._rc_request", return_value=response) as mocked:
+                self.assertEqual(transport.list_files("v2/transactions"), ["a.json", "b.json"])
+            self.assertEqual(transport.last_mode, "rcd")
+            self.assertEqual(mocked.call_args.args[1], "operations/list")
+            self.assertEqual(mocked.call_args.args[2]["fs"], "fake:")
+            self.assertEqual(mocked.call_args.args[2]["remote"], "v2/transactions")
+            self.assertTrue(mocked.call_args.args[2]["opt"]["filesOnly"])
+
+    def test_list_falls_back_when_rc_is_unhealthy(self):
+        with tempfile.TemporaryDirectory(prefix="llmgb-rc-") as tmp:
+            sock = Path(tmp) / "rclone.sock"
+            sock.touch()
+            transport = RcloneTransport("fake", rc_socket=sock)
+            proc = subprocess.CompletedProcess(["rclone"], 0, stdout="b.json\na.json\n", stderr="")
+            with patch("llm_git_bridge.transport._rc_request", side_effect=BridgeError("rc down")):
+                with patch("llm_git_bridge.transport.run", return_value=proc) as mocked:
+                    self.assertEqual(transport.list_files("v2/transactions"), ["a.json", "b.json"])
+            self.assertEqual(transport.last_mode, "subprocess")
+            self.assertEqual(mocked.call_args.kwargs["timeout"], transport.list_timeout)
+
+    def test_upload_uses_rc_copyfile_without_spawning_rclone_copyto(self):
+        with tempfile.TemporaryDirectory(prefix="llmgb-rc-") as tmp:
+            root = Path(tmp)
+            sock = root / "rclone.sock"
+            sock.touch()
+            transport = RcloneTransport("fake", rc_socket=sock)
+            local = root / "outbox" / "result.json"
+            with patch("llm_git_bridge.transport._rc_request", return_value={}) as mocked:
+                with patch("llm_git_bridge.transport.run") as fallback:
+                    transport.upload_text("v2/results/result.json", "{}\n", local)
+            fallback.assert_not_called()
+            self.assertEqual(transport.last_mode, "rcd")
+            self.assertEqual(mocked.call_args.args[1], "operations/copyfile")
+            payload = mocked.call_args.args[2]
+            self.assertEqual(payload["srcFs"], str(local.parent))
+            self.assertEqual(payload["srcRemote"], local.name)
+            self.assertEqual(payload["dstFs"], "fake:")
+            self.assertEqual(payload["dstRemote"], "v2/results/result.json")
+
+    def test_rc_is_enabled_by_default_but_can_be_disabled(self):
+        self.assertTrue(app.default_config()["transport"]["rc_enabled"])
+        cfg = app.default_config()
+        cfg["transport"] = {"type": "rclone", "remote": "fake", "rc_enabled": False}
+        transport = app.transport_from_config(cfg)
+        self.assertIsNone(transport.rc_socket)
+
     def test_list_failure_is_not_silently_treated_as_empty(self):
         transport = RcloneTransport("fake")
         proc = subprocess.CompletedProcess(["rclone"], 1, stdout="", stderr="auth failed")
