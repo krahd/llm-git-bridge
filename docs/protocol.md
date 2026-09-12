@@ -47,10 +47,13 @@ Required fields:
 Optional:
 
 - `commit_message`
+- `push`: boolean, default `false`. `true` is honoured only when push has been enabled locally for that repository.
 
 A transaction is ready when its final JSON file is visible in `v2/transactions/`. Clients should publish the object atomically where their transport permits it. Google Drive file creation becomes visible only after upload completion, which is sufficient for the current adapter.
 
 The daemon applies the patch with `git apply --index` in an isolated worktree. Only patch changes are staged; test-generated untracked files are never swept into the commit. Git hooks and commit signing are disabled for bridge-created commits so a remote patch cannot indirectly trigger repository hooks or block on local signing configuration.
+
+Push is two-key: it must be enabled locally for the repository and the transaction must contain `"push": true`. The remote is fixed to `origin`, the refspec is fixed to the validated transaction branch, Git hooks are disabled, and force-push is never requested. A push failure is reported as a secondary `push.status: error` while preserving the successfully tested local commit.
 
 ## Result and idempotency
 

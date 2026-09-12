@@ -389,6 +389,9 @@ def validate_transaction(obj: dict[str, Any], *, safe_branch_prefix: str, max_pa
     message = obj.get("commit_message")
     if message is not None and (not isinstance(message, str) or not message.strip() or len(message) > 500):
         raise BridgeError("invalid commit_message")
+    push = obj.get("push", False)
+    if not isinstance(push, bool):
+        raise BridgeError("push must be a boolean")
     return obj
 
 
@@ -455,6 +458,7 @@ def process_transaction(
     safe_branch_prefix: str,
     commands: dict[str, list[str]] | None = None,
     allow_commit: bool = True,
+    allow_push: bool = False,
 ) -> TransactionOutcome:
     started = time.monotonic()
     timings: dict[str, float] = {}
@@ -470,6 +474,12 @@ def process_transaction(
     base_sha = tx["base_sha"].lower()
     repo = repo.resolve()
     ensure_tracked_clean(repo)
+
+    push_requested = bool(tx.get("push", False))
+    if push_requested and not allow_push:
+        raise BridgeError("push requested but is not enabled locally for this repository")
+    if push_requested and not allow_commit:
+        raise BridgeError("push requested but commits are disabled locally")
 
     if not commit_exists(repo, base_sha):
         raise BridgeError(f"base commit does not exist locally: {base_sha}")
@@ -555,6 +565,39 @@ def process_transaction(
             run(["git", "-C", str(wt), "clean", "-ffd"], check=False, timeout=60)
         t = mark("commit_s", t)
 
+        push_result: dict[str, Any] | None = None
+        if push_requested:
+            push_started = time.monotonic()
+            ref = f"refs/heads/{branch}"
+            push_proc = run(
+                [
+                    "git", "-C", str(wt),
+                    "-c", "core.hooksPath=/dev/null",
+                    "push", "--porcelain", "origin", f"{ref}:{ref}",
+                ],
+                check=False,
+                timeout=120,
+                env={**os.environ, "GIT_TERMINAL_PROMPT": "0"},
+            )
+            if push_proc.returncode == 0:
+                push_result = {
+                    "requested": True,
+                    "status": "success",
+                    "remote": "origin",
+                    "ref": ref,
+                }
+            else:
+                # Do not publish git stderr/stdout: remote URLs may contain usernames
+                # or embedded credentials. Detailed diagnostics remain local to Git.
+                push_result = {
+                    "requested": True,
+                    "status": "error",
+                    "remote": "origin",
+                    "ref": ref,
+                    "error": f"git push failed with exit code {push_proc.returncode}",
+                }
+            timings["push_s"] = round(time.monotonic() - push_started, 4)
+
         snapshot = build_snapshot(wt, repo_id)
         timings["total_local_s"] = round(time.monotonic() - started, 4)
         result = {
@@ -570,6 +613,8 @@ def process_transaction(
             "commands": command_results,
             "timings": timings,
         }
+        if push_result is not None:
+            result["push"] = push_result
         return TransactionOutcome(result=result, snapshot=snapshot)
     finally:
         # Remove the worktree but keep the branch/commit. Prune stale metadata if necessary.

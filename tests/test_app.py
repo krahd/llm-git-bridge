@@ -75,12 +75,17 @@ class AppTests(unittest.TestCase):
             "roots": [str(self.tmp)],
             "safe_branch_prefix": "ai/",
             "allow_commit": True,
+            "push_enabled_repos": [],
             "commands": {},
         }
 
     def tearDown(self):
         self.transport_patch.stop()
         app.STATE_DIR, app.REGISTRY_FILE, app.PUBLISHED_DIR = self.old
+
+
+    def test_push_is_disabled_by_default(self):
+        self.assertEqual(app.default_config()["push_enabled_repos"], [])
 
     def test_materialize_request_is_remote_triggerable(self):
         repo_id = next(iter(json.loads(app.REGISTRY_FILE.read_text())["repos"]))

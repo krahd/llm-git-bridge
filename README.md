@@ -51,6 +51,8 @@ A transaction is one JSON object with an inline unified diff. This avoids the mu
 
 The daemon does not execute arbitrary shell commands from a remote transaction. `run` contains symbolic names whose argv are configured locally.
 
+Push is a separate, local opt-in. Enable it per repository with `bin/llm-git-bridge configure-push <repo> enable`; a transaction must additionally request `"push": true`. The bridge then pushes only the validated safe-prefix branch to the hard-coded `origin` remote, with no force option and with Git hooks disabled.
+
 ## Safety defaults
 
 - repository paths stay local and are not included in the remote registry;
@@ -58,7 +60,9 @@ The daemon does not execute arbitrary shell commands from a remote transaction. 
 - `.git` history is not uploaded;
 - tracked local modifications block remote patch application;
 - remote branches must use the configured safe prefix (`ai/` by default);
-- no push or merge is performed by the daemon;
+- push is disabled by default and can only be enabled per repository by local configuration;
+- when enabled and explicitly requested, only the transaction's validated safe-prefix branch is pushed to `origin`, without force;
+- merge, force-push, remote mutation, and repository administration are not implemented;
 - each transaction is processed in an isolated Git worktree;
 - base SHA checks prevent silently applying stale patches.
 

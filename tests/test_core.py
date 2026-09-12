@@ -381,6 +381,144 @@ class CoreTests(unittest.TestCase):
         self.assertNotEqual(by_path[str(second.resolve())], first_id)
 
 
+    def test_push_requires_local_opt_in(self):
+        repo = self.make_repo()
+        head = sh(repo, "git", "rev-parse", "HEAD")
+        tx = {
+            "protocol": 2,
+            "kind": "transaction",
+            "transaction_id": "tx-push-disabled",
+            "repo": "demo",
+            "base_sha": head,
+            "branch": "ai/push-disabled",
+            "patch": (
+                "diff --git a/README.md b/README.md\n"
+                "--- a/README.md\n"
+                "+++ b/README.md\n"
+                "@@ -1 +1,2 @@\n"
+                " hello\n"
+                "+push\n"
+            ),
+            "run": [],
+            "push": True,
+        }
+        with self.assertRaises(BridgeError):
+            process_transaction(
+                repo,
+                "demo",
+                tx,
+                state_dir=Path(tempfile.mkdtemp(prefix="llmgb-state-")),
+                safe_branch_prefix="ai/",
+                commands={},
+            )
+        self.assertNotEqual(
+            subprocess.run(
+                ["git", "-C", str(repo), "show-ref", "--verify", "refs/heads/ai/push-disabled"],
+                stdout=subprocess.PIPE, stderr=subprocess.PIPE,
+            ).returncode,
+            0,
+        )
+
+    def test_push_uses_origin_safe_refspec_and_disables_hooks(self):
+        repo = self.make_repo()
+        remote = Path(tempfile.mkdtemp(prefix="llmgb-remote-")) / "remote.git"
+        subprocess.run(["git", "init", "--bare", "-q", str(remote)], check=True)
+        sh(repo, "git", "remote", "add", "origin", str(remote))
+        head = sh(repo, "git", "rev-parse", "HEAD")
+        marker = repo / "PUSH_HOOK_RAN"
+        hook = repo / ".git" / "hooks" / "pre-push"
+        hook.write_text(f"#!/bin/sh\ntouch {marker}\nexit 99\n", encoding="utf-8")
+        hook.chmod(0o755)
+        tx = {
+            "protocol": 2,
+            "kind": "transaction",
+            "transaction_id": "tx-push-enabled",
+            "repo": "demo",
+            "base_sha": head,
+            "branch": "ai/push-enabled",
+            "patch": (
+                "diff --git a/README.md b/README.md\n"
+                "--- a/README.md\n"
+                "+++ b/README.md\n"
+                "@@ -1 +1,2 @@\n"
+                " hello\n"
+                "+push\n"
+            ),
+            "run": [],
+            "push": True,
+        }
+        outcome = process_transaction(
+            repo,
+            "demo",
+            tx,
+            state_dir=Path(tempfile.mkdtemp(prefix="llmgb-state-")),
+            safe_branch_prefix="ai/",
+            commands={},
+            allow_push=True,
+        )
+        self.assertFalse(marker.exists())
+        self.assertEqual(outcome.result["status"], "success")
+        self.assertEqual(outcome.result["push"]["status"], "success")
+        remote_sha = subprocess.run(
+            ["git", "--git-dir", str(remote), "rev-parse", "refs/heads/ai/push-enabled"],
+            text=True, stdout=subprocess.PIPE, stderr=subprocess.PIPE, check=True,
+        ).stdout.strip()
+        self.assertEqual(remote_sha, outcome.result["commit"])
+
+    def test_push_failure_preserves_local_commit(self):
+        repo = self.make_repo()
+        secret_remote = Path(tempfile.mkdtemp(prefix="llmgb-secret-")) / "TOKEN_SHOULD_NOT_LEAK" / "remote.git"
+        sh(repo, "git", "remote", "add", "origin", str(secret_remote))
+        head = sh(repo, "git", "rev-parse", "HEAD")
+        tx = {
+            "protocol": 2,
+            "kind": "transaction",
+            "transaction_id": "tx-push-fails",
+            "repo": "demo",
+            "base_sha": head,
+            "branch": "ai/push-fails",
+            "patch": (
+                "diff --git a/README.md b/README.md\n"
+                "--- a/README.md\n"
+                "+++ b/README.md\n"
+                "@@ -1 +1,2 @@\n"
+                " hello\n"
+                "+push\n"
+            ),
+            "run": [],
+            "push": True,
+        }
+        outcome = process_transaction(
+            repo,
+            "demo",
+            tx,
+            state_dir=Path(tempfile.mkdtemp(prefix="llmgb-state-")),
+            safe_branch_prefix="ai/",
+            commands={},
+            allow_push=True,
+        )
+        self.assertEqual(outcome.result["status"], "success")
+        self.assertEqual(outcome.result["push"]["status"], "error")
+        self.assertNotIn("TOKEN_SHOULD_NOT_LEAK", outcome.result["push"]["error"])
+        self.assertEqual(sh(repo, "git", "rev-parse", "ai/push-fails"), outcome.result["commit"])
+
+    def test_push_field_must_be_boolean(self):
+        repo = self.make_repo()
+        head = sh(repo, "git", "rev-parse", "HEAD")
+        tx = {
+            "protocol": 2,
+            "kind": "transaction",
+            "transaction_id": "tx-push-invalid",
+            "repo": "demo",
+            "base_sha": head,
+            "branch": "ai/push-invalid",
+            "patch": "x",
+            "run": [],
+            "push": "yes",
+        }
+        with self.assertRaises(BridgeError):
+            validate_transaction(tx, safe_branch_prefix="ai/")
+
 
 if __name__ == "__main__":
     unittest.main()

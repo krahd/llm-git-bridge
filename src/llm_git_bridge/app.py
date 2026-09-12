@@ -48,6 +48,7 @@ def default_config() -> dict[str, Any]:
         "roots": [],
         "safe_branch_prefix": "ai/",
         "allow_commit": True,
+        "push_enabled_repos": [],
         "poll_interval": 1.0,
         "commands": {},
     }
@@ -275,6 +276,7 @@ def process_pending_once(cfg: dict[str, Any]) -> int:
                     safe_branch_prefix=str(cfg.get("safe_branch_prefix", "ai/")),
                     commands=commands,
                     allow_commit=bool(cfg.get("allow_commit", True)),
+                    allow_push=repo_id in {str(x) for x in cfg.get("push_enabled_repos", [])},
                 )
                 result = outcome.result
                 if outcome.snapshot is not None:
@@ -397,7 +399,9 @@ def cmd_watch(args: argparse.Namespace) -> int:
     signal.signal(signal.SIGINT, handle_stop)
     while not stop:
         try:
-            count = process_pending_once(cfg)
+            # Reload local policy every cycle so configure-* commands take effect
+            # without restarting the long-running daemon.
+            count = process_pending_once(load_config())
             if count:
                 print(f"processed: {count}", flush=True)
         except Exception as exc:
@@ -478,6 +482,21 @@ def cmd_configure_command(args: argparse.Namespace) -> int:
     return 0
 
 
+def cmd_configure_push(args: argparse.Namespace) -> int:
+    cfg = load_config()
+    registry = load_registry()
+    repo_id, _entry = resolve_repo(registry, args.repo)
+    enabled = {str(x) for x in cfg.get("push_enabled_repos", [])}
+    if args.action == "enable":
+        enabled.add(repo_id)
+    else:
+        enabled.discard(repo_id)
+    cfg["push_enabled_repos"] = sorted(enabled)
+    save_config(cfg)
+    print(f"push {'enabled' if args.action == 'enable' else 'disabled'} for {repo_id}")
+    return 0
+
+
 def build_parser() -> argparse.ArgumentParser:
     p = argparse.ArgumentParser(prog=APP_NAME)
     sub = p.add_subparsers(dest="command", required=True)
@@ -515,6 +534,11 @@ def build_parser() -> argparse.ArgumentParser:
     s.add_argument("name")
     s.add_argument("argv", nargs=argparse.REMAINDER)
     s.set_defaults(func=cmd_configure_command)
+
+    s = sub.add_parser("configure-push")
+    s.add_argument("repo")
+    s.add_argument("action", choices=["enable", "disable"])
+    s.set_defaults(func=cmd_configure_push)
 
     return p
 
