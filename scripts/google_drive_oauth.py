@@ -10,6 +10,7 @@ from __future__ import annotations
 import argparse
 import configparser
 import json
+import secrets
 import os
 import re
 import shutil
@@ -47,6 +48,40 @@ def _run(argv: list[str], *, check: bool = True, timeout: float | None = 30) -> 
     return proc
 
 
+def _run_capture(argv: list[str], *, timeout: float = 20) -> subprocess.CompletedProcess[str]:
+    try:
+        return subprocess.run(
+            argv,
+            text=True,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            timeout=timeout,
+        )
+    except (OSError, subprocess.TimeoutExpired) as exc:
+        raise SetupError(f"command failed to run: {argv[0]}") from exc
+
+
+def obscure_rclone_secret(secret: str) -> str:
+    """Obscure a config password through rclone without exposing it in argv."""
+    try:
+        proc = subprocess.run(
+            ["rclone", "obscure", "-"],
+            input=secret,
+            text=True,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            timeout=10,
+        )
+    except (OSError, subprocess.TimeoutExpired) as exc:
+        raise SetupError("rclone could not obscure the OAuth client secret") from exc
+    if proc.returncode != 0:
+        raise SetupError("rclone could not obscure the OAuth client secret")
+    obscured = proc.stdout.strip()
+    if not obscured or len(obscured) > 4096 or any(ch in obscured for ch in "\r\n\x00"):
+        raise SetupError("rclone returned an invalid obscured client secret")
+    return obscured
+
+
 def _load_json_object(path: Path) -> dict[str, Any]:
     def reject_duplicates(pairs: list[tuple[str, Any]]) -> dict[str, Any]:
         out: dict[str, Any] = {}
@@ -56,10 +91,17 @@ def _load_json_object(path: Path) -> dict[str, Any]:
             out[key] = value
         return out
 
+    def reject_constant(value: str) -> Any:
+        raise SetupError(f"invalid JSON constant: {value}")
+
     try:
         if path.stat().st_size > MAX_JSON_BYTES:
             raise SetupError(f"JSON file is unexpectedly large: {path.name}")
-        obj = json.loads(path.read_text(encoding="utf-8-sig"), object_pairs_hook=reject_duplicates)
+        obj = json.loads(
+            path.read_text(encoding="utf-8-sig"),
+            object_pairs_hook=reject_duplicates,
+            parse_constant=reject_constant,
+        )
     except SetupError:
         raise
     except (OSError, UnicodeError, json.JSONDecodeError) as exc:
@@ -287,8 +329,11 @@ def update_plaintext_rclone_config(
     client_secret: str,
     *,
     token: str | None = None,
-) -> tuple[bytes, dict[str, str]]:
+    expected_original: bytes | None = None,
+) -> tuple[bytes, dict[str, str], bytes]:
     original = path.read_bytes()
+    if expected_original is not None and original != expected_original:
+        raise SetupError("rclone config changed during OAuth migration; refusing to overwrite it")
     try:
         text = original.decode("utf-8")
     except UnicodeDecodeError as exc:
@@ -313,10 +358,13 @@ def update_plaintext_rclone_config(
             fh.flush()
             os.fsync(fh.fileno())
         os.chmod(tmp, 0o600)
+        if expected_original is not None and path.read_bytes() != expected_original:
+            raise SetupError("rclone config changed during OAuth migration; refusing to overwrite it")
         os.replace(tmp, path)
     finally:
         tmp.unlink(missing_ok=True)
-    return original, before
+    rewritten_bytes = rewritten.encode("utf-8")
+    return original, before, rewritten_bytes
 
 
 def _acquire_config_lock(config_path: Path):
@@ -436,6 +484,18 @@ def restore_bytes(path: Path, original: bytes) -> None:
         tmp.unlink(missing_ok=True)
 
 
+def restore_bytes_if_unchanged(path: Path, expected_current: bytes, original: bytes) -> bool:
+    """Rollback only if no other process changed the config after our write."""
+    try:
+        current = path.read_bytes()
+    except OSError:
+        return False
+    if current != expected_current:
+        return False
+    restore_bytes(path, original)
+    return True
+
+
 def verify_rclone_config(
     path: Path,
     remote: str,
@@ -459,23 +519,46 @@ def verify_rclone_config(
 
 
 def validate_mailbox(remote: str, config_path: Path) -> None:
-    common = ["rclone", "--config", str(config_path), "lsf"]
+    """Verify the candidate OAuth token can read, create, read back, and delete."""
+    common = ["rclone", "--config", str(config_path)]
     checks = [
-        ([*common, f"{remote}:v2/meta", "--files-only", "--max-depth", "1"], "repos.json"),
-        ([*common, f"{remote}:v2/transactions", "--files-only", "--max-depth", "1"], None),
+        ([*common, "lsf", f"{remote}:v2/meta", "--files-only", "--max-depth", "1"], "repos.json"),
+        ([*common, "lsf", f"{remote}:v2/transactions", "--files-only", "--max-depth", "1"], None),
     ]
     for argv, required in checks:
-        proc = subprocess.run(
-            argv,
-            text=True,
-            stdout=subprocess.PIPE,
-            stderr=subprocess.PIPE,
-            timeout=20,
-        )
+        proc = _run_capture(argv, timeout=20)
         if proc.returncode != 0:
             raise SetupError("rclone could not access the existing bridge mailbox")
         if required and required not in proc.stdout.splitlines():
             raise SetupError("existing bridge mailbox was not found under the configured root")
+
+    probe_name = f".oauth-probe-{secrets.token_hex(12)}.txt"
+    remote_probe = f"{remote}:v2/meta/{probe_name}"
+    payload = f"llm-git-bridge oauth write probe {secrets.token_hex(16)}\n"
+    created = False
+    with tempfile.TemporaryDirectory(prefix="llmgb-oauth-probe-") as tmp:
+        local = Path(tmp) / probe_name
+        local.write_text(payload, encoding="utf-8")
+        try:
+            create = _run_capture([*common, "copyto", str(local), remote_probe], timeout=20)
+            if create.returncode != 0:
+                raise SetupError("OAuth token cannot create files in the bridge mailbox")
+            created = True
+
+            read_back = _run_capture([*common, "cat", remote_probe], timeout=20)
+            if read_back.returncode != 0 or read_back.stdout != payload:
+                raise SetupError("OAuth token cannot read back files from the bridge mailbox")
+
+            delete = _run_capture([*common, "deletefile", remote_probe], timeout=20)
+            if delete.returncode != 0:
+                raise SetupError("OAuth token cannot delete files from the bridge mailbox")
+            created = False
+        finally:
+            if created:
+                try:
+                    _run_capture([*common, "deletefile", remote_probe], timeout=20)
+                except SetupError:
+                    pass
 
 
 def _assert_watcher_stopped(timeout: float = 5.0) -> None:
@@ -574,6 +657,7 @@ def finish(credentials: Path | None, *, keep_credentials: bool) -> int:
     if cred_path.is_symlink() or not cred_path.is_file():
         raise SetupError("credentials path is not a regular file")
     client_id, client_secret = validate_desktop_credentials(cred_path)
+    stored_client_secret = obscure_rclone_secret(client_secret)
     try:
         os.chmod(cred_path, 0o600)
     except OSError:
@@ -583,6 +667,7 @@ def finish(credentials: Path | None, *, keep_credentials: bool) -> int:
     config_lock = _acquire_config_lock(config_path)
     _cleanup_oauth_temp_dirs(config_path)
     original: bytes | None = None
+    installed_bytes: bytes | None = None
     daemon_was_running = _daemon_is_running()
     stopped = False
     success = False
@@ -600,7 +685,7 @@ def finish(credentials: Path | None, *, keep_credentials: bool) -> int:
             config_path,
             remote,
             client_id,
-            client_secret,
+            stored_client_secret,
         )
         print(f"Prepared OAuth client credentials for {remote}: without exposing the secret on a command line.")
         print("A browser authorization step is now required by Google OAuth.")
@@ -617,27 +702,38 @@ def finish(credentials: Path | None, *, keep_credentials: bool) -> int:
             timeout=None,
         )
 
-        verify_rclone_config(temporary_config, remote, client_id, client_secret, before)
+        verify_rclone_config(temporary_config, remote, client_id, stored_client_secret, before)
         validate_mailbox(remote, temporary_config)
         new_token = oauth_token_from_config(temporary_config, remote)
 
-        _original_again, _before_again = update_plaintext_rclone_config(
+        if config_path.read_bytes() != original:
+            raise SetupError("rclone config changed during OAuth migration; refusing to overwrite it")
+        _original_again, _before_again, installed_bytes = update_plaintext_rclone_config(
             config_path,
             remote,
             client_id,
-            client_secret,
+            stored_client_secret,
             token=new_token,
+            expected_original=original,
         )
-        verify_rclone_config(config_path, remote, client_id, client_secret, before)
+        verify_rclone_config(config_path, remote, client_id, stored_client_secret, before)
         success = True
     except KeyboardInterrupt:
-        migration_error = SetupError("OAuth migration cancelled; original rclone config restored")
-        if original is not None:
-            restore_bytes(config_path, original)
+        migration_error = SetupError("OAuth migration cancelled")
+        if original is not None and installed_bytes is not None:
+            if restore_bytes_if_unchanged(config_path, installed_bytes, original):
+                migration_error = SetupError("OAuth migration cancelled; original rclone config restored")
+            else:
+                migration_error = SetupError(
+                    "OAuth migration cancelled after the config changed concurrently; automatic rollback refused"
+                )
     except Exception as exc:
         migration_error = exc
-        if original is not None:
-            restore_bytes(config_path, original)
+        if original is not None and installed_bytes is not None:
+            if not restore_bytes_if_unchanged(config_path, installed_bytes, original):
+                migration_error = SetupError(
+                    "OAuth migration failed after the config changed concurrently; automatic rollback refused"
+                )
     finally:
         if temporary_config is not None:
             shutil.rmtree(temporary_config.parent, ignore_errors=True)

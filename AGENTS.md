@@ -11,4 +11,4 @@ When modifying the project:
 - retain stale-SHA checks and safe branch-prefix validation;
 - minimise mailbox/Drive round trips without racing ambiguous Drive writes; Google Drive permits duplicate filenames;
 - keep the standard-library-only runtime unless a dependency has a clear benefit;
-- run `python3 -m unittest discover -s tests -v` before committing.
+- run `PYTHONPATH=src python3 -m unittest discover -s tests -v` before committing.

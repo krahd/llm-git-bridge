@@ -6,7 +6,7 @@ The migration deliberately installs **no Google software locally**. Do not insta
 
 ## What can and cannot be automated
 
-Google requires account/project consent decisions in its web UI. The helper opens the relevant Google Cloud pages, records the selected project ID, consumes the downloaded Desktop-client JSON, and reauthorizes only the configured bridge remote through a private temporary rclone config containing no unrelated remotes. It validates the existing mailbox before atomically updating the authoritative rclone config, rolls back on failure, and restores the daemon to its previous running/stopped state.
+Google requires account/project consent decisions in its web UI. The helper opens the relevant Google Cloud pages, records the selected project ID, consumes the downloaded Desktop-client JSON, and reauthorizes only the configured bridge remote through a private temporary rclone config containing no unrelated remotes. It validates the candidate OAuth token against the existing mailbox before atomically updating the authoritative rclone config, refuses concurrent config edits, rolls back only when doing so cannot overwrite another writer, and restores the daemon to its previous running/stopped state.
 
 The unavoidable browser-side actions are:
 
@@ -46,6 +46,6 @@ python3 scripts/google_drive_oauth.py finish
 python3 scripts/google_drive_oauth.py finish --credentials /path/to/client_secret.json
 ```
 
-During `finish`, rclone opens the Google authorization page. Sign into/authorize the same Google Drive account used by the bridge mailbox. No client secret is placed on a command line. On success the helper verifies `v2/meta/repos.json` and the transactions mailbox through the existing root, restarts the bridge, and deletes the downloaded credential JSON. Use `--keep-credentials` only if you intentionally want to retain that file.
+During `finish`, rclone opens the Google authorization page. Sign into/authorize the same Google Drive account used by the bridge mailbox. The client secret is passed to `rclone obscure -` over stdin and is never placed on a command line; only rclone's obscured representation is written to configuration. Before the authoritative config is changed, the candidate token must list the mailbox and complete a create/read-back/delete probe inside `v2/meta`, so a read-only or incorrectly scoped token is rejected safely. The helper also verifies that the authoritative rclone config has not changed since it was read and uses guarded rollback if a later step fails. On success it restarts the bridge and deletes the downloaded credential JSON. Use `--keep-credentials` only if you intentionally want to retain that file.
 
 Afterward, the remote `doctor` request should report `custom_drive_client_id_configured: true` and a healthy RC socket.

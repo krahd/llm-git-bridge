@@ -71,6 +71,8 @@ SENSITIVE_ENV_EXACT = {
     "RCLONE_CONFIG_PASS",
 }
 COMMAND_OUTPUT_LIMIT = 256_000
+BRIDGE_TX_TRAILER = "LLM-Git-Bridge-Transaction"
+BRIDGE_REQUEST_HASH_TRAILER = "LLM-Git-Bridge-Request-SHA256"
 
 
 
@@ -137,8 +139,15 @@ def strict_json_loads(text: str) -> Any:
             obj[key] = value
         return obj
 
+    def reject_constant(value: str) -> Any:
+        raise BridgeError(f"invalid JSON constant: {value}")
+
     try:
-        return json.loads(text, object_pairs_hook=reject_duplicates)
+        return json.loads(
+            text,
+            object_pairs_hook=reject_duplicates,
+            parse_constant=reject_constant,
+        )
     except json.JSONDecodeError as exc:
         raise BridgeError(f"invalid JSON: {exc.msg}") from exc
 
@@ -157,6 +166,17 @@ def validate_transaction_id(value: Any) -> str:
     if not isinstance(value, str) or not TRANSACTION_ID_RE.fullmatch(value):
         raise BridgeError("invalid transaction_id")
     return value
+
+
+def transaction_request_sha256(obj: dict[str, Any]) -> str:
+    """Hash the complete canonical request for crash-safe replay identity."""
+    payload = json.dumps(
+        obj,
+        sort_keys=True,
+        separators=(",", ":"),
+        ensure_ascii=False,
+    ).encode("utf-8")
+    return hashlib.sha256(payload).hexdigest()
 
 
 def save_json(path: Path, obj: Any) -> None:
@@ -500,6 +520,11 @@ def validate_transaction(obj: dict[str, Any], *, safe_branch_prefix: str, max_pa
     message = obj.get("commit_message")
     if message is not None and (not isinstance(message, str) or not message.strip() or len(message) > 500):
         raise BridgeError("invalid commit_message")
+    if isinstance(message, str) and re.search(
+        rf"(?im)^\s*(?:{re.escape(BRIDGE_TX_TRAILER)}|{re.escape(BRIDGE_REQUEST_HASH_TRAILER)})\s*:",
+        message,
+    ):
+        raise BridgeError("commit_message uses a reserved bridge trailer")
     push = obj.get("push", False)
     if not isinstance(push, bool):
         raise BridgeError("push must be a boolean")
@@ -507,6 +532,41 @@ def validate_transaction(obj: dict[str, Any], *, safe_branch_prefix: str, max_pa
     if not isinstance(publish_snapshot, bool):
         raise BridgeError("publish_snapshot must be a boolean")
     return obj
+
+
+def _bridge_commit_identity(repo: Path, commit: str) -> tuple[str, str] | None:
+    """Return (transaction_id, request_hash) for an unambiguous bridge commit."""
+    body = git(repo, "show", "-s", "--format=%B", commit, timeout=30).stdout
+    tx_matches = re.findall(
+        rf"(?im)^{re.escape(BRIDGE_TX_TRAILER)}:\s*([^\s]+)\s*$",
+        body,
+    )
+    hash_matches = re.findall(
+        rf"(?im)^{re.escape(BRIDGE_REQUEST_HASH_TRAILER)}:\s*([0-9a-f]{{64}})\s*$",
+        body,
+    )
+    if len(tx_matches) != 1 or len(hash_matches) != 1:
+        return None
+    try:
+        txid = validate_transaction_id(tx_matches[0])
+    except BridgeError:
+        return None
+    return txid, hash_matches[0]
+
+
+def _bridge_commit_matches_request(
+    repo: Path,
+    commit: str,
+    *,
+    txid: str,
+    request_hash: str,
+    base_sha: str,
+) -> bool:
+    identity = _bridge_commit_identity(repo, commit)
+    if identity != (txid, request_hash):
+        return False
+    parents = git(repo, "show", "-s", "--format=%P", commit, timeout=30).stdout.split()
+    return len(parents) == 1 and parents[0].lower() == base_sha.lower()
 
 
 def branch_exists(repo: Path, branch: str) -> bool:
@@ -870,39 +930,62 @@ def process_transaction(
     txid = tx["transaction_id"]
     branch = tx["branch"]
     base_sha = tx["base_sha"].lower()
+    request_hash = transaction_request_sha256(tx)
     repo = repo.resolve()
     ensure_tracked_clean(repo)
 
-    if not allow_commit:
-        raise BridgeError("commits are disabled locally for this repository")
-
     push_requested = bool(tx.get("push", False))
     publish_snapshot_requested = bool(tx.get("publish_snapshot", False))
-    if push_requested and not allow_push:
-        raise BridgeError("push requested but is not enabled locally for this repository")
 
     if not commit_exists(repo, base_sha):
         raise BridgeError(f"base commit does not exist locally: {base_sha}")
 
     existing = branch_exists(repo, branch)
+    recovered_commit: str | None = None
     if existing:
         tip = git(repo, "rev-parse", branch).stdout.strip().lower()
         if tip != base_sha:
-            raise BridgeError(f"stale branch base: {branch} is at {tip}, transaction expects {base_sha}")
+            identity = _bridge_commit_identity(repo, tip)
+            if identity is not None and identity[0] == txid and identity[1] != request_hash:
+                raise BridgeError("transaction_id was already committed with a different request")
+            if _bridge_commit_matches_request(
+                repo,
+                tip,
+                txid=txid,
+                request_hash=request_hash,
+                base_sha=base_sha,
+            ):
+                # The previous daemon may have died after git commit made the
+                # branch durable but before its local/remote result was saved.
+                # The reserved trailers bind the commit to the complete request,
+                # so resuming here is idempotent and does not re-run patch/tests.
+                recovered_commit = tip
+            else:
+                raise BridgeError(f"stale branch base: {branch} is at {tip}, transaction expects {base_sha}")
     else:
         current_head = git(repo, "rev-parse", "HEAD").stdout.strip().lower()
         if current_head != base_sha:
             raise BridgeError(f"stale repository base: HEAD is {current_head}, transaction expects {base_sha}")
 
+    if recovered_commit is None and not allow_commit:
+        raise BridgeError("commits are disabled locally for this repository")
+    if recovered_commit is None and push_requested and not allow_push:
+        raise BridgeError("push requested but is not enabled locally for this repository")
+
     worktrees = state_dir / "worktrees"
     worktrees.mkdir(parents=True, exist_ok=True)
     wt = worktrees / txid
+
+    # A process crash can leave both the directory and Git's worktree metadata.
+    # Retire both before resuming so a durable bridge commit can be recovered.
+    git(repo, "worktree", "remove", "--force", str(wt), check=False, timeout=120)
     if wt.exists():
-        shutil.rmtree(wt)
+        shutil.rmtree(wt, ignore_errors=True)
+    git(repo, "worktree", "prune", check=False, timeout=60)
 
     t = time.monotonic()
     created_new_branch = not existing
-    commit_created = False
+    commit_created = recovered_commit is not None
     if existing:
         git(repo, "-c", "core.hooksPath=/dev/null", "worktree", "add", str(wt), branch, timeout=120)
     else:
@@ -913,141 +996,175 @@ def process_transaction(
     command_workspace: Path | None = None
     command_home: Path | None = None
     try:
-        patch_path = state_dir / "transactions" / txid / "change.patch"
-        atomic_write_text(patch_path, tx["patch"])
-
-        check_apply = run(
-            ["git", "-C", str(wt), "apply", "--check", "--index", str(patch_path)],
-            check=False,
-            timeout=60,
-        )
-        if check_apply.returncode != 0:
-            raise BridgeError("git apply --check failed")
-
-        run(["git", "-C", str(wt), "apply", "--index", str(patch_path)], timeout=60)
-        diff_check = run(
-            ["git", "-C", str(wt), "diff", "--cached", "--check"],
-            check=False,
-            timeout=60,
-        )
-        if diff_check.returncode != 0:
-            raise BridgeError("git diff --check failed")
-        ensure_changed_files_are_regular(wt)
-        t = mark("patch_apply_s", t)
-
-        staged_tree = git(wt, "write-tree", timeout=30).stdout.strip()
-        base_tree = git(wt, "rev-parse", "HEAD^{tree}", timeout=30).stdout.strip()
-        if staged_tree == base_tree:
-            raise BridgeError("patch produced no changes")
-
-        allowed_commands = commands or {}
         command_results: list[dict[str, Any]] = []
-        command_state = _repo_control_state(wt)
-        if tx.get("run"):
-            command_workspace, command_home = _prepare_command_workspace(wt, state_dir, txid)
-        for index, name in enumerate(tx.get("run", []), start=1):
-            argv = allowed_commands.get(name)
-            if argv is None:
-                raise BridgeError(f"requested command is not configured locally: {name}")
-            if not isinstance(argv, list) or not argv or not all(isinstance(x, str) and x for x in argv):
-                raise BridgeError(f"configured command {name!r} is invalid")
-            command_started = time.monotonic()
-            assert command_workspace is not None and command_home is not None
-            command_argv = _command_argv_for_worktree(argv, repo, command_workspace)
-            proc = run_configured_command(
-                command_argv,
-                cwd=command_workspace,
-                timeout=600,
-                env=_command_environment(command_workspace, command_home),
-            )
-            _write_command_log(state_dir, txid, index, name, proc)
-            command_results.append(
-                {
-                    "name": name,
-                    "returncode": proc.returncode,
-                    "duration_s": round(time.monotonic() - command_started, 4),
-                }
-            )
-            if proc.timed_out:
-                raise BridgeError(f"configured command timed out: {name}")
-            if proc.returncode != 0:
-                raise BridgeError(f"configured command failed: {name}")
-            _assert_command_invariants(wt, command_state)
-        t = mark("commands_s", t)
+        if recovered_commit is not None:
+            commit_sha = recovered_commit
+            command_results = [
+                {"name": name, "returncode": 0, "recovered": True}
+                for name in tx.get("run", [])
+            ]
+            timings["recovery_s"] = round(time.monotonic() - t, 4)
+            t = time.monotonic()
+        else:
+            patch_path = state_dir / "transactions" / txid / "change.patch"
+            atomic_write_text(patch_path, tx["patch"])
 
-        message = tx.get("commit_message") or f"Apply bridge transaction {txid}"
-        run(
-            [
-                "git",
-                "-C",
-                str(wt),
-                "-c",
-                "core.hooksPath=/dev/null",
-                "-c",
-                "commit.gpgSign=false",
-                "commit",
-                "-m",
-                message,
-            ],
-            timeout=120,
-        )
-        commit_sha = run(["git", "-C", str(wt), "rev-parse", "HEAD"], timeout=30).stdout.strip()
-        commit_created = True
-        parent_sha = git(wt, "rev-parse", "HEAD^", timeout=30).stdout.strip().lower()
-        if parent_sha != base_sha:
-            raise BridgeError("commit parent invariant failed")
-        # Cleanup after the commit is best-effort. The commit is already durable;
-        # failure to remove disposable untracked artifacts must not downgrade it.
-        run(["git", "-C", str(wt), "clean", "-ffd"], check=False, timeout=60)
-        t = mark("commit_s", t)
+            check_apply = run(
+                ["git", "-C", str(wt), "apply", "--check", "--index", str(patch_path)],
+                check=False,
+                timeout=60,
+            )
+            if check_apply.returncode != 0:
+                raise BridgeError("git apply --check failed")
+
+            run(["git", "-C", str(wt), "apply", "--index", str(patch_path)], timeout=60)
+            diff_check = run(
+                ["git", "-C", str(wt), "diff", "--cached", "--check"],
+                check=False,
+                timeout=60,
+            )
+            if diff_check.returncode != 0:
+                raise BridgeError("git diff --check failed")
+            ensure_changed_files_are_regular(wt)
+            t = mark("patch_apply_s", t)
+
+            staged_tree = git(wt, "write-tree", timeout=30).stdout.strip()
+            base_tree = git(wt, "rev-parse", "HEAD^{tree}", timeout=30).stdout.strip()
+            if staged_tree == base_tree:
+                raise BridgeError("patch produced no changes")
+
+            allowed_commands = commands or {}
+            command_state = _repo_control_state(wt)
+            if tx.get("run"):
+                command_workspace, command_home = _prepare_command_workspace(wt, state_dir, txid)
+            for index, name in enumerate(tx.get("run", []), start=1):
+                argv = allowed_commands.get(name)
+                if argv is None:
+                    raise BridgeError(f"requested command is not configured locally: {name}")
+                if not isinstance(argv, list) or not argv or not all(isinstance(x, str) and x for x in argv):
+                    raise BridgeError(f"configured command {name!r} is invalid")
+                command_started = time.monotonic()
+                assert command_workspace is not None and command_home is not None
+                command_argv = _command_argv_for_worktree(argv, repo, command_workspace)
+                proc = run_configured_command(
+                    command_argv,
+                    cwd=command_workspace,
+                    timeout=600,
+                    env=_command_environment(command_workspace, command_home),
+                )
+                _write_command_log(state_dir, txid, index, name, proc)
+                command_results.append(
+                    {
+                        "name": name,
+                        "returncode": proc.returncode,
+                        "duration_s": round(time.monotonic() - command_started, 4),
+                    }
+                )
+                if proc.timed_out:
+                    raise BridgeError(f"configured command timed out: {name}")
+                if proc.returncode != 0:
+                    raise BridgeError(f"configured command failed: {name}")
+                _assert_command_invariants(wt, command_state)
+            t = mark("commands_s", t)
+
+            message = tx.get("commit_message") or f"Apply bridge transaction {txid}"
+            trailer_block = (
+                f"{BRIDGE_TX_TRAILER}: {txid}\n"
+                f"{BRIDGE_REQUEST_HASH_TRAILER}: {request_hash}"
+            )
+            run(
+                [
+                    "git",
+                    "-C",
+                    str(wt),
+                    "-c",
+                    "core.hooksPath=/dev/null",
+                    "-c",
+                    "commit.gpgSign=false",
+                    "commit",
+                    "-m",
+                    message,
+                    "-m",
+                    trailer_block,
+                ],
+                timeout=120,
+            )
+            commit_sha = run(["git", "-C", str(wt), "rev-parse", "HEAD"], timeout=30).stdout.strip()
+            commit_created = True
+            if not _bridge_commit_matches_request(
+                wt,
+                commit_sha,
+                txid=txid,
+                request_hash=request_hash,
+                base_sha=base_sha,
+            ):
+                raise BridgeError("bridge commit identity invariant failed")
+            # Cleanup after the commit is best-effort. The commit is already durable;
+            # failure to remove disposable untracked artifacts must not downgrade it.
+            run(["git", "-C", str(wt), "clean", "-ffd"], check=False, timeout=60)
+            t = mark("commit_s", t)
 
         push_result: dict[str, Any] | None = None
         if push_requested:
             push_started = time.monotonic()
             ref = f"refs/heads/{branch}"
-            try:
-                push_proc = run(
-                    [
-                        "git",
-                        "-C",
-                        str(wt),
-                        "-c",
-                        "core.hooksPath=/dev/null",
-                        "push",
-                        "--porcelain",
-                        "origin",
-                        f"{ref}:{ref}",
-                    ],
-                    check=False,
-                    timeout=120,
-                    env={**os.environ, "GIT_TERMINAL_PROMPT": "0"},
-                )
-                if push_proc.returncode == 0:
-                    push_result = {
-                        "requested": True,
-                        "status": "success",
-                        "remote": "origin",
-                        "ref": ref,
-                    }
-                else:
-                    push_result = {
-                        "requested": True,
-                        "status": "error",
-                        "remote": "origin",
-                        "ref": ref,
-                        "error": f"git push failed with exit code {push_proc.returncode}",
-                    }
-            except BridgeError:
-                # The commit is already durable locally. Network/process failure is
-                # secondary and must not turn the transaction itself into failure.
+            if not allow_push:
+                # A crash-recovered commit is already durable. A later local policy
+                # change may disable pushing; preserve commit success without violating
+                # the current opt-in policy.
                 push_result = {
                     "requested": True,
                     "status": "error",
                     "remote": "origin",
                     "ref": ref,
-                    "error": "git push failed or timed out",
+                    "error": "push is no longer enabled locally",
                 }
-            timings["push_s"] = round(time.monotonic() - push_started, 4)
+                timings["push_s"] = round(time.monotonic() - push_started, 4)
+            else:
+                try:
+                    push_proc = run(
+                        [
+                            "git",
+                            "-C",
+                            str(wt),
+                            "-c",
+                            "core.hooksPath=/dev/null",
+                            "push",
+                            "--porcelain",
+                            "origin",
+                            f"{ref}:{ref}",
+                        ],
+                        check=False,
+                        timeout=120,
+                        env={**os.environ, "GIT_TERMINAL_PROMPT": "0"},
+                    )
+                    if push_proc.returncode == 0:
+                        push_result = {
+                            "requested": True,
+                            "status": "success",
+                            "remote": "origin",
+                            "ref": ref,
+                        }
+                    else:
+                        push_result = {
+                            "requested": True,
+                            "status": "error",
+                            "remote": "origin",
+                            "ref": ref,
+                            "error": f"git push failed with exit code {push_proc.returncode}",
+                        }
+                except BridgeError:
+                    # The commit is already durable locally. Network/process failure is
+                    # secondary and must not turn the transaction itself into failure.
+                    push_result = {
+                        "requested": True,
+                        "status": "error",
+                        "remote": "origin",
+                        "ref": ref,
+                        "error": "git push failed or timed out",
+                    }
+                timings["push_s"] = round(time.monotonic() - push_started, 4)
+
 
         snapshot_error = False
         if publish_snapshot_requested:
@@ -1072,6 +1189,8 @@ def process_transaction(
             "commands": command_results,
             "timings": timings,
         }
+        if recovered_commit is not None:
+            result["recovered_after_crash"] = True
         if push_result is not None:
             result["push"] = push_result
         if publish_snapshot_requested:

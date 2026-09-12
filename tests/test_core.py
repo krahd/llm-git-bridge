@@ -31,6 +31,14 @@ def sh(cwd: Path, *args: str) -> str:
 
 
 class CoreTests(unittest.TestCase):
+    def test_suite_imports_bridge_from_current_checkout(self):
+        project_root = Path(__file__).resolve().parents[1]
+        imported_core = Path(core.__file__).resolve()
+        self.assertTrue(
+            imported_core.is_relative_to(project_root),
+            f"tests imported bridge code outside current checkout: {imported_core}",
+        )
+
     def make_repo(self) -> Path:
         root = Path(tempfile.mkdtemp(prefix="llmgb-test-"))
         sh(root, "git", "init", "-q")
@@ -1174,6 +1182,154 @@ class CoreTests(unittest.TestCase):
             ).returncode,
             0,
         )
+
+
+    def test_identical_retry_recovers_committed_transaction_without_second_commit(self):
+        repo = self.make_repo()
+        head = sh(repo, "git", "rev-parse", "HEAD")
+        tx = {
+            "protocol": 2,
+            "kind": "transaction",
+            "transaction_id": "tx-crash-recovery",
+            "repo": "demo",
+            "base_sha": head,
+            "branch": "ai/crash-recovery",
+            "patch": (
+                "diff --git a/README.md b/README.md\n"
+                "--- a/README.md\n"
+                "+++ b/README.md\n"
+                "@@ -1 +1,2 @@\n"
+                " hello\n"
+                "+recovered\n"
+            ),
+            "run": [],
+            "commit_message": "crash recovery test",
+        }
+        state = Path(tempfile.mkdtemp(prefix="llmgb-state-"))
+        first = process_transaction(
+            repo,
+            "demo",
+            tx,
+            state_dir=state,
+            safe_branch_prefix="ai/",
+            commands={},
+        )
+        commit = first.result["commit"]
+        second = process_transaction(
+            repo,
+            "demo",
+            tx,
+            state_dir=state,
+            safe_branch_prefix="ai/",
+            commands={},
+            allow_commit=False,
+        )
+        self.assertEqual(second.result["commit"], commit)
+        self.assertTrue(second.result["recovered_after_crash"])
+        self.assertEqual(sh(repo, "git", "rev-list", "--count", f"{head}..ai/crash-recovery"), "1")
+
+    def test_recovered_commit_stays_successful_if_push_is_later_disabled(self):
+        repo = self.make_repo()
+        head = sh(repo, "git", "rev-parse", "HEAD")
+        tx = {
+            "protocol": 2,
+            "kind": "transaction",
+            "transaction_id": "tx-recover-push-policy",
+            "repo": "demo",
+            "base_sha": head,
+            "branch": "ai/recover-push-policy",
+            "patch": (
+                "diff --git a/README.md b/README.md\n"
+                "--- a/README.md\n"
+                "+++ b/README.md\n"
+                "@@ -1 +1,2 @@\n"
+                " hello\n"
+                "+durable\n"
+            ),
+            "run": [],
+            "push": True,
+        }
+        state = Path(tempfile.mkdtemp(prefix="llmgb-state-"))
+        first = process_transaction(
+            repo,
+            "demo",
+            tx,
+            state_dir=state,
+            safe_branch_prefix="ai/",
+            commands={},
+            allow_push=True,
+        )
+        recovered = process_transaction(
+            repo,
+            "demo",
+            tx,
+            state_dir=state,
+            safe_branch_prefix="ai/",
+            commands={},
+            allow_commit=False,
+            allow_push=False,
+        )
+        self.assertEqual(recovered.result["status"], "success")
+        self.assertEqual(recovered.result["commit"], first.result["commit"])
+        self.assertTrue(recovered.result["recovered_after_crash"])
+        self.assertEqual(recovered.result["push"]["status"], "error")
+        self.assertIn("no longer enabled", recovered.result["push"]["error"])
+
+    def test_retry_with_same_transaction_id_but_changed_request_is_rejected(self):
+        repo = self.make_repo()
+        head = sh(repo, "git", "rev-parse", "HEAD")
+        tx = {
+            "protocol": 2,
+            "kind": "transaction",
+            "transaction_id": "tx-hash-binding",
+            "repo": "demo",
+            "base_sha": head,
+            "branch": "ai/hash-binding",
+            "patch": (
+                "diff --git a/README.md b/README.md\n"
+                "--- a/README.md\n"
+                "+++ b/README.md\n"
+                "@@ -1 +1,2 @@\n"
+                " hello\n"
+                "+one\n"
+            ),
+            "run": [],
+        }
+        state = Path(tempfile.mkdtemp(prefix="llmgb-state-"))
+        process_transaction(
+            repo,
+            "demo",
+            tx,
+            state_dir=state,
+            safe_branch_prefix="ai/",
+            commands={},
+        )
+        changed = dict(tx)
+        changed["commit_message"] = "different request bytes"
+        with self.assertRaisesRegex(BridgeError, "already committed with a different request"):
+            process_transaction(
+                repo,
+                "demo",
+                changed,
+                state_dir=state,
+                safe_branch_prefix="ai/",
+                commands={},
+            )
+
+    def test_commit_message_cannot_spoof_reserved_bridge_trailers(self):
+        tx = {
+            "protocol": 2,
+            "kind": "transaction",
+            "transaction_id": "tx-trailer-spoof",
+            "repo": "demo",
+            "base_sha": "a" * 40,
+            "branch": "ai/trailer-spoof",
+            "patch": "x",
+            "run": [],
+            "commit_message": "hello\n\nLLM-Git-Bridge-Transaction: forged",
+        }
+        with self.assertRaisesRegex(BridgeError, "reserved bridge trailer"):
+            validate_transaction(tx, safe_branch_prefix="ai/")
 
 
 if __name__ == "__main__":

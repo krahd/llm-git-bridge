@@ -81,7 +81,10 @@ class AppTests(unittest.TestCase):
         sh(self.repo, "git", "commit", "-qm", "initial")
 
         self.fake = FakeTransport()
-        self.old = (app.STATE_DIR, app.REGISTRY_FILE, app.PUBLISHED_DIR)
+        self.config = self.tmp / "config"
+        self.old = (app.CONFIG_DIR, app.CONFIG_FILE, app.STATE_DIR, app.REGISTRY_FILE, app.PUBLISHED_DIR)
+        app.CONFIG_DIR = self.config
+        app.CONFIG_FILE = self.config / "config.json"
         app.STATE_DIR = self.state
         app.REGISTRY_FILE = self.state / "registry.json"
         app.PUBLISHED_DIR = self.state / "published-results"
@@ -99,8 +102,28 @@ class AppTests(unittest.TestCase):
 
     def tearDown(self):
         self.transport_patch.stop()
-        app.STATE_DIR, app.REGISTRY_FILE, app.PUBLISHED_DIR = self.old
+        app.CONFIG_DIR, app.CONFIG_FILE, app.STATE_DIR, app.REGISTRY_FILE, app.PUBLISHED_DIR = self.old
 
+
+    def test_result_auth_key_survives_runtime_state_deletion(self):
+        first = app._result_auth_key()
+        self.assertEqual(len(first), 32)
+        key_path = app.CONFIG_DIR / "result-auth.key"
+        self.assertTrue(key_path.exists())
+        self.assertEqual(key_path.stat().st_mode & 0o777, 0o600)
+        __import__("shutil").rmtree(app.STATE_DIR, ignore_errors=True)
+        second = app._result_auth_key()
+        self.assertEqual(second, first)
+
+    def test_result_auth_key_migrates_legacy_state_key(self):
+        legacy = app.STATE_DIR / "result-auth.key"
+        legacy.parent.mkdir(parents=True, exist_ok=True)
+        expected = bytes.fromhex("42" * 32)
+        legacy.write_text(expected.hex() + "\n", encoding="ascii")
+        self.assertEqual(app._result_auth_key(), expected)
+        migrated = app.CONFIG_DIR / "result-auth.key"
+        self.assertTrue(migrated.exists())
+        self.assertEqual(bytes.fromhex(migrated.read_text().strip()), expected)
 
     def test_push_is_disabled_by_default(self):
         self.assertEqual(app.default_config()["push_enabled_repos"], [])
@@ -400,6 +423,17 @@ class AppTests(unittest.TestCase):
         result = json.loads(self.fake.files[f"v2/results/{txid}.json"])
         self.assertEqual(result["status"], "error")
         self.assertIn("duplicate JSON key", result["error"])
+
+    def test_nonfinite_json_constant_is_rejected(self):
+        txid = "tx-nonfinite-json"
+        self.fake.files[f"v2/transactions/{txid}.json"] = (
+            '{"protocol":2,"kind":"diagnostics","transaction_id":"tx-nonfinite-json",'
+            '"limit":NaN}'
+        )
+        self.assertEqual(app.process_pending_once(self.cfg), 1)
+        result = json.loads(self.fake.files[f"v2/results/{txid}.json"])
+        self.assertEqual(result["status"], "error")
+        self.assertIn("invalid JSON constant", result["error"])
 
     def test_non_bridge_exception_is_not_exposed_remotely(self):
         txid = "tx-internal-error"

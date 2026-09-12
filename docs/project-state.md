@@ -90,3 +90,9 @@ A second adversarial pass treated the mailbox writer and proposed patch as hosti
 - remote result acknowledgements are HMAC-authenticated with a local-only key before startup reconciliation can rebuild replay markers, preventing a mailbox writer from forging a result to suppress execution.
 
 The audit also makes the residual trust boundary explicit: a locally configured test/build command can execute code from the remotely patched worktree as the local user. Git-state verification, environment scrubbing, output/process bounds, and fixed argv reduce accidental/escalation paths but are not a substitute for OS-level sandboxing. Repositories requiring hostile-code execution isolation must run those commands in an external VM/container/low-privilege environment.
+
+### Final crash/replay and OAuth hardening
+
+The final audit cycle closed two additional failure classes and finished with 122 unit tests passing under repeated hash seeds, plus independent adversarial fuzz checks for transaction IDs, refs, authenticated results, strict JSON, and rclone-config preservation. Bridge commits now bind the transaction ID and canonical request hash in reserved commit trailers, allowing a daemon restart to recover a commit created immediately before a crash without rerunning remotely supplied code; changed payloads cannot reuse that transaction ID. Result-authentication key material is durable user-private configuration rather than disposable runtime state, with migration from the legacy state location.
+
+The OAuth migration helper now obscures the client secret through rclone over stdin, verifies candidate credentials with an actual mailbox create/read-back/delete probe before changing the authoritative config, detects concurrent rclone-config edits, and performs only guarded rollback so another writer's changes are never silently overwritten. Strict JSON parsing rejects duplicate keys and non-standard non-finite constants.

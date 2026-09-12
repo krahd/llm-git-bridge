@@ -197,25 +197,27 @@ def _validate_request_identity(obj: dict[str, Any], filename: str) -> str:
     return txid
 
 
-def _result_auth_key() -> bytes:
-    """Return the private local key used to authenticate remote acknowledgements."""
-    path = STATE_DIR / "result-auth.key"
-    if path.exists():
-        try:
-            raw = path.read_text(encoding="ascii").strip()
-            key = bytes.fromhex(raw)
-        except (OSError, UnicodeError, ValueError) as exc:
-            raise BridgeError("result authentication key is unreadable") from exc
-        if len(key) != 32:
-            raise BridgeError("result authentication key has invalid length")
-        try:
-            os.chmod(path, 0o600)
-        except OSError:
-            pass
-        return key
+def _read_result_auth_key(path: Path) -> bytes:
+    try:
+        raw = path.read_text(encoding="ascii").strip()
+        key = bytes.fromhex(raw)
+    except (OSError, UnicodeError, ValueError) as exc:
+        raise BridgeError("result authentication key is unreadable") from exc
+    if len(key) != 32:
+        raise BridgeError("result authentication key has invalid length")
+    try:
+        os.chmod(path, 0o600)
+    except OSError:
+        pass
+    return key
 
+
+def _publish_result_auth_key(path: Path, key: bytes) -> bytes:
     path.parent.mkdir(parents=True, exist_ok=True, mode=0o700)
-    key = secrets.token_bytes(32)
+    try:
+        os.chmod(path.parent, 0o700)
+    except OSError:
+        pass
     fd, tmp_name = tempfile.mkstemp(prefix="result-auth.", dir=str(path.parent))
     tmp = Path(tmp_name)
     try:
@@ -226,10 +228,10 @@ def _result_auth_key() -> bytes:
         os.chmod(tmp, 0o600)
         try:
             # Hard-link publication is atomic and refuses to replace an existing
-            # key, while ensuring a crash cannot leave a partially written key.
+            # key if another bridge process won the race.
             os.link(tmp, path)
         except FileExistsError:
-            return _result_auth_key()
+            return _read_result_auth_key(path)
         try:
             os.chmod(path, 0o600)
         except OSError:
@@ -237,6 +239,26 @@ def _result_auth_key() -> bytes:
         return key
     finally:
         tmp.unlink(missing_ok=True)
+
+
+def _result_auth_key() -> bytes:
+    """Return the durable private key used to authenticate acknowledgements.
+
+    Replay authentication must survive deletion of disposable runtime state. New
+    keys therefore live with persistent bridge configuration. The previous
+    state-directory location is migrated once so an upgrade does not invalidate
+    already-authenticated remote results.
+    """
+    _ensure_private_dirs()
+    path = CONFIG_DIR / "result-auth.key"
+    if path.exists():
+        return _read_result_auth_key(path)
+
+    legacy = STATE_DIR / "result-auth.key"
+    if legacy.exists():
+        return _publish_result_auth_key(path, _read_result_auth_key(legacy))
+
+    return _publish_result_auth_key(path, secrets.token_bytes(32))
 
 
 def _result_auth_tag(filename: str, result: dict[str, Any]) -> str:
@@ -443,6 +465,7 @@ def _process_materialize_request(cfg: dict[str, Any], registry: dict[str, Any], 
         git(repo_path, "worktree", "remove", "--force", str(wt), check=False, timeout=120)
         if wt.exists():
             shutil.rmtree(wt, ignore_errors=True)
+        git(repo_path, "worktree", "prune", check=False, timeout=60)
         try:
             git(
                 repo_path,

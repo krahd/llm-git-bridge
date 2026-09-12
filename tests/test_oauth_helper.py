@@ -67,6 +67,14 @@ class OAuthHelperTests(unittest.TestCase):
                 with self.assertRaises(helper.SetupError):
                     helper._load_json_object(path)
 
+    def test_json_loader_rejects_nonfinite_constants(self):
+        with tempfile.TemporaryDirectory(prefix="llmgb-oauth-") as tmp:
+            path = Path(tmp) / "client_secret_nonfinite.json"
+            path.write_text('{"installed":{"client_id":NaN}}', encoding="utf-8")
+            with self.assertRaises(helper.SetupError) as raised:
+                helper._load_json_object(path)
+            self.assertIn("invalid JSON constant", str(raised.exception))
+
     def test_find_credentials_chooses_newest_valid_recent_file(self):
         with tempfile.TemporaryDirectory(prefix="llmgb-oauth-") as tmp:
             root = Path(tmp)
@@ -123,13 +131,14 @@ class OAuthHelperTests(unittest.TestCase):
                 "root_folder_id = OTHER\n",
                 encoding="utf-8",
             )
-            original, before = helper.update_plaintext_rclone_config(
+            original, before, rewritten = helper.update_plaintext_rclone_config(
                 path,
                 "chatgpt-git-bridge",
                 "1234567890-example.apps.googleusercontent.com",
                 "new-secret",
             )
             self.assertIn(b"ROOT123", original)
+            self.assertEqual(path.read_bytes(), rewritten)
             parser = helper._parse_rclone_config_text(path.read_text(encoding="utf-8"))
             section = dict(parser.items("chatgpt-git-bridge"))
             self.assertEqual(section["client_id"], "1234567890-example.apps.googleusercontent.com")
@@ -203,7 +212,7 @@ class OAuthHelperTests(unittest.TestCase):
                 if "reconnect" in argv:
                     temp_config = Path(argv[argv.index("--config") + 1])
                     parser = helper._parse_rclone_config_text(temp_config.read_text(encoding="utf-8"))
-                    self.assertEqual(parser.get("chatgpt-git-bridge", "client_secret"), "secret-value")
+                    self.assertEqual(parser.get("chatgpt-git-bridge", "client_secret"), "obscured-secret")
                     parser.set("chatgpt-git-bridge", "token", json.dumps({"access_token": "new-token", "refresh_token": "refresh"}))
                     with temp_config.open("w", encoding="utf-8") as fh:
                         parser.write(fh, space_around_delimiters=False)
@@ -216,12 +225,13 @@ class OAuthHelperTests(unittest.TestCase):
                  patch.object(helper, "rclone_config_path", return_value=config), \
                  patch.object(helper, "_assert_watcher_stopped"), \
                  patch.object(helper, "validate_mailbox"), \
+                 patch.object(helper, "obscure_rclone_secret", return_value="obscured-secret"), \
                  patch.object(helper, "_run", side_effect=fake_run):
                 self.assertEqual(helper.finish(cred, keep_credentials=True), 0)
             self.assertTrue(any("reconnect" in argv for argv in seen))
             parser = helper._parse_rclone_config_text(config.read_text(encoding="utf-8"))
             self.assertEqual(parser.get("chatgpt-git-bridge", "client_id"), "1234567890-example.apps.googleusercontent.com")
-            self.assertEqual(parser.get("chatgpt-git-bridge", "client_secret"), "secret-value")
+            self.assertEqual(parser.get("chatgpt-git-bridge", "client_secret"), "obscured-secret")
             self.assertIn("new-token", parser.get("chatgpt-git-bridge", "token"))
             self.assertEqual(config.read_text(encoding="utf-8").split("[GoogleDriveTom]", 1)[1], unrelated)
 
@@ -313,6 +323,7 @@ class OAuthHelperTests(unittest.TestCase):
                  patch.object(helper, "bridge_remote", return_value="chatgpt-git-bridge"), \
                  patch.object(helper, "rclone_config_path", return_value=config), \
                  patch.object(helper, "_assert_watcher_stopped"), \
+                 patch.object(helper, "obscure_rclone_secret", return_value="obscured-secret"), \
                  patch.object(helper, "_run", side_effect=helper.SetupError("reconnect failed")):
                 with self.assertRaises(helper.SetupError):
                     helper.finish(cred, keep_credentials=True)
@@ -336,10 +347,70 @@ class OAuthHelperTests(unittest.TestCase):
                  patch.object(helper, "bridge_remote", return_value="chatgpt-git-bridge"), \
                  patch.object(helper, "rclone_config_path", return_value=config), \
                  patch.object(helper, "_assert_watcher_stopped"), \
+                 patch.object(helper, "obscure_rclone_secret", return_value="obscured-secret"), \
                  patch.object(helper, "_run", side_effect=KeyboardInterrupt):
                 with self.assertRaises(helper.SetupError):
                     helper.finish(cred, keep_credentials=True)
             self.assertEqual(config.read_bytes(), original)
+
+    def test_obscure_client_secret_uses_stdin_not_argv(self):
+        proc = __import__("subprocess").CompletedProcess(
+            ["rclone", "obscure", "-"], 0, stdout="obscured-value\n", stderr=""
+        )
+        with patch.object(helper.subprocess, "run", return_value=proc) as mocked:
+            self.assertEqual(helper.obscure_rclone_secret("raw-secret"), "obscured-value")
+        argv = mocked.call_args.args[0]
+        self.assertNotIn("raw-secret", argv)
+        self.assertEqual(mocked.call_args.kwargs["input"], "raw-secret")
+
+    def test_validate_mailbox_probes_read_create_readback_and_delete(self):
+        calls: list[list[str]] = []
+
+        def fake_run(argv, **kwargs):
+            calls.append(list(argv))
+            if "lsf" in argv:
+                target = argv[argv.index("lsf") + 1]
+                output = "repos.json\n" if target.endswith(":v2/meta") else ""
+                return __import__("subprocess").CompletedProcess(argv, 0, stdout=output, stderr="")
+            if "copyto" in argv:
+                return __import__("subprocess").CompletedProcess(argv, 0, stdout="", stderr="")
+            if "cat" in argv:
+                remote = argv[-1]
+                probe = Path(remote.rsplit("/", 1)[-1]).name
+                # The helper payload is random; recover it from the local copyto source.
+                copy_call = next(c for c in calls if "copyto" in c)
+                payload = Path(copy_call[copy_call.index("copyto") + 1]).read_text(encoding="utf-8")
+                return __import__("subprocess").CompletedProcess(argv, 0, stdout=payload, stderr="")
+            if "deletefile" in argv:
+                return __import__("subprocess").CompletedProcess(argv, 0, stdout="", stderr="")
+            raise AssertionError(argv)
+
+        with tempfile.TemporaryDirectory(prefix="llmgb-oauth-") as tmp:
+            cfg = Path(tmp) / "rclone.conf"
+            cfg.write_text("[x]\ntype=drive\n", encoding="utf-8")
+            with patch.object(helper.subprocess, "run", side_effect=fake_run):
+                helper.validate_mailbox("chatgpt-git-bridge", cfg)
+        commands = [next((x for x in c if x in {"lsf", "copyto", "cat", "deletefile"}), None) for c in calls]
+        self.assertEqual(commands[:5], ["lsf", "lsf", "copyto", "cat", "deletefile"])
+
+    def test_config_update_rejects_concurrent_change_and_guarded_rollback(self):
+        with tempfile.TemporaryDirectory(prefix="llmgb-oauth-") as tmp:
+            path = Path(tmp) / "rclone.conf"
+            original = b"[chatgpt-git-bridge]\ntype=drive\nroot_folder_id=ROOT\ntoken=old\n"
+            path.write_bytes(original)
+            path.write_bytes(original + b"# concurrent\n")
+            with self.assertRaisesRegex(helper.SetupError, "changed during OAuth migration"):
+                helper.update_plaintext_rclone_config(
+                    path,
+                    "chatgpt-git-bridge",
+                    "1234567890-example.apps.googleusercontent.com",
+                    "obscured-secret",
+                    token=json.dumps({"access_token": "new"}),
+                    expected_original=original,
+                )
+            self.assertIn(b"# concurrent", path.read_bytes())
+            self.assertFalse(helper.restore_bytes_if_unchanged(path, b"not-current", original))
+            self.assertIn(b"# concurrent", path.read_bytes())
 
     def test_encrypted_rclone_config_is_not_modified(self):
         with self.assertRaises(helper.SetupError):
