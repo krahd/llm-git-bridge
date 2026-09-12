@@ -8,12 +8,13 @@ from .core import BridgeError, atomic_write_text, run
 
 
 class RcloneTransport:
-    def __init__(self, remote: str, *, timeout: float = 60):
+    def __init__(self, remote: str, *, timeout: float = 60, list_timeout: float = 12):
         remote = remote.rstrip(":")
         if not remote:
             raise BridgeError("empty rclone remote")
         self.remote = remote
         self.timeout = timeout
+        self.list_timeout = max(1.0, min(float(list_timeout), float(timeout)))
 
     def _remote(self, rel: str) -> str:
         rel = rel.lstrip("/")
@@ -23,7 +24,7 @@ class RcloneTransport:
         run(["rclone", "mkdir", self._remote(rel)], timeout=self.timeout)
 
     def list_files(self, rel: str) -> list[str]:
-        proc = run(["rclone", "lsf", self._remote(rel), "--files-only"], check=False, timeout=self.timeout)
+        proc = run(["rclone", "lsf", self._remote(rel), "--files-only"], check=False, timeout=self.list_timeout)
         if proc.returncode != 0:
             detail = (proc.stderr or proc.stdout).strip()
             raise BridgeError(f"rclone list failed for {rel!r}: {detail or 'unknown error'}")

@@ -142,6 +142,17 @@ class TransportTests(unittest.TestCase):
             with self.assertRaises(BridgeError):
                 transport.list_files("v2/transactions")
 
+    def test_list_uses_short_poll_timeout(self):
+        transport = RcloneTransport("fake", timeout=60, list_timeout=7)
+        proc = subprocess.CompletedProcess(["rclone"], 0, stdout="", stderr="")
+        with patch("llm_git_bridge.transport.run", return_value=proc) as mocked:
+            self.assertEqual(transport.list_files("v2/transactions"), [])
+        self.assertEqual(mocked.call_args.kwargs["timeout"], 7)
+
+    def test_list_timeout_is_capped_by_general_timeout(self):
+        transport = RcloneTransport("fake", timeout=5, list_timeout=12)
+        self.assertEqual(transport.list_timeout, 5)
+
 
 if __name__ == "__main__":
     unittest.main()
