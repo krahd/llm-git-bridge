@@ -45,6 +45,21 @@ A client can also materialise an already-created safe-prefixed branch without ch
 
 Branch materialisation uses an isolated detached worktree and writes `v2/repos/<repo-id>/branches/<branch-token>/snapshot.json`.
 
+## Diagnostics request
+
+A client can request recent sanitized timing metrics without reading daemon logs or local paths:
+
+```json
+{
+  "protocol": 2,
+  "kind": "diagnostics",
+  "transaction_id": "tx-example-diagnostics",
+  "limit": 10
+}
+```
+
+`limit` defaults to 10 and is bounded to 1–50. Diagnostics expose only transaction IDs, timing/count fields, event names, and timestamps; repository paths, command output, credentials, and arbitrary local metric fields are not returned.
+
 ## Edit transaction
 
 Required fields:

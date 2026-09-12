@@ -236,6 +236,38 @@ class AppTests(unittest.TestCase):
         self.assertEqual(len(lines), 2)
         self.assertEqual(json.loads(lines[-1])["event"], "startup-reconcile")
 
+    def test_diagnostics_request_returns_only_sanitized_metrics(self):
+        metrics = app.STATE_DIR / "metrics.jsonl"
+        metrics.parent.mkdir(parents=True, exist_ok=True)
+        metrics.write_text(json.dumps({
+            "event": "transaction",
+            "transaction_id": "tx-prior",
+            "result_upload_s": 1.25,
+            "path": "/private/repo",
+            "secret": "nope",
+        }) + "\n", encoding="utf-8")
+        txid = "tx-diagnostics"
+        self.fake.files[f"v2/transactions/{txid}.json"] = json.dumps({
+            "protocol": 2, "kind": "diagnostics", "transaction_id": txid, "limit": 5
+        })
+        self.assertEqual(app.process_pending_once(self.cfg), 1)
+        result = json.loads(self.fake.files[f"v2/results/{txid}.json"])
+        self.assertEqual(result["operation"], "diagnostics")
+        self.assertEqual(result["metrics"][0]["transaction_id"], "tx-prior")
+        blob = json.dumps(result["metrics"])
+        self.assertNotIn("/private/repo", blob)
+        self.assertNotIn("secret", blob)
+
+    def test_diagnostics_limit_is_bounded(self):
+        txid = "tx-diagnostics-bad"
+        self.fake.files[f"v2/transactions/{txid}.json"] = json.dumps({
+            "protocol": 2, "kind": "diagnostics", "transaction_id": txid, "limit": 500
+        })
+        self.assertEqual(app.process_pending_once(self.cfg), 1)
+        result = json.loads(self.fake.files[f"v2/results/{txid}.json"])
+        self.assertEqual(result["status"], "error")
+        self.assertIn("diagnostics limit", result["error"])
+
 
 class TransportTests(unittest.TestCase):
     def test_list_failure_is_not_silently_treated_as_empty(self):

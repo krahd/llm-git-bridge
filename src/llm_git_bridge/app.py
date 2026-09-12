@@ -176,6 +176,58 @@ def _validate_request_identity(obj: dict[str, Any], filename: str) -> str:
     return txid
 
 
+_METRIC_PUBLIC_KEYS = {
+    "event",
+    "transaction_id",
+    "transaction_list_s",
+    "transaction_download_s",
+    "pre_result_upload_s",
+    "result_upload_s",
+    "request_total_s",
+    "poll_total_s",
+    "results_list_s",
+    "remote_results",
+    "markers_added",
+    "recorded_at",
+}
+
+
+def _recent_metrics(limit: int) -> list[dict[str, Any]]:
+    path = STATE_DIR / "metrics.jsonl"
+    if not path.exists():
+        return []
+    try:
+        lines = path.read_text(encoding="utf-8").splitlines()[-limit:]
+    except OSError:
+        return []
+    metrics: list[dict[str, Any]] = []
+    for line in lines:
+        try:
+            item = json.loads(line)
+        except json.JSONDecodeError:
+            continue
+        if not isinstance(item, dict):
+            continue
+        metrics.append({key: item[key] for key in _METRIC_PUBLIC_KEYS if key in item})
+    return metrics
+
+
+def _process_diagnostics_request(obj: dict[str, Any], filename: str) -> dict[str, Any]:
+    txid = _validate_request_identity(obj, filename)
+    limit = obj.get("limit", 10)
+    if isinstance(limit, bool) or not isinstance(limit, int) or not 1 <= limit <= 50:
+        raise BridgeError("diagnostics limit must be an integer from 1 to 50")
+    return {
+        "protocol": PROTOCOL_VERSION,
+        "kind": "result",
+        "operation": "diagnostics",
+        "transaction_id": txid,
+        "status": "success",
+        "metrics": _recent_metrics(limit),
+        "processed_at": utc_now(),
+    }
+
+
 def _process_materialize_request(cfg: dict[str, Any], registry: dict[str, Any], obj: dict[str, Any], filename: str) -> dict[str, Any]:
     txid = _validate_request_identity(obj, filename)
     repo_ref = obj.get("repo")
@@ -346,6 +398,8 @@ def process_pending_once(cfg: dict[str, Any]) -> int:
             if kind == "materialize":
                 result = _process_materialize_request(cfg, registry, obj, filename)
                 registry = load_registry()
+            elif kind == "diagnostics":
+                result = _process_diagnostics_request(obj, filename)
             elif kind == "transaction":
                 repo_id, entry = resolve_repo(registry, obj.get("repo", ""))
                 commands = cfg.get("commands", {}).get(repo_id, {})
