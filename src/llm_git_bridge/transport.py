@@ -63,6 +63,11 @@ class RcloneRCProcess:
     def owned(self) -> bool:
         return self.process is not None
 
+    def healthy(self, *, timeout: float = 0.25) -> bool:
+        if self.process is not None and self.process.poll() is not None:
+            return False
+        return _rc_ready(self.socket_path, timeout=timeout)
+
     def stop(self) -> None:
         if self.process is None:
             return
@@ -157,7 +162,8 @@ class RcloneTransport:
         remote: str,
         *,
         timeout: float = 60,
-        list_timeout: float = 12,
+        list_timeout: float = 5,
+        rc_list_timeout: float = 3,
         mkdir_timeout: float = 12,
         rc_socket: Path | None = None,
     ):
@@ -167,6 +173,7 @@ class RcloneTransport:
         self.remote = remote
         self.timeout = timeout
         self.list_timeout = max(1.0, min(float(list_timeout), float(timeout)))
+        self.rc_list_timeout = max(0.5, min(float(rc_list_timeout), self.list_timeout, float(timeout)))
         self.mkdir_timeout = max(1.0, min(float(mkdir_timeout), float(timeout)))
         self.rc_socket = rc_socket.expanduser() if rc_socket is not None else None
         self.last_mode = "subprocess"
@@ -204,7 +211,7 @@ class RcloneTransport:
         obj = self._rc(
             "operations/list",
             {"fs": f"{self.remote}:", "remote": rel, "opt": {"filesOnly": True}},
-            timeout=self.list_timeout,
+            timeout=self.rc_list_timeout,
         )
         if obj is not None:
             listing = obj.get("list", [])

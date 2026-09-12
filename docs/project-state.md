@@ -66,3 +66,9 @@ The recovery audit also hardened the implementation before first self-hosting:
 - transport-stage timings are emitted in results and local JSONL metrics.
 
 Self-hosting and opt-in safe pushing are now proven. The bridge has created, tested, committed, and pushed an `ai/*` branch to `origin` without terminal intervention.
+
+## Persistent rclone RC acceptance (2026-09-12)
+
+After activation, a no-test push transaction used persistent `rcd` for transaction listing and download: listing fell to 0.343 s, request download to 0.611 s, and result upload to 1.749 s. The complete daemon poll was 6.980 s including 4.089 s of local Git work and a 2.385 s GitHub push. A diagnostics-only request completed its daemon poll in 4.000 s. This validates the persistent transport as a material latency improvement over per-operation rclone subprocesses.
+
+A later explicit full materialisation exposed one transient RC-list failure: the automatic subprocess fallback succeeded but consumed 13.341 s before the request ran; the following poll was back on `rcd`. The next resilience step therefore bounds fallback list latency and restarts a dead RC process without changing mailbox semantics.

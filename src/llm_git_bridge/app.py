@@ -565,6 +565,24 @@ def _start_watch_rcd(cfg: dict[str, Any]) -> RcloneRCProcess | None:
     return handle
 
 
+def _ensure_watch_rcd(cfg: dict[str, Any], handle: RcloneRCProcess | None) -> RcloneRCProcess | None:
+    transport = cfg.get("transport", {})
+    enabled = transport.get("type") == "rclone" and bool(transport.get("rc_enabled", True))
+    if not enabled:
+        if handle is not None and handle.owned:
+            handle.stop()
+        return None
+    if handle is not None and handle.healthy():
+        return handle
+    if handle is not None and handle.owned:
+        handle.stop()
+    restarted = start_rclone_rcd(RCLONE_RC_SOCKET)
+    if restarted is not None:
+        _append_metric({"event": "rcd-restart", "recorded_at": utc_now()})
+        print("rclone rcd restarted", flush=True)
+    return restarted
+
+
 def cmd_watch(args: argparse.Namespace) -> int:
     cfg = load_config()
     rc_handle = _start_watch_rcd(cfg)
@@ -592,6 +610,7 @@ def cmd_watch(args: argparse.Namespace) -> int:
                 # This preserves replay safety after local-state loss without charging
                 # every newly observed transaction for an extra Drive directory listing.
                 current_cfg = load_config()
+                rc_handle = _ensure_watch_rcd(current_cfg, rc_handle)
                 if not reconciled:
                     marked = reconcile_remote_results(current_cfg)
                     reconciled = True

@@ -286,6 +286,7 @@ class TransportTests(unittest.TestCase):
             self.assertEqual(mocked.call_args.args[2]["fs"], "fake:")
             self.assertEqual(mocked.call_args.args[2]["remote"], "v2/transactions")
             self.assertTrue(mocked.call_args.args[2]["opt"]["filesOnly"])
+            self.assertEqual(mocked.call_args.kwargs["timeout"], transport.rc_list_timeout)
 
     def test_list_falls_back_when_rc_is_unhealthy(self):
         with tempfile.TemporaryDirectory(prefix="llmgb-rc-") as tmp:
@@ -342,6 +343,20 @@ class TransportTests(unittest.TestCase):
     def test_list_timeout_is_capped_by_general_timeout(self):
         transport = RcloneTransport("fake", timeout=5, list_timeout=12)
         self.assertEqual(transport.list_timeout, 5)
+
+    def test_rc_list_timeout_is_shorter_than_fallback_and_capped(self):
+        transport = RcloneTransport("fake", timeout=60, list_timeout=5, rc_list_timeout=9)
+        self.assertEqual(transport.rc_list_timeout, 5)
+        transport = RcloneTransport("fake", timeout=60, list_timeout=5, rc_list_timeout=2)
+        self.assertEqual(transport.rc_list_timeout, 2)
+
+    def test_rc_process_health_detects_dead_owned_process(self):
+        with tempfile.TemporaryDirectory(prefix="llmgb-rc-") as tmp:
+            sock = Path(tmp) / "rclone.sock"
+            proc = type("Proc", (), {"poll": lambda self: 1})()
+            from llm_git_bridge.transport import RcloneRCProcess
+            handle = RcloneRCProcess(sock, proc)
+            self.assertFalse(handle.healthy())
 
 
     def test_mkdir_uses_short_timeout(self):
