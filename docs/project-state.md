@@ -66,3 +66,5 @@ The recovery audit also hardened the implementation before first self-hosting:
 - transport-stage timings are emitted in results and local JSONL metrics.
 
 Self-hosting and opt-in safe pushing are now proven. The bridge has created, tested, committed, and pushed an `ai/*` branch to `origin` without terminal intervention.
+
+Persistent `rclone rcd` transport is now implemented as an optional hot-path optimisation with automatic subprocess fallback; live acceptance measurements determine whether it materially reduces Drive mailbox latency.
