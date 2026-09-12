@@ -348,21 +348,7 @@ def build_snapshot(
     }
 
 
-def validate_transaction(obj: dict[str, Any], *, safe_branch_prefix: str, max_patch_bytes: int = DEFAULT_MAX_PATCH_BYTES) -> dict[str, Any]:
-    if obj.get("protocol") != PROTOCOL_VERSION:
-        raise BridgeError(f"unsupported protocol: {obj.get('protocol')!r}")
-    if obj.get("kind") != "transaction":
-        raise BridgeError("transaction kind must be 'transaction'")
-    txid = obj.get("transaction_id")
-    if not isinstance(txid, str) or not re.fullmatch(r"[A-Za-z0-9._-]{1,120}", txid):
-        raise BridgeError("invalid transaction_id")
-    repo = obj.get("repo")
-    if not isinstance(repo, str) or not repo.strip():
-        raise BridgeError("missing repo")
-    base_sha = obj.get("base_sha")
-    if not isinstance(base_sha, str) or not re.fullmatch(r"[0-9a-fA-F]{40}", base_sha):
-        raise BridgeError("base_sha must be a 40-character hex SHA")
-    branch = obj.get("branch")
+def validate_safe_branch_name(branch: Any, safe_branch_prefix: str) -> str:
     if not isinstance(branch, str) or not branch.startswith(safe_branch_prefix):
         raise BridgeError(f"branch must start with {safe_branch_prefix!r}")
     if not re.fullmatch(r"[A-Za-z0-9._/-]{1,200}", branch):
@@ -378,6 +364,24 @@ def validate_transaction(obj: dict[str, Any], *, safe_branch_prefix: str, max_pa
         raise BridgeError("unsafe branch name")
     if run(["git", "check-ref-format", f"refs/heads/{branch}"], check=False, timeout=10).returncode != 0:
         raise BridgeError("branch is not a valid Git branch name")
+    return branch
+
+
+def validate_transaction(obj: dict[str, Any], *, safe_branch_prefix: str, max_patch_bytes: int = DEFAULT_MAX_PATCH_BYTES) -> dict[str, Any]:
+    if obj.get("protocol") != PROTOCOL_VERSION:
+        raise BridgeError(f"unsupported protocol: {obj.get('protocol')!r}")
+    if obj.get("kind") != "transaction":
+        raise BridgeError("transaction kind must be 'transaction'")
+    txid = obj.get("transaction_id")
+    if not isinstance(txid, str) or not re.fullmatch(r"[A-Za-z0-9._-]{1,120}", txid):
+        raise BridgeError("invalid transaction_id")
+    repo = obj.get("repo")
+    if not isinstance(repo, str) or not repo.strip():
+        raise BridgeError("missing repo")
+    base_sha = obj.get("base_sha")
+    if not isinstance(base_sha, str) or not re.fullmatch(r"[0-9a-fA-F]{40}", base_sha):
+        raise BridgeError("base_sha must be a 40-character hex SHA")
+    branch = validate_safe_branch_name(obj.get("branch"), safe_branch_prefix)
     patch = obj.get("patch")
     if not isinstance(patch, str) or not patch.strip():
         raise BridgeError("patch must be a non-empty string")
@@ -392,6 +396,9 @@ def validate_transaction(obj: dict[str, Any], *, safe_branch_prefix: str, max_pa
     push = obj.get("push", False)
     if not isinstance(push, bool):
         raise BridgeError("push must be a boolean")
+    publish_snapshot = obj.get("publish_snapshot", False)
+    if not isinstance(publish_snapshot, bool):
+        raise BridgeError("publish_snapshot must be a boolean")
     return obj
 
 

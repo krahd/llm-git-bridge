@@ -15,9 +15,11 @@ from typing import Any
 from .core import (
     BridgeError,
     PROTOCOL_VERSION,
+    branch_exists,
     branch_token,
     build_registry,
     build_snapshot,
+    git,
     load_json,
     process_transaction,
     public_registry,
@@ -25,6 +27,7 @@ from .core import (
     resolve_repo,
     save_json,
     utc_now,
+    validate_safe_branch_name,
 )
 from .transport import RcloneTransport
 
@@ -145,6 +148,7 @@ def materialize(cfg: dict[str, Any], repo_ref: str, *, branch_snapshot: tuple[Pa
     snapshot = build_snapshot(repo_path, repo_id)
     if branch_snapshot:
         branch = branch_snapshot[1]
+        snapshot["branch"] = branch
         remote_rel = f"{REMOTE_ROOT}/repos/{repo_id}/branches/{branch_token(branch)}/snapshot.json"
     else:
         remote_rel = f"{REMOTE_ROOT}/repos/{repo_id}/snapshot.json"
@@ -177,9 +181,44 @@ def _process_materialize_request(cfg: dict[str, Any], registry: dict[str, Any], 
     repo_ref = obj.get("repo")
     if not isinstance(repo_ref, str) or not repo_ref.strip():
         raise BridgeError("materialize request is missing repo")
-    repo_id, _entry = resolve_repo(registry, repo_ref)
-    registry, repo_id, entry = refresh_repo_entry(cfg, repo_id, publish=True)
-    snapshot_rel = materialize(cfg, repo_id)
+    repo_id, entry = resolve_repo(registry, repo_ref)
+    branch = obj.get("branch")
+
+    if branch is None:
+        registry, repo_id, entry = refresh_repo_entry(cfg, repo_id, publish=True)
+        snapshot_rel = materialize(cfg, repo_id)
+        head = entry["head"]
+        branch_name = entry["branch"]
+    else:
+        branch_name = validate_safe_branch_name(branch, str(cfg.get("safe_branch_prefix", "ai/")))
+        repo_path = Path(entry["path"])
+        if not branch_exists(repo_path, branch_name):
+            raise BridgeError(f"unknown local branch: {branch_name}")
+
+        wt = STATE_DIR / "materialize-worktrees" / txid
+        git(repo_path, "worktree", "remove", "--force", str(wt), check=False, timeout=120)
+        if wt.exists():
+            shutil.rmtree(wt, ignore_errors=True)
+        try:
+            git(
+                repo_path,
+                "-c",
+                "core.hooksPath=/dev/null",
+                "worktree",
+                "add",
+                "--detach",
+                str(wt),
+                branch_name,
+                timeout=120,
+            )
+            head = git(wt, "rev-parse", "HEAD", timeout=30).stdout.strip()
+            snapshot_rel = materialize(cfg, repo_id, branch_snapshot=(wt, branch_name))
+        finally:
+            git(repo_path, "worktree", "remove", "--force", str(wt), check=False, timeout=120)
+            if wt.exists():
+                shutil.rmtree(wt, ignore_errors=True)
+            git(repo_path, "worktree", "prune", check=False, timeout=60)
+
     return {
         "protocol": PROTOCOL_VERSION,
         "kind": "result",
@@ -187,8 +226,8 @@ def _process_materialize_request(cfg: dict[str, Any], registry: dict[str, Any], 
         "transaction_id": txid,
         "repo": repo_id,
         "status": "success",
-        "head": entry["head"],
-        "branch": entry["branch"],
+        "head": head,
+        "branch": branch_name,
         "snapshot": snapshot_rel,
         "processed_at": utc_now(),
     }
@@ -277,7 +316,7 @@ def process_pending_once(cfg: dict[str, Any]) -> int:
                     allow_push=repo_id in {str(x) for x in cfg.get("push_enabled_repos", [])},
                 )
                 result = outcome.result
-                if outcome.snapshot is not None:
+                if outcome.snapshot is not None and obj.get("publish_snapshot", False):
                     branch = result["branch"]
                     snap_rel = f"{REMOTE_ROOT}/repos/{repo_id}/branches/{branch_token(branch)}/snapshot.json"
                     try:
@@ -291,6 +330,8 @@ def process_pending_once(cfg: dict[str, Any]) -> int:
                         # The Git commit already succeeded. Preserve that success and
                         # report only the secondary snapshot-publication failure.
                         result["snapshot_error"] = str(snap_exc)
+                elif outcome.snapshot is not None:
+                    result["snapshot_deferred"] = True
             else:
                 raise BridgeError(f"unsupported request kind: {kind!r}")
         except Exception as exc:

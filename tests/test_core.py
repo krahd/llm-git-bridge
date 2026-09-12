@@ -519,6 +519,23 @@ class CoreTests(unittest.TestCase):
         with self.assertRaises(BridgeError):
             validate_transaction(tx, safe_branch_prefix="ai/")
 
+    def test_publish_snapshot_field_must_be_boolean(self):
+        repo = self.make_repo()
+        head = sh(repo, "git", "rev-parse", "HEAD")
+        tx = {
+            "protocol": 2,
+            "kind": "transaction",
+            "transaction_id": "tx-snapshot-invalid",
+            "repo": "demo",
+            "base_sha": head,
+            "branch": "ai/snapshot-invalid",
+            "patch": "x",
+            "run": [],
+            "publish_snapshot": "yes",
+        }
+        with self.assertRaises(BridgeError):
+            validate_transaction(tx, safe_branch_prefix="ai/")
+
 
 if __name__ == "__main__":
     unittest.main()

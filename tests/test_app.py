@@ -105,6 +105,80 @@ class AppTests(unittest.TestCase):
         self.assertIn(f"v2/repos/{repo_id}/snapshot.json", self.fake.files)
         self.assertEqual(self.fake.ensure_dir_calls, [])
 
+    def test_materialize_branch_request_is_remote_triggerable(self):
+        repo_id = next(iter(json.loads(app.REGISTRY_FILE.read_text())["repos"]))
+        head = sh(self.repo, "git", "rev-parse", "HEAD")
+        sh(self.repo, "git", "branch", "ai/branch-snapshot", head)
+        txid = "tx-materialize-branch"
+        self.fake.files[f"v2/transactions/{txid}.json"] = json.dumps({
+            "protocol": 2,
+            "kind": "materialize",
+            "transaction_id": txid,
+            "repo": repo_id,
+            "branch": "ai/branch-snapshot",
+        })
+        count = app.process_pending_once(self.cfg)
+        self.assertEqual(count, 1)
+        result = json.loads(self.fake.files[f"v2/results/{txid}.json"])
+        self.assertEqual(result["status"], "success")
+        self.assertEqual(result["branch"], "ai/branch-snapshot")
+        self.assertEqual(result["head"], head)
+        self.assertIn("/branches/", result["snapshot"])
+        self.assertIn(result["snapshot"], self.fake.files)
+
+    def test_transaction_snapshot_is_deferred_by_default(self):
+        repo_id = next(iter(json.loads(app.REGISTRY_FILE.read_text())["repos"]))
+        head = sh(self.repo, "git", "rev-parse", "HEAD")
+        txid = "tx-deferred-snapshot"
+        self.fake.files[f"v2/transactions/{txid}.json"] = json.dumps({
+            "protocol": 2,
+            "kind": "transaction",
+            "transaction_id": txid,
+            "repo": repo_id,
+            "base_sha": head,
+            "branch": "ai/deferred-snapshot",
+            "patch": (
+                "diff --git a/README.md b/README.md\n"
+                "--- a/README.md\n"
+                "+++ b/README.md\n"
+                "@@ -1 +1,2 @@\n"
+                " hello\n"
+                "+world\n"
+            ),
+            "run": [],
+        })
+        self.assertEqual(app.process_pending_once(self.cfg), 1)
+        result = json.loads(self.fake.files[f"v2/results/{txid}.json"])
+        self.assertTrue(result["snapshot_deferred"])
+        self.assertFalse(any("/branches/" in path for path in self.fake.files))
+
+    def test_transaction_can_explicitly_publish_snapshot(self):
+        repo_id = next(iter(json.loads(app.REGISTRY_FILE.read_text())["repos"]))
+        head = sh(self.repo, "git", "rev-parse", "HEAD")
+        txid = "tx-published-snapshot"
+        self.fake.files[f"v2/transactions/{txid}.json"] = json.dumps({
+            "protocol": 2,
+            "kind": "transaction",
+            "transaction_id": txid,
+            "repo": repo_id,
+            "base_sha": head,
+            "branch": "ai/published-snapshot",
+            "patch": (
+                "diff --git a/README.md b/README.md\n"
+                "--- a/README.md\n"
+                "+++ b/README.md\n"
+                "@@ -1 +1,2 @@\n"
+                " hello\n"
+                "+world\n"
+            ),
+            "run": [],
+            "publish_snapshot": True,
+        })
+        self.assertEqual(app.process_pending_once(self.cfg), 1)
+        result = json.loads(self.fake.files[f"v2/results/{txid}.json"])
+        self.assertIn("/branches/", result["snapshot"])
+        self.assertIn(result["snapshot"], self.fake.files)
+
     def test_processed_marker_avoids_result_listing_in_steady_state(self):
         repo_id = next(iter(json.loads(app.REGISTRY_FILE.read_text())["repos"]))
         head = sh(self.repo, "git", "rev-parse", "HEAD")
@@ -128,6 +202,8 @@ class AppTests(unittest.TestCase):
         })
         self.assertEqual(app.process_pending_once(self.cfg), 1)
         self.assertEqual(self.fake.ensure_dir_calls, [])
+        result = json.loads(self.fake.files[f"v2/results/{txid}.json"])
+        self.assertTrue(result["snapshot_deferred"])
         self.fake.list_calls.clear()
         self.assertEqual(app.process_pending_once(self.cfg), 0)
         self.assertEqual(self.fake.list_calls, ["v2/transactions"])

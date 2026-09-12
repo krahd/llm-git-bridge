@@ -28,7 +28,7 @@ The bootstrap establishes:
 - protocol-v2 single-file transactions;
 - isolated worktree patch/commit processing;
 - local symbolic command allowlists;
-- result publication and branch snapshot refresh;
+- result publication with branch snapshots deferred by default and materialisable on demand;
 - unit tests;
 - an optional user LaunchAgent installed by the bootstrap script;
 - a pushed bootstrap branch rather than direct modification of `main`.
@@ -60,6 +60,7 @@ The recovery audit also hardened the implementation before first self-hosting:
 - changes to protected/sensitive paths and non-regular file modes are rejected;
 - the macOS LaunchAgent receives a PATH that includes the Homebrew rclone location;
 - durable local publication markers preserve idempotency while reducing Drive round trips;
-- runtime registry and snapshot uploads no longer perform a redundant `rclone mkdir` before `copyto`; setup-only mkdir calls use a short timeout.
+- runtime registry and snapshot uploads no longer perform a redundant `rclone mkdir` before `copyto`; setup-only mkdir calls use a short timeout;
+- branch snapshots are no longer a mandatory synchronous edit step; safe-prefixed branches can be materialised on demand.
 
 Self-hosting and opt-in safe pushing are now proven. The bridge has created, tested, committed, and pushed an `ai/*` branch to `origin` without terminal intervention.

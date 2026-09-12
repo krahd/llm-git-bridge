@@ -31,6 +31,20 @@ A client can activate or refresh any repository visible in the repository index 
 
 The daemon refreshes that repository's local state, republishes the path-free repository index, uploads `v2/repos/<repo-id>/snapshot.json`, and writes a result containing the snapshot path and current HEAD.
 
+A client can also materialise an already-created safe-prefixed branch without changing the user's checked-out working tree:
+
+```json
+{
+  "protocol": 2,
+  "kind": "materialize",
+  "transaction_id": "tx-example-branch-materialize",
+  "repo": "llm-git-bridge",
+  "branch": "ai/example"
+}
+```
+
+Branch materialisation uses an isolated detached worktree and writes `v2/repos/<repo-id>/branches/<branch-token>/snapshot.json`.
+
 ## Edit transaction
 
 Required fields:
@@ -48,6 +62,7 @@ Optional:
 
 - `commit_message`
 - `push`: boolean, default `false`. `true` is honoured only when push has been enabled locally for that repository.
+- `publish_snapshot`: boolean, default `false`. When true, synchronously publish the post-commit branch snapshot before acknowledging the transaction.
 
 A transaction is ready when its final JSON file is visible in `v2/transactions/`. Clients should publish the object atomically where their transport permits it. Google Drive file creation becomes visible only after upload completion, which is sufficient for the current adapter.
 
@@ -55,8 +70,10 @@ The daemon applies the patch with `git apply --index` in an isolated worktree. O
 
 Push is two-key: it must be enabled locally for the repository and the transaction must contain `"push": true`. The remote is fixed to `origin`, the refspec is fixed to the validated transaction branch, Git hooks are disabled, and force-push is never requested. A push failure is reported as a secondary `push.status: error` while preserving the successfully tested local commit.
 
+Branch snapshot publication is deferred by default so a slow mailbox upload cannot delay the transaction result. The result then contains `snapshot_deferred: true`; the client can issue a branch materialisation request when it needs a fresh remote snapshot. `publish_snapshot: true` retains synchronous publication for clients that explicitly require it.
+
 ## Result and idempotency
 
-The daemon writes `v2/results/<transaction-id>.json`. A result contains `status: success` or `status: error`. Successful edit results include branch and commit information and, when publication succeeds, the remote path of the refreshed branch snapshot. Successful materialisation results include the base snapshot path.
+The daemon writes `v2/results/<transaction-id>.json`. A result contains `status: success` or `status: error`. Successful edit results include branch and commit information; by default they also report `snapshot_deferred: true`. If synchronous snapshot publication was explicitly requested and succeeds, the result contains the remote snapshot path. Successful materialisation results include the requested base or branch snapshot path.
 
 The remote result is the durable acknowledgement. The daemon also keeps a local published-result marker. In steady state it therefore polls only the transaction directory; it consults the remote result directory only when it first encounters an unknown request. This preserves replay safety after local-state loss without paying two Drive list operations on every poll.
