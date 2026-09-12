@@ -9,7 +9,7 @@
 - many repositories are represented by a tiny remote index and materialised on demand;
 - `.git` history is not uploaded by default;
 - remote transactions may request only symbolic locally configured commands;
-- safe-prefixed branches and commits are allowed; push/merge remain disabled;
+- safe-prefixed branches and commits are allowed; push is locally opt-in and transaction-explicit; merge remains disabled;
 - latency is a first-class product requirement.
 
 ## Proven proof of concept
@@ -41,7 +41,7 @@ Still planned after this safe point:
 - richer observability and remote latency measurements;
 - Homebrew packaging;
 - migration tooling for older prototype configurations;
-- optional safe push / draft-PR workflows after explicit user opt-in.
+- optional draft-PR workflows after explicit user opt-in.
 
 ## Bootstrap recovery / adversarial audit (2026-09-12)
 
@@ -59,6 +59,7 @@ The recovery audit also hardened the implementation before first self-hosting:
 - Git hooks and commit signing are disabled for bridge-created commits;
 - changes to protected/sensitive paths and non-regular file modes are rejected;
 - the macOS LaunchAgent receives a PATH that includes the Homebrew rclone location;
-- durable local publication markers preserve idempotency while reducing Drive round trips.
+- durable local publication markers preserve idempotency while reducing Drive round trips;
+- runtime registry and snapshot uploads no longer perform a redundant `rclone mkdir` before `copyto`; setup-only mkdir calls use a short timeout.
 
-The next acceptance point is self-hosting: publish the `llm-git-bridge` snapshot through protocol v2, run the background watcher, and use an LLM-created v2 transaction to make the next repository change.
+Self-hosting and opt-in safe pushing are now proven. The bridge has created, tested, committed, and pushed an `ai/*` branch to `origin` without terminal intervention.

@@ -8,20 +8,31 @@ from .core import BridgeError, atomic_write_text, run
 
 
 class RcloneTransport:
-    def __init__(self, remote: str, *, timeout: float = 60, list_timeout: float = 12):
+    def __init__(
+        self,
+        remote: str,
+        *,
+        timeout: float = 60,
+        list_timeout: float = 12,
+        mkdir_timeout: float = 12,
+    ):
         remote = remote.rstrip(":")
         if not remote:
             raise BridgeError("empty rclone remote")
         self.remote = remote
         self.timeout = timeout
         self.list_timeout = max(1.0, min(float(list_timeout), float(timeout)))
+        self.mkdir_timeout = max(1.0, min(float(mkdir_timeout), float(timeout)))
 
     def _remote(self, rel: str) -> str:
         rel = rel.lstrip("/")
         return f"{self.remote}:{rel}"
 
     def ensure_dir(self, rel: str) -> None:
-        run(["rclone", "mkdir", self._remote(rel)], timeout=self.timeout)
+        # Explicit mkdir is only needed during one-time setup. Runtime uploads use
+        # copyto directly so an intermittently slow Drive mkdir cannot block each
+        # registry/snapshot publication.
+        run(["rclone", "mkdir", self._remote(rel)], timeout=self.mkdir_timeout)
 
     def list_files(self, rel: str) -> list[str]:
         proc = run(["rclone", "lsf", self._remote(rel), "--files-only"], check=False, timeout=self.list_timeout)

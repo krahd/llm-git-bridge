@@ -21,9 +21,10 @@ class FakeTransport:
     def __init__(self):
         self.files: dict[str, str] = {}
         self.list_calls: list[str] = []
+        self.ensure_dir_calls: list[str] = []
 
     def ensure_dir(self, rel: str) -> None:
-        pass
+        self.ensure_dir_calls.append(rel)
 
     def list_files(self, rel: str) -> list[str]:
         self.list_calls.append(rel)
@@ -102,6 +103,7 @@ class AppTests(unittest.TestCase):
         self.assertEqual(result["status"], "success")
         self.assertEqual(result["operation"], "materialize")
         self.assertIn(f"v2/repos/{repo_id}/snapshot.json", self.fake.files)
+        self.assertEqual(self.fake.ensure_dir_calls, [])
 
     def test_processed_marker_avoids_result_listing_in_steady_state(self):
         repo_id = next(iter(json.loads(app.REGISTRY_FILE.read_text())["repos"]))
@@ -125,6 +127,7 @@ class AppTests(unittest.TestCase):
             "run": [],
         })
         self.assertEqual(app.process_pending_once(self.cfg), 1)
+        self.assertEqual(self.fake.ensure_dir_calls, [])
         self.fake.list_calls.clear()
         self.assertEqual(app.process_pending_once(self.cfg), 0)
         self.assertEqual(self.fake.list_calls, ["v2/transactions"])
@@ -157,6 +160,18 @@ class TransportTests(unittest.TestCase):
     def test_list_timeout_is_capped_by_general_timeout(self):
         transport = RcloneTransport("fake", timeout=5, list_timeout=12)
         self.assertEqual(transport.list_timeout, 5)
+
+
+    def test_mkdir_uses_short_timeout(self):
+        transport = RcloneTransport("fake", timeout=60, mkdir_timeout=8)
+        proc = subprocess.CompletedProcess(["rclone"], 0, stdout="", stderr="")
+        with patch("llm_git_bridge.transport.run", return_value=proc) as mocked:
+            transport.ensure_dir("v2/meta")
+        self.assertEqual(mocked.call_args.kwargs["timeout"], 8)
+
+    def test_mkdir_timeout_is_capped_by_general_timeout(self):
+        transport = RcloneTransport("fake", timeout=5, mkdir_timeout=12)
+        self.assertEqual(transport.mkdir_timeout, 5)
 
 
 if __name__ == "__main__":

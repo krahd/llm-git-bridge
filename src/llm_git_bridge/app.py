@@ -93,7 +93,6 @@ def transport_from_config(cfg: dict[str, Any]) -> RcloneTransport:
 
 def publish_registry(cfg: dict[str, Any], registry: dict[str, Any]) -> None:
     transport = transport_from_config(cfg)
-    transport.ensure_dir(f"{REMOTE_ROOT}/meta")
     transport.upload_json(
         f"{REMOTE_ROOT}/meta/repos.json",
         public_registry(registry),
@@ -150,7 +149,6 @@ def materialize(cfg: dict[str, Any], repo_ref: str, *, branch_snapshot: tuple[Pa
     else:
         remote_rel = f"{REMOTE_ROOT}/repos/{repo_id}/snapshot.json"
     transport = transport_from_config(cfg)
-    transport.ensure_dir(str(Path(remote_rel).parent))
     transport.upload_json(remote_rel, snapshot, STATE_DIR / "outbox" / f"snapshot-{repo_id}.json")
     return remote_rel
 
@@ -283,7 +281,6 @@ def process_pending_once(cfg: dict[str, Any]) -> int:
                     branch = result["branch"]
                     snap_rel = f"{REMOTE_ROOT}/repos/{repo_id}/branches/{branch_token(branch)}/snapshot.json"
                     try:
-                        transport.ensure_dir(str(Path(snap_rel).parent))
                         transport.upload_json(
                             snap_rel,
                             outcome.snapshot,
