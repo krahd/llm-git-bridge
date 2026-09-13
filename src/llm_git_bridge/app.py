@@ -1038,6 +1038,13 @@ def process_pending_once(cfg: dict[str, Any], *, cancel_check: Callable[[], bool
             _validate_request_identity(obj, filename)
             kind = obj.get("kind")
 
+            # The local registry is written atomically but may be refreshed by a
+            # concurrent local `scan` while a poll is processing several queued
+            # requests.  Re-read it immediately before repo-dependent dispatch so
+            # later requests never act on a stale in-memory path/identity snapshot.
+            if kind in {"materialize", "transaction"}:
+                registry = load_registry()
+
             if kind == "materialize":
                 result = _process_materialize_request(cfg, registry, obj, filename)
                 registry = load_registry()

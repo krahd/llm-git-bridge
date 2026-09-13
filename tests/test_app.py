@@ -174,6 +174,61 @@ class AppTests(unittest.TestCase):
         self.assertNotIn(str(self.repo), json.dumps(result))
         self.assertNotIn(f"v2/transactions/{filename}", self.fake.files)
 
+    def test_registry_change_between_pending_requests_is_observed_fail_closed(self):
+        repo_id = next(iter(json.loads(app.REGISTRY_FILE.read_text())["repos"]))
+        tx_first = "tx-a-registry-refresh"
+        tx_second = "tx-b-registry-refresh"
+        self.fake.files[f"v2/transactions/{tx_first}.json"] = json.dumps({
+            "protocol": 2,
+            "kind": "doctor",
+            "transaction_id": tx_first,
+        })
+        self.fake.files[f"v2/transactions/{tx_second}.json"] = json.dumps({
+            "protocol": 2,
+            "kind": "transaction",
+            "transaction_id": tx_second,
+            "repo": repo_id,
+            "base_sha": self._seed_head,
+            "branch": "ai/registry-refresh-race",
+            "patch": (
+                "diff --git a/README.md b/README.md\n"
+                "--- a/README.md\n"
+                "+++ b/README.md\n"
+                "@@ -1 +1,2 @@\n"
+                " hello\n"
+                "+must-not-commit\n"
+            ),
+            "run": [],
+        })
+
+        def doctor_then_remove_registry_repo(_cfg, _obj, _filename):
+            registry = json.loads(app.REGISTRY_FILE.read_text(encoding="utf-8"))
+            registry["repos"] = {}
+            save_json(app.REGISTRY_FILE, registry)
+            return {
+                "protocol": 2,
+                "kind": "result",
+                "transaction_id": tx_first,
+                "status": "success",
+                "operation": "doctor",
+                "processed_at": "test",
+                "doctor": {},
+            }
+
+        with patch("llm_git_bridge.app._process_doctor_request", side_effect=doctor_then_remove_registry_repo):
+            self.assertEqual(app.process_pending_once(self.cfg), 2)
+
+        result = json.loads(self.fake.files[f"v2/results/{tx_second}.json"])
+        self.assertEqual(result["status"], "error")
+        self.assertTrue(app._verify_result(f"{tx_second}.json", result))
+        self.assertNotEqual(
+            subprocess.run(
+                ["git", "-C", str(self.repo), "show-ref", "--verify", "refs/heads/ai/registry-refresh-race"],
+                stdout=subprocess.PIPE, stderr=subprocess.PIPE,
+            ).returncode,
+            0,
+        )
+
     def test_result_auth_key_survives_runtime_state_deletion(self):
         first = app._result_auth_key()
         self.assertEqual(len(first), 32)
