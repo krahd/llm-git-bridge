@@ -526,17 +526,16 @@ def validate_safe_branch_name(branch: Any, safe_branch_prefix: str) -> str:
         raise BridgeError(f"branch must start with {safe_branch_prefix!r}")
     if not re.fullmatch(r"[A-Za-z0-9._/-]{1,200}", branch):
         raise BridgeError("branch contains unsupported characters")
+    parts = branch.split("/")
     if (
         branch.startswith("-")
-        or branch.endswith((".", "/", ".lock"))
+        or branch.endswith((".", "/"))
         or ".." in branch
         or "//" in branch
         or "@{" in branch
-        or "/." in branch
+        or any(part.startswith(".") or part.endswith(".lock") for part in parts)
     ):
         raise BridgeError("unsafe branch name")
-    if run(["git", "check-ref-format", f"refs/heads/{branch}"], check=False, timeout=10).returncode != 0:
-        raise BridgeError("branch is not a valid Git branch name")
     return branch
 
 
@@ -582,9 +581,16 @@ def validate_transaction(obj: dict[str, Any], *, safe_branch_prefix: str, max_pa
     return obj
 
 
-def _bridge_commit_identity(repo: Path, commit: str) -> tuple[str, str] | None:
-    """Return (transaction_id, request_hash) for an unambiguous bridge commit."""
-    body = git(repo, "show", "-s", "--format=%B", commit, timeout=30).stdout
+def _bridge_commit_metadata(
+    repo: Path,
+    commit: str,
+) -> tuple[tuple[str, str] | None, list[str]]:
+    """Return authenticated bridge identity and parents with one Git process."""
+    raw = git(repo, "show", "-s", "--format=%P%x00%B", commit, timeout=30).stdout
+    parents_text, separator, body = raw.partition("\x00")
+    if not separator:
+        return None, []
+    parents = parents_text.split()
     tx_matches = re.findall(
         rf"(?im)^{re.escape(BRIDGE_TX_TRAILER)}:\s*([^\s]+)\s*$",
         body,
@@ -594,12 +600,17 @@ def _bridge_commit_identity(repo: Path, commit: str) -> tuple[str, str] | None:
         body,
     )
     if len(tx_matches) != 1 or len(hash_matches) != 1:
-        return None
+        return None, parents
     try:
         txid = validate_transaction_id(tx_matches[0])
     except BridgeError:
-        return None
-    return txid, hash_matches[0]
+        return None, parents
+    return (txid, hash_matches[0]), parents
+
+
+def _bridge_commit_identity(repo: Path, commit: str) -> tuple[str, str] | None:
+    """Return (transaction_id, request_hash) for an unambiguous bridge commit."""
+    return _bridge_commit_metadata(repo, commit)[0]
 
 
 def _bridge_commit_matches_request(
@@ -610,11 +621,12 @@ def _bridge_commit_matches_request(
     request_hash: str,
     base_sha: str,
 ) -> bool:
-    identity = _bridge_commit_identity(repo, commit)
-    if identity != (txid, request_hash):
-        return False
-    parents = git(repo, "show", "-s", "--format=%P", commit, timeout=30).stdout.split()
-    return len(parents) == 1 and parents[0].lower() == base_sha.lower()
+    identity, parents = _bridge_commit_metadata(repo, commit)
+    return (
+        identity == (txid, request_hash)
+        and len(parents) == 1
+        and parents[0].lower() == base_sha.lower()
+    )
 
 
 def branch_exists(repo: Path, branch: str) -> bool:
@@ -626,9 +638,28 @@ def commit_exists(repo: Path, sha: str) -> bool:
 
 
 def ensure_tracked_clean(repo: Path) -> None:
-    if git(repo, "diff", "--quiet", check=False).returncode != 0:
+    raw = git(
+        repo,
+        "status",
+        "--porcelain=v2",
+        "-z",
+        "--untracked-files=no",
+        timeout=30,
+    ).stdout
+    staged = False
+    unstaged = False
+    for record in raw.split("\x00"):
+        if not record or record[0] not in {"1", "2", "u"}:
+            continue
+        parts = record.split(" ", 2)
+        if len(parts) < 2 or len(parts[1]) != 2:
+            raise BridgeError("could not parse tracked repository state")
+        x, y = parts[1]
+        staged = staged or x != "."
+        unstaged = unstaged or y != "."
+    if unstaged:
         raise BridgeError("tracked working tree has unstaged modifications")
-    if git(repo, "diff", "--cached", "--quiet", check=False).returncode != 0:
+    if staged:
         raise BridgeError("index has staged modifications")
 
 
@@ -648,7 +679,15 @@ def retire_worktree(repo: Path, worktree: Path) -> None:
 
 def add_disposable_worktree(repo: Path, *args: str) -> None:
     """Add a worktree, pruning and retrying once only for stale crash metadata."""
-    argv = ("-c", "core.hooksPath=/dev/null", "worktree", "add", *args)
+    argv = (
+        "-c",
+        "core.hooksPath=/dev/null",
+        "-c",
+        "core.fsmonitor=false",
+        "worktree",
+        "add",
+        *args,
+    )
     first = git(repo, *argv, check=False, timeout=120)
     if first.returncode == 0:
         return
@@ -669,30 +708,63 @@ def _changed_paths(worktree: Path) -> list[Path]:
     return [Path(item) for item in raw.split("\x00") if item]
 
 
-def _tree_mode(worktree: Path, rel: Path, *, index: bool) -> str | None:
-    if index:
-        proc = git(worktree, "ls-files", "--stage", "-z", "--", rel.as_posix(), timeout=30)
-    else:
-        proc = git(worktree, "ls-tree", "-z", "HEAD", "--", rel.as_posix(), timeout=30)
-    raw = proc.stdout
-    if not raw:
-        return None
-    return raw.split(" ", 1)[0]
+def _pathspec_batches(
+    rels: list[Path],
+    *,
+    max_items: int = 128,
+    max_bytes: int = 32_768,
+) -> Iterable[list[str]]:
+    batch: list[str] = []
+    size = 0
+    for rel in rels:
+        path = rel.as_posix()
+        path_bytes = len(os.fsencode(path)) + 1
+        if batch and (len(batch) >= max_items or size + path_bytes > max_bytes):
+            yield batch
+            batch = []
+            size = 0
+        batch.append(path)
+        size += path_bytes
+    if batch:
+        yield batch
+
+
+def _tree_modes(worktree: Path, rels: list[Path], *, index: bool) -> dict[Path, str]:
+    modes: dict[Path, str] = {}
+    for paths in _pathspec_batches(rels):
+        if index:
+            raw = git(worktree, "ls-files", "--stage", "-z", "--", *paths, timeout=30).stdout
+        else:
+            raw = git(worktree, "ls-tree", "-z", "HEAD", "--", *paths, timeout=30).stdout
+        for record in raw.split("\x00"):
+            if not record or "\t" not in record:
+                continue
+            metadata, path_text = record.split("\t", 1)
+            mode = metadata.split(" ", 1)[0]
+            rel = Path(path_text)
+            if rel in modes and modes[rel] != mode:
+                modes[rel] = "unmerged"
+            else:
+                modes[rel] = mode
+    return modes
 
 
 def ensure_changed_files_are_regular(worktree: Path) -> None:
     # Disable rename/copy detection so both source and destination names are
     # validated independently. This prevents moving a protected file to a benign
     # name to make its contents remotely visible later.
-    for rel in _changed_paths(worktree):
+    changed = _changed_paths(worktree)
+    old_modes = _tree_modes(worktree, changed, index=False)
+    new_modes = _tree_modes(worktree, changed, index=True)
+    allowed_modes = {None, "100644", "100755"}
+    for rel in changed:
         if _is_sensitive(rel):
             raise BridgeError("transaction touches a protected/sensitive path")
         if _is_push_protected(rel):
             raise BridgeError("transaction touches a protected CI/automation path")
 
-        old_mode = _tree_mode(worktree, rel, index=False)
-        new_mode = _tree_mode(worktree, rel, index=True)
-        allowed_modes = {None, "100644", "100755"}
+        old_mode = old_modes.get(rel)
+        new_mode = new_modes.get(rel)
         if old_mode not in allowed_modes or new_mode not in allowed_modes:
             raise BridgeError("symlink/submodule changes are not allowed")
 
@@ -701,18 +773,36 @@ def ensure_changed_files_are_regular(worktree: Path) -> None:
             raise BridgeError("symlink/submodule changes are not allowed")
 
 
-def _repo_control_state(worktree: Path) -> dict[str, str]:
-    return {
-        "head": git(worktree, "rev-parse", "HEAD", timeout=30).stdout.strip(),
-        "head_ref": git(
+def _repo_control_state(
+    worktree: Path,
+    *,
+    known_head: str | None = None,
+    known_head_ref: str | None = None,
+    known_index_tree: str | None = None,
+) -> dict[str, str]:
+    if known_head is None or known_head_ref is None:
+        head_lines = git(
             worktree,
-            "symbolic-ref",
-            "--quiet",
+            "rev-parse",
             "HEAD",
-            check=False,
+            "--symbolic-full-name",
+            "HEAD",
             timeout=30,
-        ).stdout.strip(),
-        "index_tree": git(worktree, "write-tree", timeout=30).stdout.strip(),
+        ).stdout.splitlines()
+        if len(head_lines) < 2:
+            raise BridgeError("could not read repository HEAD state")
+        head = head_lines[0].strip()
+        head_ref = head_lines[1].strip()
+        if head_ref == "HEAD":
+            head_ref = ""
+    else:
+        head = known_head
+        head_ref = known_head_ref
+    index_tree = known_index_tree or git(worktree, "write-tree", timeout=30).stdout.strip()
+    return {
+        "head": head,
+        "head_ref": head_ref,
+        "index_tree": index_tree,
         "local_config": git(worktree, "config", "--local", "--null", "--list", timeout=30).stdout,
         "refs": git(
             worktree,
@@ -1022,15 +1112,13 @@ def process_transaction(
     if existing:
         tip = git(repo, "rev-parse", branch).stdout.strip().lower()
         if tip != base_sha:
-            identity = _bridge_commit_identity(repo, tip)
+            identity, parents = _bridge_commit_metadata(repo, tip)
             if identity is not None and identity[0] == txid and identity[1] != request_hash:
                 raise BridgeError("transaction_id was already committed with a different request")
-            if _bridge_commit_matches_request(
-                repo,
-                tip,
-                txid=txid,
-                request_hash=request_hash,
-                base_sha=base_sha,
+            if (
+                identity == (txid, request_hash)
+                and len(parents) == 1
+                and parents[0].lower() == base_sha
             ):
                 # The previous daemon may have died after git commit made the
                 # branch durable but before its local/remote result was saved.
@@ -1108,8 +1196,14 @@ def process_transaction(
                 raise BridgeError("patch produced no changes")
 
             allowed_commands = commands or {}
-            command_state = _repo_control_state(wt)
+            command_state: dict[str, str] | None = None
             if tx.get("run"):
+                command_state = _repo_control_state(
+                    wt,
+                    known_head=base_sha,
+                    known_head_ref=f"refs/heads/{branch}",
+                    known_index_tree=staged_tree,
+                )
                 command_workspace, command_home = _prepare_command_workspace(wt, state_dir, txid)
             for index, name in enumerate(tx.get("run", []), start=1):
                 argv = allowed_commands.get(name)
@@ -1138,6 +1232,7 @@ def process_transaction(
                     raise BridgeError(f"configured command timed out: {name}")
                 if proc.returncode != 0:
                     raise BridgeError(f"configured command failed: {name}")
+                assert command_state is not None
                 _assert_command_invariants(wt, command_state)
             t = mark("commands_s", t)
 

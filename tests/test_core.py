@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import json
 import os
+import shutil
 import subprocess
 import sys
 import tempfile
@@ -37,6 +38,22 @@ def sh(cwd: Path, *args: str) -> str:
 
 
 class CoreTests(unittest.TestCase):
+    @classmethod
+    def setUpClass(cls):
+        cls._seed_root = Path(tempfile.mkdtemp(prefix="llmgb-seed-"))
+        cls._seed_repo = cls._seed_root / "repo"
+        cls._seed_repo.mkdir()
+        sh(cls._seed_repo, "git", "init", "-q")
+        sh(cls._seed_repo, "git", "config", "user.email", "test@example.invalid")
+        sh(cls._seed_repo, "git", "config", "user.name", "Test User")
+        (cls._seed_repo / "README.md").write_text("hello\n", encoding="utf-8")
+        sh(cls._seed_repo, "git", "add", "README.md")
+        sh(cls._seed_repo, "git", "commit", "-qm", "initial")
+
+    @classmethod
+    def tearDownClass(cls):
+        shutil.rmtree(cls._seed_root, ignore_errors=True)
+
     def test_suite_imports_bridge_from_current_checkout(self):
         project_root = Path(__file__).resolve().parents[1]
         imported_core = Path(core.__file__).resolve()
@@ -45,26 +62,39 @@ class CoreTests(unittest.TestCase):
             f"tests imported bridge code outside current checkout: {imported_core}",
         )
 
+    def clone_seed_repo(self, destination: Path) -> Path:
+        destination.parent.mkdir(parents=True, exist_ok=True)
+        subprocess.run(
+            [
+                "git",
+                "clone",
+                "-q",
+                "--local",
+                "--origin",
+                "__seed__",
+                "-c",
+                "user.email=test@example.invalid",
+                "-c",
+                "user.name=Test User",
+                str(self._seed_repo),
+                str(destination),
+            ],
+            check=True,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            text=True,
+        )
+        return destination
+
     def make_repo(self) -> Path:
-        root = Path(tempfile.mkdtemp(prefix="llmgb-test-"))
-        sh(root, "git", "init", "-q")
-        sh(root, "git", "config", "user.email", "test@example.invalid")
-        sh(root, "git", "config", "user.name", "Test User")
-        (root / "README.md").write_text("hello\n", encoding="utf-8")
-        sh(root, "git", "add", "README.md")
-        sh(root, "git", "commit", "-qm", "initial")
-        return root
+        parent = Path(tempfile.mkdtemp(prefix="llmgb-test-"))
+        self.addCleanup(shutil.rmtree, parent, ignore_errors=True)
+        return self.clone_seed_repo(parent / "repo")
 
     def test_registry_does_not_publish_paths(self):
         parent = Path(tempfile.mkdtemp(prefix="llmgb-root-"))
-        repo = parent / "alpha"
-        repo.mkdir()
-        sh(repo, "git", "init", "-q")
-        sh(repo, "git", "config", "user.email", "test@example.invalid")
-        sh(repo, "git", "config", "user.name", "Test User")
-        (repo / "a.txt").write_text("a\n", encoding="utf-8")
-        sh(repo, "git", "add", "a.txt")
-        sh(repo, "git", "commit", "-qm", "initial")
+        self.addCleanup(shutil.rmtree, parent, ignore_errors=True)
+        repo = self.clone_seed_repo(parent / "alpha")
 
         local = build_registry([parent])
         public = public_registry(local)
@@ -211,6 +241,32 @@ class CoreTests(unittest.TestCase):
         }
         with self.assertRaises(BridgeError):
             validate_transaction(tx, safe_branch_prefix="ai/")
+
+    def test_safe_branch_validation_matches_documented_ref_component_rules_without_git(self):
+        with patch.object(core_mod, "run", side_effect=AssertionError("must not spawn Git")):
+            self.assertEqual(core_mod.validate_safe_branch_name("ai/good-name", "ai/"), "ai/good-name")
+            for branch in ("ai/.hidden", "ai/middle.lock/leaf", "ai/double..dot", "ai/trailing."):
+                with self.subTest(branch=branch):
+                    with self.assertRaises(BridgeError):
+                        core_mod.validate_safe_branch_name(branch, "ai/")
+
+    def test_changed_file_mode_validation_batches_git_queries(self):
+        repo = self.make_repo()
+        for index in range(12):
+            (repo / f"file-{index}.txt").write_text(f"{index}\n", encoding="utf-8")
+        sh(repo, "git", "add", ".")
+        original_git = core_mod.git
+        mode_queries: list[str] = []
+
+        def counted_git(worktree, *args, **kwargs):
+            if args and args[0] in {"ls-tree", "ls-files"}:
+                mode_queries.append(args[0])
+            return original_git(worktree, *args, **kwargs)
+
+        with patch.object(core_mod, "git", side_effect=counted_git):
+            core_mod.ensure_changed_files_are_regular(repo)
+        self.assertEqual(mode_queries.count("ls-tree"), 1)
+        self.assertEqual(mode_queries.count("ls-files"), 1)
 
     def test_process_transaction_creates_commit_and_cleans_worktree(self):
         repo = self.make_repo()

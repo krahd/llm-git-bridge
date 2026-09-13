@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import json
 import os
+import shutil
 import subprocess
 import tempfile
 import time
@@ -10,7 +11,7 @@ from pathlib import Path
 from unittest.mock import patch
 
 from llm_git_bridge import app
-from llm_git_bridge.core import BridgeError, build_registry, save_json
+from llm_git_bridge.core import BridgeError, save_json
 from llm_git_bridge.transport import RcloneTransport, RemoteFileEntry, TransientTransportError
 
 
@@ -70,17 +71,48 @@ class FakeTransport:
 
 
 class AppTests(unittest.TestCase):
+    @classmethod
+    def setUpClass(cls):
+        cls._seed_root = Path(tempfile.mkdtemp(prefix="llmgb-app-seed-"))
+        cls._seed_repo = cls._seed_root / "repo"
+        cls._seed_repo.mkdir()
+        sh(cls._seed_repo, "git", "init", "-q")
+        sh(cls._seed_repo, "git", "config", "user.email", "test@example.invalid")
+        sh(cls._seed_repo, "git", "config", "user.name", "Test User")
+        (cls._seed_repo / "README.md").write_text("hello\n", encoding="utf-8")
+        sh(cls._seed_repo, "git", "add", "README.md")
+        sh(cls._seed_repo, "git", "commit", "-qm", "initial")
+        cls._seed_head = sh(cls._seed_repo, "git", "rev-parse", "HEAD")
+        cls._seed_branch = sh(cls._seed_repo, "git", "symbolic-ref", "--short", "HEAD")
+
+    @classmethod
+    def tearDownClass(cls):
+        shutil.rmtree(cls._seed_root, ignore_errors=True)
+
     def setUp(self):
         self.tmp = Path(tempfile.mkdtemp(prefix="llmgb-app-"))
         self.state = self.tmp / "state"
         self.repo = self.tmp / "repo"
-        self.repo.mkdir()
-        sh(self.repo, "git", "init", "-q")
-        sh(self.repo, "git", "config", "user.email", "test@example.invalid")
-        sh(self.repo, "git", "config", "user.name", "Test User")
-        (self.repo / "README.md").write_text("hello\n", encoding="utf-8")
-        sh(self.repo, "git", "add", "README.md")
-        sh(self.repo, "git", "commit", "-qm", "initial")
+        subprocess.run(
+            [
+                "git",
+                "clone",
+                "-q",
+                "--local",
+                "--origin",
+                "__seed__",
+                "-c",
+                "user.email=test@example.invalid",
+                "-c",
+                "user.name=Test User",
+                str(self._seed_repo),
+                str(self.repo),
+            ],
+            check=True,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            text=True,
+        )
 
         self.fake = FakeTransport()
         self.config = self.tmp / "config"
@@ -90,7 +122,26 @@ class AppTests(unittest.TestCase):
         app.STATE_DIR = self.state
         app.REGISTRY_FILE = self.state / "registry.json"
         app.PUBLISHED_DIR = self.state / "published-results"
-        save_json(app.REGISTRY_FILE, build_registry([self.tmp]))
+        save_json(
+            app.REGISTRY_FILE,
+            {
+                "version": 1,
+                "generated_at": "test",
+                "repos": {
+                    "repo": {
+                        "id": "repo",
+                        "name": "repo",
+                        "path": str(self.repo),
+                        "head": self._seed_head,
+                        "branch": self._seed_branch,
+                        "dirty": False,
+                        "tracked_dirty": False,
+                        "untracked": False,
+                        "last_seen": "test",
+                    }
+                },
+            },
+        )
         self.transport_patch = patch("llm_git_bridge.app.transport_from_config", return_value=self.fake)
         self.transport_patch.start()
         self.cfg = {
@@ -105,6 +156,7 @@ class AppTests(unittest.TestCase):
     def tearDown(self):
         self.transport_patch.stop()
         app.CONFIG_DIR, app.CONFIG_FILE, app.STATE_DIR, app.REGISTRY_FILE, app.PUBLISHED_DIR = self.old
+        shutil.rmtree(self.tmp, ignore_errors=True)
 
 
     def test_result_auth_key_survives_runtime_state_deletion(self):
