@@ -6,6 +6,10 @@
 2. **Transport adapters**: Google Drive through `rclone` first. The transport is a mailbox, not the source of truth.
 3. **LLM/client adapters or usage guides**: ChatGPT is the first demonstrated client, but the wire protocol does not encode provider-specific assumptions.
 
+## Execution and concurrency model
+
+The mailbox may have multiple remote writers, but exactly one local watcher consumes it. Requests are executed serially and queue order is not guaranteed to be FIFO. This avoids concurrent local Git mutation but means long configured commands cause head-of-line blocking. See [concurrency.md](concurrency.md) for multi-client guidance.
+
 ## Multi-repository model
 
 Do not mirror every repository to Drive. The local daemon recursively discovers repositories under configured roots and publishes a small path-free repository index. Repository contents are materialised only on demand. A remote client can request materialisation through the same request mailbox, so changing projects does not require a terminal command.

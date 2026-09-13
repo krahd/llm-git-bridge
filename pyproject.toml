@@ -6,6 +6,7 @@ build-backend = "setuptools.build_meta"
 name = "llm-git-bridge"
 version = "0.2.0a1"
 description = "Provider-agnostic bridge between LLM agents and local Git repositories"
+readme = "README.md"
 requires-python = ">=3.11"
 dependencies = []
 
@@ -17,3 +18,8 @@ package-dir = {"" = "src"}
 
 [tool.setuptools.packages.find]
 where = ["src"]
+
+[project.urls]
+Homepage = "https://github.com/krahd/llm-git-bridge"
+Documentation = "https://github.com/krahd/llm-git-bridge/tree/main/docs"
+Issues = "https://github.com/krahd/llm-git-bridge/issues"

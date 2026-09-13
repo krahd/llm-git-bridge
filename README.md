@@ -1,74 +1,183 @@
 # llm-git-bridge
 
-`llm-git-bridge` is a provider-agnostic bridge between LLM/agent clients and local Git repositories when a native GitHub integration is unavailable or administratively blocked.
+`llm-git-bridge` lets an LLM or agent work safely with Git repositories that remain on your own machine.
 
-The Git repositories remain local. A mailbox transport exposes a small repository index, on-demand snapshots, transactions, and results. Google Drive via `rclone` is the first transport; the core protocol is intentionally not tied to ChatGPT or Google Drive.
+It exposes a deliberately small mailbox protocol for repository discovery, filtered snapshots, patch transactions, local validation commands, commits, and optional safe-branch pushes. Google Drive through `rclone` is the first transport, but the core protocol is provider-neutral: the remote client does not need direct filesystem access, a GitHub token, or arbitrary shell access on the host.
 
-## Current state
+> **Status:** alpha (`0.2.0a1`, protocol v2). The project is usable and tested, but its protocol and operational model may still change before a stable release.
 
-The initial Drive proof of concept completed a full round trip: local repository -> Drive -> LLM -> Drive -> isolated Git worktree -> patch -> commit -> result. v0.2 turns that experiment into a reusable bridge with multi-repository discovery, a provider-neutral protocol, single-file transactions, safety checks, and a background watcher.
+## Why use it?
 
-## Local development
+A native Git hosting integration is usually the simplest option when it is available and has the permissions you need. `llm-git-bridge` exists for cases where you want a different boundary:
 
-```bash
-bin/llm-git-bridge setup
-bin/llm-git-bridge add-root ~/tom-repos
-bin/llm-git-bridge scan
-bin/llm-git-bridge materialize llm-git-bridge
-bin/llm-git-bridge status
-bin/llm-git-bridge watch --once
-```
+- the authoritative checkout must remain local;
+- a ChatGPT/LLM session cannot access GitHub directly, or is limited to read-only access;
+- edits should be tested against the local repository before they become commits;
+- remote clients should never receive arbitrary command execution;
+- pushes should be opt-in, branch-restricted, and local-policy controlled;
+- several LLM sessions or providers should be able to submit work to the same host through one neutral protocol.
 
-The bootstrap script can also install a user LaunchAgent so the watcher runs without a terminal.
+The bridge is **not** a shell proxy, a Git hosting service, or an OS sandbox.
 
-## Protocol sketch
-
-Drive/mailbox layout:
+## How it works
 
 ```text
-v2/meta/repos.json
-v2/repos/<repo-id>/snapshot.json
-v2/repos/<repo-id>/branches/<branch>/snapshot.json
-v2/transactions/<transaction-id>.json
-v2/results/<transaction-id>.json
+LLM / agent session
+       |
+       |  request JSON / filtered snapshots
+       v
+mailbox transport (Google Drive via rclone today)
+       |
+       v
+single local watcher
+       |
+       +--> validate request + stale base
+       +--> isolated Git worktree
+       +--> apply/stage patch
+       +--> run locally configured checks
+       +--> commit to safe branch
+       +--> optional push to origin
+       |
+       v
+signed result JSON
 ```
 
-A transaction is one JSON object with an inline unified diff. This avoids the multi-file transaction latency of the prototype.
+Repositories stay local. The remote mailbox contains a path-free repository index, filtered snapshots on demand, request objects, and signed results. `.git` history and common secrets are not mirrored.
+
+## Quick start
+
+### Requirements
+
+- Python 3.11+
+- Git
+- `rclone`
+- a configured Google Drive remote (for the current transport)
+
+Clone the repository and use the bundled wrapper; installation as a Python package is optional.
+
+```bash
+git clone https://github.com/krahd/llm-git-bridge.git
+cd llm-git-bridge
+
+bin/llm-git-bridge setup --remote YOUR_RCLONE_REMOTE
+bin/llm-git-bridge add-root ~/repos
+bin/llm-git-bridge scan
+bin/llm-git-bridge status
+```
+
+Configure symbolic validation commands per repository. Remote requests may refer to these names, but may not supply shell commands or argv themselves.
+
+```bash
+bin/llm-git-bridge configure-command my-repo test \
+  python3 -m unittest discover -s tests -v
+```
+
+Push is disabled by default. To permit explicit transaction requests to push their validated safe branch to `origin`:
+
+```bash
+bin/llm-git-bridge configure-push my-repo enable
+```
+
+Run the watcher in the foreground:
+
+```bash
+bin/llm-git-bridge watch
+```
+
+On macOS, install the bundled LaunchAgent and let it run continuously:
+
+```bash
+bin/llm-git-bridge daemon install \
+  --command "$PWD/bin/llm-git-bridge"
+```
+
+For a fuller setup guide, including Google OAuth recommendations, see [docs/installation.md](docs/installation.md).
+
+## Request example
+
+A transaction is one JSON object containing an inline unified diff:
 
 ```json
 {
   "protocol": 2,
   "kind": "transaction",
-  "transaction_id": "tx-example",
-  "repo": "llm-git-bridge",
+  "transaction_id": "tx-example-20260913-a7f2",
+  "repo": "my-repo",
   "base_sha": "0123456789abcdef0123456789abcdef01234567",
-  "branch": "ai/example",
+  "branch": "ai/example-change",
   "patch": "diff --git ...",
   "run": ["test"],
-  "commit_message": "Example bridge change"
+  "commit_message": "Document the example",
+  "push": true
 }
 ```
 
-The daemon does not accept arbitrary shell commands or argv from a remote transaction. `run` contains symbolic names whose argv are configured locally. A configured test/build command can still execute code from the patched repository as the local user; this is an explicit trust boundary, not an OS sandbox. See `docs/security.md`.
+The bridge checks the repository and base SHA, creates an isolated worktree, applies and validates the patch, runs only locally configured symbolic commands, commits, optionally pushes the safe-prefix branch, then publishes an authenticated result.
 
-Push is a separate, local opt-in. Enable it per repository with `bin/llm-git-bridge configure-push <repo> enable`; a transaction must additionally request `"push": true`. The bridge then pushes only the validated safe-prefix branch to the hard-coded `origin` remote, with no force option and with Git hooks disabled.
+## Multiple clients and ChatGPT sessions
 
-## Safety defaults
+Multiple remote clients can submit requests to the same mailbox. One local watcher owns the mailbox and processes requests **serially**, so local Git mutation is not concurrent.
 
-- repository paths stay local and are not included in the remote registry;
-- sensitive files, common credential formats, private-key/service-account content, and sensitive omission pathnames are excluded from snapshots;
-- `.git` history is not uploaded;
-- tracked local modifications block remote patch application;
-- remote branches must use the configured safe prefix (`ai/` by default);
-- transaction IDs/command names are restricted tokens; duplicate JSON keys and oversized requests are rejected;
-- symlink/submodule changes, `.gitmodules`, and common CI/automation control paths are protected;
-- push is disabled by default and can only be enabled per repository by local configuration;
-- when enabled and explicitly requested, only the transaction's validated safe-prefix branch is pushed to `origin`, without force;
-- merge, force-push, remote mutation, and repository administration are not implemented;
-- each transaction is processed in an isolated Git worktree; only one mailbox watcher can run at a time;
-- configured-command output stays local and bounded, common secret environment variables are removed, and leftover child processes are terminated;
-- base SHA checks prevent silently applying stale patches.
+Important consequences:
+
+- use globally unique transaction IDs for independent requests;
+- use separate branches for independent edits;
+- two requests may share the same base commit if they target different new branches;
+- a request against an already-advanced branch is rejected as stale rather than silently rebased or merged;
+- queue order is **not guaranteed to be FIFO**;
+- a long validation command blocks later requests until it finishes.
+
+A five-request live probe on the reference host completed all five successfully and demonstrated non-FIFO ordering. See [docs/concurrency.md](docs/concurrency.md).
+
+## Performance
+
+The September 2026 performance audit reduced the full live validation suite from **373.2 s to 55.8 s** while increasing coverage from 139 to 147 tests: about **6.7x faster** and **85% less wall-clock time** on the reference macOS host.
+
+After the final daemon restart, lightweight control-plane requests used the persistent `rclone rcd` path with transaction-directory listing around **0.23 s** and small request download around **0.44 s** in the post-promotion doctor/materialisation checks. Real edit latency is then dominated by the repository's configured validation commands, not the mailbox itself.
+
+These are reference-host measurements, not an SLA. See [docs/performance.md](docs/performance.md) for methodology, caveats, and comparison with native Git hosting integrations.
+
+## Security model
+
+The bridge intentionally exposes less remote authority than a shell or unrestricted Git credential.
+
+By default it:
+
+- keeps repository filesystem paths local;
+- uploads only filtered tracked text content in snapshots;
+- omits `.git` history, untracked contents, common credentials, private keys, service-account material, binaries, symlinks, and oversized files;
+- rejects stale base SHAs and tracked-dirty authoritative checkouts;
+- restricts remote-created branches to a safe prefix (`ai/` by default);
+- rejects symlink/submodule changes and protected CI/automation paths;
+- accepts only locally configured symbolic command names;
+- disables push unless it is locally enabled for the repository and explicitly requested by the transaction;
+- never implements force-push or remote-triggered merge;
+- authenticates durable results and binds bridge commits to the complete request identity.
+
+**Configured validation commands are not sandboxed.** Patched code executed by a configured test/build command runs with the local user's filesystem and network privileges. Use a VM/container/separate account if you need an OS-level trust boundary.
+
+Read [docs/security.md](docs/security.md) before enabling push or running validation commands on untrusted patches.
 
 ## Documentation
 
-See `docs/architecture.md`, `docs/protocol.md`, `docs/security.md`, `docs/project-state.md`, and `docs/google-drive-oauth.md`.
+- [Installation and setup](docs/installation.md)
+- [Using the bridge](docs/usage.md)
+- [Concurrency and multiple clients](docs/concurrency.md)
+- [Performance](docs/performance.md)
+- [Architecture](docs/architecture.md)
+- [Protocol v2](docs/protocol.md)
+- [Security model](docs/security.md)
+- [Google Drive OAuth migration](docs/google-drive-oauth.md)
+- [Troubleshooting](docs/troubleshooting.md)
+- [Development history / project state](docs/project-state.md)
+- [Contributing](CONTRIBUTING.md)
+
+## Development
+
+Run the complete test suite with:
+
+```bash
+bin/test
+```
+
+The runtime deliberately uses only the Python standard library. See [CONTRIBUTING.md](CONTRIBUTING.md) for project invariants and validation expectations.
