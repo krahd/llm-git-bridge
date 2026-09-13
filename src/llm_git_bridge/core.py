@@ -658,17 +658,9 @@ def branch_tip(repo: Path, branch: str) -> str | None:
             raise BridgeError("could not parse local branch tip")
         return oid
     # `show-ref --verify` returns a non-zero status for a missing exact ref;
-    # Git versions differ in the precise status value. This preserves the
-    # previous branch_exists() semantics while obtaining the OID on success.
+    # Git versions differ in the precise status value. Preserve the boolean
+    # missing-ref semantics while obtaining the OID on success.
     return None
-
-
-def branch_exists(repo: Path, branch: str) -> bool:
-    return branch_tip(repo, branch) is not None
-
-
-def commit_exists(repo: Path, sha: str) -> bool:
-    return git(repo, "cat-file", "-e", f"{sha}^{{commit}}", check=False).returncode == 0
 
 
 def ensure_tracked_clean(repo: Path) -> str:

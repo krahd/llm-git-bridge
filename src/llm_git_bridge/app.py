@@ -22,7 +22,7 @@ from .core import (
     BridgeError,
     PROTOCOL_VERSION,
     add_disposable_worktree,
-    branch_exists,
+    branch_tip,
     branch_token,
     build_registry,
     build_snapshot,
@@ -53,6 +53,8 @@ LABEL = "io.llm-git-bridge.daemon"
 REMOTE_ROOT = "v2"
 PLIST_PATH = Path.home() / "Library" / "LaunchAgents" / f"{LABEL}.plist"
 RCLONE_RC_SOCKET = STATE_DIR / "rclone-rc.sock"
+RCD_HEALTH_TIMEOUT_S = 0.75
+RCD_HEALTH_FAILURE_THRESHOLD = 2
 TX_FILENAME_RE = re.compile(r"[A-Za-z0-9][A-Za-z0-9_-]{0,119}\.json")
 MAX_REQUEST_BYTES = 12_000_000
 MAX_METRICS_BYTES = 2_000_000
@@ -541,14 +543,14 @@ def _process_materialize_request(cfg: dict[str, Any], registry: dict[str, Any], 
     else:
         branch_name = validate_safe_branch_name(branch, str(cfg.get("safe_branch_prefix", "ai/")))
         repo_path = Path(entry["path"])
-        if not branch_exists(repo_path, branch_name):
+        head = branch_tip(repo_path, branch_name)
+        if head is None:
             raise BridgeError(f"unknown local branch: {branch_name}")
 
         wt = STATE_DIR / "materialize-worktrees" / txid
         retire_worktree(repo_path, wt)
         try:
             add_disposable_worktree(repo_path, "--detach", str(wt), branch_name)
-            head = git(wt, "rev-parse", "HEAD", timeout=30).stdout.strip()
             snapshot_rel = materialize(cfg, repo_id, branch_snapshot=(wt, branch_name))
         finally:
             retire_worktree(repo_path, wt)
@@ -1063,10 +1065,26 @@ def _ensure_watch_rcd(cfg: dict[str, Any], handle: RcloneRCProcess | None) -> Rc
         if handle is not None and handle.owned:
             handle.stop()
         return None
-    if handle is not None and handle.healthy():
-        return handle
-    if handle is not None and handle.owned:
-        handle.stop()
+
+    if handle is not None:
+        process_dead = handle.process is not None and handle.process.poll() is not None
+        socket_missing = not handle.socket_path.exists()
+        if not process_dead and not socket_missing:
+            if handle.healthy(timeout=RCD_HEALTH_TIMEOUT_S):
+                handle.health_failures = 0
+                return handle
+            handle.health_failures += 1
+            _append_metric({
+                "event": "rcd-health-miss",
+                "consecutive_failures": handle.health_failures,
+                "recorded_at": utc_now(),
+            })
+            if handle.health_failures < RCD_HEALTH_FAILURE_THRESHOLD:
+                return handle
+
+        if handle.owned:
+            handle.stop()
+
     restarted = start_rclone_rcd(RCLONE_RC_SOCKET)
     if restarted is not None:
         _append_metric({"event": "rcd-restart", "recorded_at": utc_now()})

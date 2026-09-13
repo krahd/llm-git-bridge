@@ -8,7 +8,7 @@ import tempfile
 import time
 import unittest
 from pathlib import Path
-from unittest.mock import patch
+from unittest.mock import Mock, patch
 
 from llm_git_bridge import app
 from llm_git_bridge.core import BridgeError, save_json
@@ -93,26 +93,7 @@ class AppTests(unittest.TestCase):
         self.tmp = Path(tempfile.mkdtemp(prefix="llmgb-app-"))
         self.state = self.tmp / "state"
         self.repo = self.tmp / "repo"
-        subprocess.run(
-            [
-                "git",
-                "clone",
-                "-q",
-                "--local",
-                "--origin",
-                "__seed__",
-                "-c",
-                "user.email=test@example.invalid",
-                "-c",
-                "user.name=Test User",
-                str(self._seed_repo),
-                str(self.repo),
-            ],
-            check=True,
-            stdout=subprocess.PIPE,
-            stderr=subprocess.PIPE,
-            text=True,
-        )
+        shutil.copytree(self._seed_repo, self.repo, symlinks=True)
 
         self.fake = FakeTransport()
         self.config = self.tmp / "config"
@@ -633,6 +614,60 @@ class WatchLockTests(unittest.TestCase):
                 if first is not None:
                     app._release_watch_lock(first)
                 app.STATE_DIR = old_state
+
+
+class WatchRcdHealthTests(unittest.TestCase):
+    def setUp(self):
+        self.tmp = Path(tempfile.mkdtemp(prefix="llmgb-rc-health-"))
+        self.sock = self.tmp / "rclone.sock"
+        self.sock.touch()
+        self.process = Mock()
+        self.process.poll.return_value = None
+        self.handle = app.RcloneRCProcess(self.sock, self.process)
+        self.cfg = {"transport": {"type": "rclone", "remote": "fake", "rc_enabled": True}}
+
+    def tearDown(self):
+        shutil.rmtree(self.tmp, ignore_errors=True)
+
+    def test_single_rc_health_miss_does_not_restart_live_daemon(self):
+        with patch.object(self.handle, "healthy", return_value=False):
+            with patch.object(self.handle, "stop") as stop:
+                with patch("llm_git_bridge.app.start_rclone_rcd") as start:
+                    returned = app._ensure_watch_rcd(self.cfg, self.handle)
+        self.assertIs(returned, self.handle)
+        self.assertEqual(self.handle.health_failures, 1)
+        stop.assert_not_called()
+        start.assert_not_called()
+
+    def test_second_consecutive_rc_health_miss_restarts_daemon(self):
+        self.handle.health_failures = app.RCD_HEALTH_FAILURE_THRESHOLD - 1
+        replacement = app.RcloneRCProcess(self.sock, None)
+        with patch.object(self.handle, "healthy", return_value=False):
+            with patch.object(self.handle, "stop") as stop:
+                with patch("llm_git_bridge.app.start_rclone_rcd", return_value=replacement) as start:
+                    returned = app._ensure_watch_rcd(self.cfg, self.handle)
+        self.assertIs(returned, replacement)
+        stop.assert_called_once_with()
+        start.assert_called_once_with(app.RCLONE_RC_SOCKET)
+
+    def test_successful_rc_health_probe_resets_failure_streak(self):
+        self.handle.health_failures = 1
+        with patch.object(self.handle, "healthy", return_value=True) as healthy:
+            returned = app._ensure_watch_rcd(self.cfg, self.handle)
+        self.assertIs(returned, self.handle)
+        self.assertEqual(self.handle.health_failures, 0)
+        healthy.assert_called_once_with(timeout=app.RCD_HEALTH_TIMEOUT_S)
+
+    def test_dead_rc_process_restarts_immediately_without_probe(self):
+        self.process.poll.return_value = 9
+        replacement = app.RcloneRCProcess(self.sock, None)
+        with patch.object(self.handle, "healthy") as healthy:
+            with patch.object(self.handle, "stop") as stop:
+                with patch("llm_git_bridge.app.start_rclone_rcd", return_value=replacement):
+                    returned = app._ensure_watch_rcd(self.cfg, self.handle)
+        self.assertIs(returned, replacement)
+        healthy.assert_not_called()
+        stop.assert_called_once_with()
 
 
 class TransportTests(unittest.TestCase):

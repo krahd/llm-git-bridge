@@ -64,26 +64,7 @@ class CoreTests(unittest.TestCase):
 
     def clone_seed_repo(self, destination: Path) -> Path:
         destination.parent.mkdir(parents=True, exist_ok=True)
-        subprocess.run(
-            [
-                "git",
-                "clone",
-                "-q",
-                "--local",
-                "--origin",
-                "__seed__",
-                "-c",
-                "user.email=test@example.invalid",
-                "-c",
-                "user.name=Test User",
-                str(self._seed_repo),
-                str(destination),
-            ],
-            check=True,
-            stdout=subprocess.PIPE,
-            stderr=subprocess.PIPE,
-            text=True,
-        )
+        shutil.copytree(self._seed_repo, destination, symlinks=True)
         return destination
 
     def make_repo(self) -> Path:

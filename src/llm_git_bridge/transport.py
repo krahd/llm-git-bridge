@@ -81,6 +81,7 @@ class RcloneRCProcess:
     def __init__(self, socket_path: Path, process: subprocess.Popen[bytes] | None):
         self.socket_path = socket_path
         self.process = process
+        self.health_failures = 0
 
     @property
     def owned(self) -> bool:
