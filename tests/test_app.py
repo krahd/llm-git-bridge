@@ -8,7 +8,7 @@ import tempfile
 import time
 import unittest
 from pathlib import Path
-from unittest.mock import Mock, patch
+from unittest.mock import Mock, call, patch
 
 from llm_git_bridge import app
 from llm_git_bridge.core import BridgeError, save_json
@@ -140,6 +140,40 @@ class AppTests(unittest.TestCase):
         shutil.rmtree(self.tmp, ignore_errors=True)
 
 
+    def test_disappeared_registered_repo_yields_signed_generic_error_without_path_leak(self):
+        txid = "tx-missing-repo"
+        request = {
+            "protocol": 2,
+            "kind": "transaction",
+            "transaction_id": txid,
+            "repo": "repo",
+            "base_sha": self._seed_head,
+            "branch": "ai/missing-repo",
+            "patch": (
+                "diff --git a/README.md b/README.md\n"
+                "--- a/README.md\n"
+                "+++ b/README.md\n"
+                "@@ -1 +1,2 @@\n"
+                " hello\n"
+                "+world\n"
+            ),
+            "run": [],
+        }
+        filename = f"{txid}.json"
+        self.fake.files[f"v2/transactions/{filename}"] = json.dumps(request) + "\n"
+        shutil.rmtree(self.repo)
+
+        processed = app.process_pending_once(self.cfg)
+
+        self.assertEqual(processed, 1)
+        result = json.loads(self.fake.files[f"v2/results/{filename}"])
+        self.assertEqual(result["status"], "error")
+        self.assertEqual(result["transaction_id"], txid)
+        self.assertTrue(app._verify_result(filename, result))
+        self.assertNotIn(str(self.tmp), json.dumps(result))
+        self.assertNotIn(str(self.repo), json.dumps(result))
+        self.assertNotIn(f"v2/transactions/{filename}", self.fake.files)
+
     def test_result_auth_key_survives_runtime_state_deletion(self):
         first = app._result_auth_key()
         self.assertEqual(len(first), 32)
@@ -201,6 +235,44 @@ class AppTests(unittest.TestCase):
         self.assertIn("/branches/", result["snapshot"])
         self.assertIn(result["snapshot"], self.fake.files)
 
+    def test_materialize_branch_is_pinned_to_captured_tip(self):
+        repo_id = next(iter(json.loads(app.REGISTRY_FILE.read_text())["repos"]))
+        original = sh(self.repo, "git", "rev-parse", "HEAD")
+        branch = "ai/materialize-race"
+        sh(self.repo, "git", "branch", branch, original)
+        (self.repo / "README.md").write_text("hello\nnewer\n", encoding="utf-8")
+        sh(self.repo, "git", "add", "README.md")
+        sh(self.repo, "git", "commit", "-m", "newer")
+        newer = sh(self.repo, "git", "rev-parse", "HEAD")
+        txid = "tx-materialize-race"
+        filename = f"{txid}.json"
+        self.fake.files[f"v2/transactions/{filename}"] = json.dumps({
+            "protocol": 2,
+            "kind": "materialize",
+            "transaction_id": txid,
+            "repo": repo_id,
+            "branch": branch,
+        })
+        real_add = app.add_disposable_worktree
+        moved = False
+
+        def move_branch_then_add(repo, *args):
+            nonlocal moved
+            if not moved:
+                moved = True
+                sh(self.repo, "git", "branch", "-f", branch, newer)
+            return real_add(repo, *args)
+
+        with patch.object(app, "add_disposable_worktree", side_effect=move_branch_then_add):
+            self.assertEqual(app.process_pending_once(self.cfg), 1)
+
+        result = json.loads(self.fake.files[f"v2/results/{filename}"])
+        self.assertEqual(result["status"], "success")
+        self.assertEqual(result["head"], original)
+        snapshot = json.loads(self.fake.files[result["snapshot"]])
+        self.assertEqual(snapshot["head"], original)
+        self.assertEqual(sh(self.repo, "git", "rev-parse", branch), newer)
+
     def test_transaction_snapshot_is_deferred_by_default(self):
         repo_id = next(iter(json.loads(app.REGISTRY_FILE.read_text())["repos"]))
         head = sh(self.repo, "git", "rev-parse", "HEAD")
@@ -254,6 +326,46 @@ class AppTests(unittest.TestCase):
         self.assertIn("/branches/", result["snapshot"])
         self.assertIn(result["snapshot"], self.fake.files)
 
+    def test_signed_result_and_marker_bind_to_exact_request_bytes(self):
+        txid = "tx-result-request-hash"
+        filename = f"{txid}.json"
+        raw = json.dumps({"protocol": 2, "kind": "doctor", "transaction_id": txid}, separators=(",", ":"))
+        self.fake.files[f"v2/transactions/{filename}"] = raw
+        with patch("llm_git_bridge.app._process_doctor_request", return_value={
+            "protocol": 2, "kind": "result", "transaction_id": txid,
+            "status": "success", "processed_at": "test", "operation": "doctor", "doctor": {},
+        }):
+            self.assertEqual(app.process_pending_once(self.cfg), 1)
+        expected = __import__("hashlib").sha256(raw.encode("utf-8")).hexdigest()
+        result = json.loads(self.fake.files[f"v2/results/{filename}"])
+        marker = json.loads((app.PUBLISHED_DIR / filename).read_text(encoding="utf-8"))
+        self.assertEqual(result["request_bytes_sha256"], expected)
+        self.assertEqual(marker["request_bytes_sha256"], expected)
+        self.assertTrue(app._verify_result(filename, result))
+
+    def test_changed_bytes_reusing_published_transaction_id_are_not_executed(self):
+        txid = "tx-published-reuse"
+        filename = f"{txid}.json"
+        original = json.dumps({"protocol": 2, "kind": "doctor", "transaction_id": txid}, separators=(",", ":"))
+        self.fake.files[f"v2/transactions/{filename}"] = original
+        with patch("llm_git_bridge.app._process_doctor_request", return_value={
+            "protocol": 2, "kind": "result", "transaction_id": txid,
+            "status": "success", "processed_at": "test", "operation": "doctor", "doctor": {},
+        }):
+            self.assertEqual(app.process_pending_once(self.cfg), 1)
+
+        changed = json.dumps({"protocol": 2, "kind": "doctor", "transaction_id": txid, "changed": True}, separators=(",", ":"))
+        self.fake.files[f"v2/transactions/{filename}"] = changed
+        with patch("llm_git_bridge.app._process_doctor_request") as doctor:
+            self.assertEqual(app.process_pending_once(self.cfg), 0)
+        doctor.assert_not_called()
+        self.assertNotIn(f"v2/transactions/{filename}", self.fake.files)
+        result = json.loads(self.fake.files[f"v2/results/{filename}"])
+        original_hash = __import__("hashlib").sha256(original.encode("utf-8")).hexdigest()
+        changed_hash = __import__("hashlib").sha256(changed.encode("utf-8")).hexdigest()
+        self.assertEqual(result["request_bytes_sha256"], original_hash)
+        self.assertNotEqual(result["request_bytes_sha256"], changed_hash)
+
     def test_processed_marker_avoids_result_listing_in_steady_state(self):
         repo_id = next(iter(json.loads(app.REGISTRY_FILE.read_text())["repos"]))
         head = sh(self.repo, "git", "rev-parse", "HEAD")
@@ -290,10 +402,266 @@ class AppTests(unittest.TestCase):
         self.assertIn(f"v2/results/{txid}.json", self.fake.control_upload_calls)
         self.assertFalse((app.STATE_DIR / "inbox" / f"{txid}.json").exists())
         self.assertFalse((app.STATE_DIR / "transactions" / txid).exists())
+        self.assertFalse((app.STATE_DIR / "outbox" / f"result-{txid}.json").exists())
         self.assertNotIn("path", json.dumps(event))
         self.fake.list_calls.clear()
         self.assertEqual(app.process_pending_once(self.cfg), 0)
         self.assertEqual(self.fake.list_calls, ["v2/transactions"])
+
+    def test_malformed_local_result_is_quarantined_and_request_reprocessed(self):
+        txid = "tx-recovery-corrupt-local"
+        filename = f"{txid}.json"
+        self.fake.files[f"v2/transactions/{filename}"] = json.dumps({
+            "protocol": 2,
+            "kind": "doctor",
+            "transaction_id": txid,
+        })
+        local_result = app.STATE_DIR / "results" / filename
+        local_result.parent.mkdir(parents=True, exist_ok=True)
+        local_result.write_text('{"status":', encoding="utf-8")
+
+        with patch("llm_git_bridge.app._process_doctor_request", return_value={
+            "protocol": 2,
+            "kind": "result",
+            "transaction_id": txid,
+            "status": "success",
+            "processed_at": "test",
+            "operation": "doctor",
+            "doctor": {},
+        }) as doctor:
+            self.assertEqual(app.process_pending_once(self.cfg), 1)
+
+        doctor.assert_called_once()
+        result = json.loads(self.fake.files[f"v2/results/{filename}"])
+        self.assertEqual(result["status"], "success")
+        self.assertTrue((app.PUBLISHED_DIR / filename).exists())
+        self.assertNotIn(f"v2/transactions/{filename}", self.fake.files)
+
+    def test_valid_json_local_result_with_wrong_transaction_id_is_reprocessed(self):
+        txid = "tx-recovery-wrong-id"
+        filename = f"{txid}.json"
+        self.fake.files[f"v2/transactions/{filename}"] = json.dumps({
+            "protocol": 2, "kind": "doctor", "transaction_id": txid
+        })
+        local_result = app.STATE_DIR / "results" / filename
+        save_json(local_result, {"status": "success", "transaction_id": "tx-other"})
+        with patch("llm_git_bridge.app._process_doctor_request", return_value={
+            "protocol": 2, "kind": "result", "transaction_id": txid,
+            "status": "success", "processed_at": "test", "operation": "doctor", "doctor": {},
+        }) as doctor:
+            self.assertEqual(app.process_pending_once(self.cfg), 1)
+        doctor.assert_called_once()
+        result = json.loads(self.fake.files[f"v2/results/{filename}"])
+        self.assertEqual(result["transaction_id"], txid)
+
+    def test_valid_json_local_result_with_bad_signature_is_reprocessed(self):
+        txid = "tx-recovery-bad-local-signature"
+        filename = f"{txid}.json"
+        self.fake.files[f"v2/transactions/{filename}"] = json.dumps({
+            "protocol": 2, "kind": "doctor", "transaction_id": txid
+        })
+        local_result = app.STATE_DIR / "results" / filename
+        forged = app._sign_result(filename, {
+            "protocol": 2,
+            "kind": "result",
+            "status": "success",
+            "transaction_id": txid,
+        })
+        forged["bridge_auth"]["tag"] = "0" * 64
+        save_json(local_result, forged)
+        with patch("llm_git_bridge.app._process_doctor_request", return_value={
+            "protocol": 2, "kind": "result", "transaction_id": txid,
+            "status": "success", "processed_at": "test", "operation": "doctor", "doctor": {},
+        }) as doctor:
+            self.assertEqual(app.process_pending_once(self.cfg), 1)
+        doctor.assert_called_once()
+        result = json.loads(self.fake.files[f"v2/results/{filename}"])
+        self.assertTrue(app._verify_result(filename, result))
+        self.assertNotEqual(result["bridge_auth"]["tag"], "0" * 64)
+
+    def test_commit_survives_local_result_persistence_failure_and_retry_recovers_once(self):
+        repo_id = next(iter(json.loads(app.REGISTRY_FILE.read_text())["repos"]))
+        head = sh(self.repo, "git", "rev-parse", "HEAD")
+        txid = "tx-local-result-save-crash"
+        filename = f"{txid}.json"
+        self.fake.files[f"v2/transactions/{filename}"] = json.dumps({
+            "protocol": 2,
+            "kind": "transaction",
+            "transaction_id": txid,
+            "repo": repo_id,
+            "base_sha": head,
+            "branch": "ai/local-result-save-crash",
+            "patch": (
+                "diff --git a/README.md b/README.md\n"
+                "--- a/README.md\n"
+                "+++ b/README.md\n"
+                "@@ -1 +1,2 @@\n"
+                " hello\n"
+                "+durable\n"
+            ),
+            "run": [],
+        })
+        real_save = app.save_json
+        local_result = app.STATE_DIR / "results" / filename
+        failed = False
+
+        def fail_result_save_once(path, obj):
+            nonlocal failed
+            if path == local_result and not failed:
+                failed = True
+                raise BridgeError("simulated local result persistence failure")
+            return real_save(path, obj)
+
+        with patch.object(app, "save_json", side_effect=fail_result_save_once):
+            with self.assertRaisesRegex(BridgeError, "simulated local result persistence failure"):
+                app.process_pending_once(self.cfg)
+
+        commit = sh(self.repo, "git", "rev-parse", "ai/local-result-save-crash")
+        self.assertEqual(sh(self.repo, "git", "rev-list", "--count", f"{head}..ai/local-result-save-crash"), "1")
+        self.assertEqual(app.process_pending_once(self.cfg), 1)
+        result = json.loads(self.fake.files[f"v2/results/{filename}"])
+        self.assertEqual(result["commit"], commit)
+        self.assertTrue(result["recovered_after_crash"])
+        self.assertEqual(sh(self.repo, "git", "rev-list", "--count", f"{head}..ai/local-result-save-crash"), "1")
+
+    def test_ambiguous_result_upload_accepted_remotely_recovers_without_reexecution(self):
+        txid = "tx-result-upload-accepted"
+        filename = f"{txid}.json"
+        self.fake.files[f"v2/transactions/{filename}"] = json.dumps({
+            "protocol": 2, "kind": "doctor", "transaction_id": txid
+        })
+        original_upload = self.fake.upload_control_json
+        failed = False
+
+        def accept_then_raise(rel, obj, local_tmp):
+            nonlocal failed
+            original_upload(rel, obj, local_tmp)
+            if not failed:
+                failed = True
+                raise BridgeError("simulated ambiguous result upload")
+
+        with patch("llm_git_bridge.app._process_doctor_request", return_value={
+            "protocol": 2, "kind": "result", "transaction_id": txid,
+            "status": "success", "processed_at": "test", "operation": "doctor", "doctor": {},
+        }) as doctor:
+            with patch.object(self.fake, "upload_control_json", side_effect=accept_then_raise):
+                with self.assertRaisesRegex(BridgeError, "simulated ambiguous result upload"):
+                    app.process_pending_once(self.cfg)
+            self.assertEqual(app.process_pending_once(self.cfg), 1)
+        doctor.assert_called_once()
+        self.assertTrue((app.PUBLISHED_DIR / filename).exists())
+        self.assertNotIn(f"v2/transactions/{filename}", self.fake.files)
+
+    def test_result_upload_failure_before_acceptance_recovers_from_local_result_without_reexecution(self):
+        txid = "tx-result-upload-not-accepted"
+        filename = f"{txid}.json"
+        self.fake.files[f"v2/transactions/{filename}"] = json.dumps({
+            "protocol": 2, "kind": "doctor", "transaction_id": txid
+        })
+        with patch("llm_git_bridge.app._process_doctor_request", return_value={
+            "protocol": 2, "kind": "result", "transaction_id": txid,
+            "status": "success", "processed_at": "test", "operation": "doctor", "doctor": {},
+        }) as doctor:
+            with patch.object(self.fake, "upload_control_json", side_effect=BridgeError("simulated upload failure")):
+                with self.assertRaisesRegex(BridgeError, "simulated upload failure"):
+                    app.process_pending_once(self.cfg)
+            local_result = app.STATE_DIR / "results" / filename
+            old = time.time() - app.RESULT_RETRY_GRACE_S - 1
+            os.utime(local_result, (old, old))
+            self.assertEqual(app.process_pending_once(self.cfg), 1)
+        doctor.assert_called_once()
+        self.assertTrue((app.PUBLISHED_DIR / filename).exists())
+
+    def test_marker_write_failure_after_remote_result_recovers_without_reexecution(self):
+        txid = "tx-marker-write-crash"
+        filename = f"{txid}.json"
+        self.fake.files[f"v2/transactions/{filename}"] = json.dumps({
+            "protocol": 2, "kind": "doctor", "transaction_id": txid
+        })
+        original_mark = app._mark_published
+        failed = False
+
+        def fail_once(name, *, source, request_bytes_sha256=None):
+            nonlocal failed
+            if source == "processed" and not failed:
+                failed = True
+                raise BridgeError("simulated marker persistence failure")
+            return original_mark(name, source=source, request_bytes_sha256=request_bytes_sha256)
+
+        with patch("llm_git_bridge.app._process_doctor_request", return_value={
+            "protocol": 2, "kind": "result", "transaction_id": txid,
+            "status": "success", "processed_at": "test", "operation": "doctor", "doctor": {},
+        }) as doctor:
+            with patch.object(app, "_mark_published", side_effect=fail_once):
+                with self.assertRaisesRegex(BridgeError, "simulated marker persistence failure"):
+                    app.process_pending_once(self.cfg)
+            self.assertEqual(app.process_pending_once(self.cfg), 1)
+        doctor.assert_called_once()
+        self.assertTrue((app.PUBLISHED_DIR / filename).exists())
+        self.assertNotIn(f"v2/transactions/{filename}", self.fake.files)
+
+    def test_crash_after_marker_before_request_cleanup_is_recovered_without_local_artifact_leak(self):
+        txid = "tx-marker-before-cleanup-crash"
+        filename = f"{txid}.json"
+        self.fake.files[f"v2/transactions/{filename}"] = json.dumps({
+            "protocol": 2, "kind": "doctor", "transaction_id": txid
+        })
+        original_cleanup = app._cleanup_remote_request
+        crashed = False
+
+        def crash_once(transport, name, *, allow_fallback=True):
+            nonlocal crashed
+            if name == filename and not crashed:
+                crashed = True
+                raise RuntimeError("simulated crash after marker")
+            return original_cleanup(transport, name, allow_fallback=allow_fallback)
+
+        with patch("llm_git_bridge.app._process_doctor_request", return_value={
+            "protocol": 2, "kind": "result", "transaction_id": txid,
+            "status": "success", "processed_at": "test", "operation": "doctor", "doctor": {},
+        }) as doctor:
+            with patch.object(app, "_cleanup_remote_request", side_effect=crash_once):
+                with self.assertRaisesRegex(RuntimeError, "simulated crash after marker"):
+                    app.process_pending_once(self.cfg)
+
+            self.assertTrue((app.PUBLISHED_DIR / filename).exists())
+            self.assertTrue((app.STATE_DIR / "inbox" / filename).exists())
+            self.assertIn(f"v2/transactions/{filename}", self.fake.files)
+
+            self.assertEqual(app.process_pending_once(self.cfg), 0)
+
+        doctor.assert_called_once()
+        self.assertNotIn(f"v2/transactions/{filename}", self.fake.files)
+        self.assertFalse((app.STATE_DIR / "inbox" / filename).exists())
+        self.assertFalse((app.STATE_DIR / "transactions" / txid).exists())
+        self.assertFalse((app.STATE_DIR / "outbox" / f"result-{filename}").exists())
+
+    def test_request_delete_failure_after_marker_is_retried_without_reexecution(self):
+        txid = "tx-request-delete-retry"
+        filename = f"{txid}.json"
+        self.fake.files[f"v2/transactions/{filename}"] = json.dumps({
+            "protocol": 2, "kind": "doctor", "transaction_id": txid
+        })
+        original_delete = self.fake.delete_file
+        failed = False
+
+        def defer_once(rel, *, allow_fallback=True):
+            nonlocal failed
+            if rel == f"v2/transactions/{filename}" and not failed:
+                failed = True
+                return False
+            return original_delete(rel, allow_fallback=allow_fallback)
+
+        with patch("llm_git_bridge.app._process_doctor_request", return_value={
+            "protocol": 2, "kind": "result", "transaction_id": txid,
+            "status": "success", "processed_at": "test", "operation": "doctor", "doctor": {},
+        }) as doctor:
+            with patch.object(self.fake, "delete_file", side_effect=defer_once):
+                self.assertEqual(app.process_pending_once(self.cfg), 1)
+                self.assertIn(f"v2/transactions/{filename}", self.fake.files)
+                self.assertEqual(app.process_pending_once(self.cfg), 0)
+        doctor.assert_called_once()
+        self.assertNotIn(f"v2/transactions/{filename}", self.fake.files)
 
     def test_local_result_recovery_checks_remote_before_reupload(self):
         txid = "tx-recovery-existing"
@@ -314,7 +682,7 @@ class AppTests(unittest.TestCase):
         filename = f"{txid}.json"
         self.fake.files[f"v2/transactions/{filename}"] = "{}"
         local_result = app.STATE_DIR / "results" / filename
-        save_json(local_result, {"status": "success", "transaction_id": txid})
+        save_json(local_result, app._sign_result(filename, {"status": "success", "transaction_id": txid}))
         self.assertEqual(app.process_pending_once(self.cfg), 0)
         self.assertFalse((app.PUBLISHED_DIR / filename).exists())
         self.assertIn(f"v2/transactions/{filename}", self.fake.files)
@@ -324,7 +692,7 @@ class AppTests(unittest.TestCase):
         filename = f"{txid}.json"
         self.fake.files[f"v2/transactions/{filename}"] = "{}"
         local_result = app.STATE_DIR / "results" / filename
-        save_json(local_result, {"status": "success", "transaction_id": txid})
+        save_json(local_result, app._sign_result(filename, {"status": "success", "transaction_id": txid}))
         future = __import__("time").time() + 3600
         __import__("os").utime(local_result, (future, future))
         self.assertEqual(app.process_pending_once(self.cfg), 1)
@@ -357,6 +725,19 @@ class AppTests(unittest.TestCase):
         lines = (app.STATE_DIR / "metrics.jsonl").read_text(encoding="utf-8").splitlines()
         self.assertEqual(len(lines), 2)
         self.assertEqual(json.loads(lines[-1])["event"], "startup-reconcile")
+
+    def test_startup_reconciliation_rejects_authenticated_result_with_wrong_transaction_id(self):
+        txid = "tx-auth-wrong-id"
+        filename = f"{txid}.json"
+        self.fake.files[f"v2/transactions/{filename}"] = json.dumps({
+            "protocol": 2, "kind": "doctor", "transaction_id": txid
+        })
+        remote_result = app._sign_result(filename, {
+            "status": "success", "transaction_id": "tx-other"
+        })
+        self.fake.files[f"v2/results/{filename}"] = json.dumps(remote_result)
+        self.assertEqual(app.reconcile_remote_results(self.cfg), 0)
+        self.assertFalse((app.PUBLISHED_DIR / filename).exists())
 
     def test_startup_reconciliation_rejects_forged_remote_result(self):
         txid = "tx-forged-result"
@@ -404,6 +785,43 @@ class AppTests(unittest.TestCase):
         blob = json.dumps(result["metrics"])
         self.assertNotIn("/private/repo", blob)
         self.assertNotIn("secret", blob)
+
+    def test_corrupt_publication_marker_cannot_suppress_pending_request(self):
+        txid = "tx-corrupt-marker"
+        filename = f"{txid}.json"
+        self.fake.files[f"v2/transactions/{filename}"] = json.dumps({
+            "protocol": 2, "kind": "doctor", "transaction_id": txid
+        })
+        marker = app.PUBLISHED_DIR / filename
+        marker.parent.mkdir(parents=True, exist_ok=True)
+        marker.write_text('{"filename":', encoding="utf-8")
+        with patch("llm_git_bridge.app._process_doctor_request", return_value={
+            "protocol": 2, "kind": "result", "transaction_id": txid,
+            "status": "success", "processed_at": "test", "operation": "doctor", "doctor": {},
+        }) as doctor:
+            self.assertEqual(app.process_pending_once(self.cfg), 1)
+        doctor.assert_called_once()
+        result = json.loads(self.fake.files[f"v2/results/{filename}"])
+        self.assertEqual(result["status"], "success")
+        repaired = json.loads(marker.read_text(encoding="utf-8"))
+        self.assertEqual(repaired["filename"], filename)
+
+    def test_wrong_filename_publication_marker_cannot_suppress_pending_request(self):
+        txid = "tx-wrong-marker"
+        filename = f"{txid}.json"
+        self.fake.files[f"v2/transactions/{filename}"] = json.dumps({
+            "protocol": 2, "kind": "doctor", "transaction_id": txid
+        })
+        app.PUBLISHED_DIR.mkdir(parents=True, exist_ok=True)
+        save_json(app.PUBLISHED_DIR / filename, {
+            "filename": "tx-other.json", "published_at": "test", "source": "test"
+        })
+        with patch("llm_git_bridge.app._process_doctor_request", return_value={
+            "protocol": 2, "kind": "result", "transaction_id": txid,
+            "status": "success", "processed_at": "test", "operation": "doctor", "doctor": {},
+        }) as doctor:
+            self.assertEqual(app.process_pending_once(self.cfg), 1)
+        doctor.assert_called_once()
 
     def test_idle_poll_reaps_acknowledged_request_without_subprocess_fallback(self):
         txid = "tx-old-request"
@@ -668,6 +1086,45 @@ class WatchRcdHealthTests(unittest.TestCase):
         self.assertIs(returned, replacement)
         healthy.assert_not_called()
         stop.assert_called_once_with()
+
+
+    def test_daemon_restart_requests_sigterm_instead_of_force_kickstart(self):
+        from argparse import Namespace
+        old_plist = app.PLIST_PATH
+        try:
+            app.PLIST_PATH = self.tmp / "daemon.plist"
+            app.PLIST_PATH.write_text("plist", encoding="utf-8")
+            with patch.object(app.sys, "platform", "darwin"):
+                with patch.object(app.os, "getuid", return_value=501):
+                    with patch.object(app, "_launchctl", return_value=0) as launchctl:
+                        self.assertEqual(app.cmd_daemon(Namespace(action="restart", command=None)), 0)
+            launchctl.assert_called_once_with(
+                "kill", "SIGTERM", f"gui/501/{app.LABEL}", check=False
+            )
+        finally:
+            app.PLIST_PATH = old_plist
+
+    def test_daemon_restart_bootstraps_when_service_is_not_loaded(self):
+        from argparse import Namespace
+        old_plist = app.PLIST_PATH
+        try:
+            app.PLIST_PATH = self.tmp / "daemon.plist"
+            app.PLIST_PATH.write_text("plist", encoding="utf-8")
+            with patch.object(app.sys, "platform", "darwin"):
+                with patch.object(app.os, "getuid", return_value=501):
+                    with patch.object(app, "_launchctl", side_effect=[1, 1, 0]) as launchctl:
+                        self.assertEqual(app.cmd_daemon(Namespace(action="restart", command=None)), 0)
+            self.assertEqual(
+                launchctl.call_args_list,
+                [
+                    call("kill", "SIGTERM", f"gui/501/{app.LABEL}", check=False),
+                    call("kickstart", f"gui/501/{app.LABEL}", check=False),
+                    call("bootstrap", "gui/501", str(app.PLIST_PATH)),
+                ],
+            )
+        finally:
+            app.PLIST_PATH = old_plist
+
 
 
 class TransportTests(unittest.TestCase):
@@ -1071,7 +1528,7 @@ class TransportTests(unittest.TestCase):
         self.addCleanup(setattr, app, "STATE_DIR", old_state)
         self.addCleanup(setattr, app, "PUBLISHED_DIR", old_published)
         app.PUBLISHED_DIR.mkdir(parents=True)
-        save_json(app.PUBLISHED_DIR / filename, {"transaction_id": "tx-marked"})
+        save_json(app.PUBLISHED_DIR / filename, {"filename": filename, "published_at": "2026-09-13T00:00:00Z", "source": "test"})
         with patch("llm_git_bridge.app.transport_from_config", return_value=fake):
             self.assertEqual(app.reconcile_remote_results(app.default_config()), 0)
         self.assertEqual(fake.list_calls, ["v2/transactions"])
