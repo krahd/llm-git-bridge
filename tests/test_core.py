@@ -250,23 +250,25 @@ class CoreTests(unittest.TestCase):
                     with self.assertRaises(BridgeError):
                         core_mod.validate_safe_branch_name(branch, "ai/")
 
-    def test_changed_file_mode_validation_batches_git_queries(self):
+    def test_changed_file_mode_validation_uses_one_raw_diff_query(self):
         repo = self.make_repo()
         for index in range(12):
             (repo / f"file-{index}.txt").write_text(f"{index}\n", encoding="utf-8")
         sh(repo, "git", "add", ".")
         original_git = core_mod.git
-        mode_queries: list[str] = []
+        diff_queries: list[tuple[str, ...]] = []
 
         def counted_git(worktree, *args, **kwargs):
-            if args and args[0] in {"ls-tree", "ls-files"}:
-                mode_queries.append(args[0])
+            if args and args[0] == "diff":
+                diff_queries.append(tuple(args))
             return original_git(worktree, *args, **kwargs)
 
         with patch.object(core_mod, "git", side_effect=counted_git):
             core_mod.ensure_changed_files_are_regular(repo)
-        self.assertEqual(mode_queries.count("ls-tree"), 1)
-        self.assertEqual(mode_queries.count("ls-files"), 1)
+        self.assertEqual(len(diff_queries), 1)
+        self.assertIn("--raw", diff_queries[0])
+        self.assertIn("-z", diff_queries[0])
+        self.assertIn("--no-renames", diff_queries[0])
 
     def test_process_transaction_creates_commit_and_cleans_worktree(self):
         repo = self.make_repo()
@@ -307,6 +309,87 @@ class CoreTests(unittest.TestCase):
         self.assertIsNotNone(outcome.snapshot)
         readme = next(x for x in outcome.snapshot["files"] if x["path"] == "README.md")
         self.assertEqual(readme["content"], "hello\nworld\n")
+
+    def test_simple_no_command_transaction_has_bounded_git_process_budget(self):
+        repo = self.make_repo()
+        head = sh(repo, "git", "rev-parse", "HEAD")
+        tx = {
+            "protocol": 2,
+            "kind": "transaction",
+            "transaction_id": "tx-process-budget",
+            "repo": "demo",
+            "base_sha": head,
+            "branch": "ai/process-budget",
+            "patch": (
+                "diff --git a/README.md b/README.md\n"
+                "--- a/README.md\n"
+                "+++ b/README.md\n"
+                "@@ -1 +1,2 @@\n"
+                " hello\n"
+                "+budget\n"
+            ),
+            "run": [],
+        }
+        state = Path(tempfile.mkdtemp(prefix="llmgb-state-"))
+        original_run = core_mod.run
+        git_calls: list[tuple[str, ...]] = []
+
+        def counted_run(argv, *args, **kwargs):
+            if argv and Path(argv[0]).name == "git":
+                git_calls.append(tuple(str(item) for item in argv))
+            return original_run(argv, *args, **kwargs)
+
+        with patch.object(core_mod, "run", side_effect=counted_run):
+            outcome = process_transaction(
+                repo,
+                "demo",
+                tx,
+                state_dir=state,
+                safe_branch_prefix="ai/",
+                commands={},
+            )
+        self.assertEqual(outcome.result["status"], "success")
+        self.assertLessEqual(len(git_calls), 9, git_calls)
+
+    def test_failed_patch_application_is_atomic_and_leaves_no_branch(self):
+        repo = self.make_repo()
+        head = sh(repo, "git", "rev-parse", "HEAD")
+        tx = {
+            "protocol": 2,
+            "kind": "transaction",
+            "transaction_id": "tx-bad-apply",
+            "repo": "demo",
+            "base_sha": head,
+            "branch": "ai/bad-apply",
+            "patch": (
+                "diff --git a/README.md b/README.md\n"
+                "--- a/README.md\n"
+                "+++ b/README.md\n"
+                "@@ -1 +1,2 @@\n"
+                " not-the-current-line\n"
+                "+should-not-apply\n"
+            ),
+            "run": [],
+        }
+        state = Path(tempfile.mkdtemp(prefix="llmgb-state-"))
+        with self.assertRaisesRegex(BridgeError, "git apply failed"):
+            process_transaction(
+                repo,
+                "demo",
+                tx,
+                state_dir=state,
+                safe_branch_prefix="ai/",
+                commands={},
+            )
+        self.assertEqual((repo / "README.md").read_text(encoding="utf-8"), "hello\n")
+        self.assertNotEqual(
+            subprocess.run(
+                ["git", "-C", str(repo), "show-ref", "--verify", "refs/heads/ai/bad-apply"],
+                stdout=subprocess.PIPE,
+                stderr=subprocess.PIPE,
+            ).returncode,
+            0,
+        )
 
     def test_existing_branch_requires_exact_base(self):
         repo = self.make_repo()
