@@ -25,6 +25,13 @@ from llm_git_bridge.core import (
 )
 
 
+PRIVATE_KEY_BEGIN = "-----BEGIN " + "PRIVATE KEY-----"
+PRIVATE_KEY_END = "-----END " + "PRIVATE KEY-----"
+SERVICE_ACCOUNT_TYPE = "service" + "_account"
+PRIVATE_KEY_FIELD = "private" + "_key"
+CLIENT_EMAIL_FIELD = "client" + "_email"
+
+
 def sh(cwd: Path, *args: str) -> str:
     p = subprocess.run(args, cwd=cwd, text=True, stdout=subprocess.PIPE, stderr=subprocess.PIPE, check=True)
     return p.stdout.strip()
@@ -85,7 +92,7 @@ class CoreTests(unittest.TestCase):
     def test_snapshot_excludes_private_key_content_under_innocuous_name(self):
         repo = self.make_repo()
         (repo / "notes.txt").write_text(
-            "-----BEGIN PRIVATE KEY-----\nsecret\n-----END PRIVATE KEY-----\n",
+            PRIVATE_KEY_BEGIN + "\nsecret\n" + PRIVATE_KEY_END + "\n",
             encoding="utf-8",
         )
         sh(repo, "git", "add", "notes.txt")
@@ -93,6 +100,40 @@ class CoreTests(unittest.TestCase):
         self.assertNotIn("notes.txt", {item["path"] for item in snap["files"]})
         self.assertIn("sensitive-content", {item["reason"] for item in snap["omitted"]})
         self.assertNotIn("notes.txt", json.dumps(snap["omitted"]))
+
+    def test_secret_detector_accepts_structured_service_account_but_not_source_literals(self):
+        credential = json.dumps({
+            "type": SERVICE_ACCOUNT_TYPE,
+            PRIVATE_KEY_FIELD: PRIVATE_KEY_BEGIN + "\nsecret\n" + PRIVATE_KEY_END + "\n",
+            CLIENT_EMAIL_FIELD: "service@example.invalid",
+        }).encode("utf-8")
+        source_json = json.dumps({
+            "type": SERVICE_ACCOUNT_TYPE,
+            PRIVATE_KEY_FIELD: "example",
+            CLIENT_EMAIL_FIELD: "x",
+        }, separators=(",", ":"))
+        source = (f'MARKER = "{PRIVATE_KEY_BEGIN}"\nSAMPLE = {source_json!r}\n').encode("utf-8")
+        self.assertTrue(core_mod._contains_obvious_secret(credential))
+        self.assertFalse(core_mod._contains_obvious_secret(source))
+
+    def test_bridge_source_does_not_trip_legacy_secret_marker_filter(self):
+        legacy_pem_markers = (
+            ("-----BEGIN " + "PRIVATE KEY-----").encode("utf-8"),
+            ("-----BEGIN RSA " + "PRIVATE KEY-----").encode("utf-8"),
+            ("-----BEGIN OPENSSH " + "PRIVATE KEY-----").encode("utf-8"),
+            ("-----BEGIN EC " + "PRIVATE KEY-----").encode("utf-8"),
+            ("-----BEGIN DSA " + "PRIVATE KEY-----").encode("utf-8"),
+        )
+        legacy_service_fields = (
+            b'"type"',
+            ('"service' + '_account"').encode("utf-8"),
+            ('"private' + '_key"').encode("utf-8"),
+            ('"client' + '_email"').encode("utf-8"),
+        )
+        for source_path in (Path(core_mod.__file__).resolve(), Path(__file__).resolve()):
+            data = source_path.read_bytes()
+            self.assertFalse(any(marker in data for marker in legacy_pem_markers), source_path)
+            self.assertFalse(all(marker in data.lower() for marker in legacy_service_fields), source_path)
 
     def test_snapshot_excludes_common_secret_paths(self):
         repo = self.make_repo()
@@ -646,6 +687,20 @@ class CoreTests(unittest.TestCase):
             with self.assertRaises(BridgeError):
                 validate_transaction(tx, safe_branch_prefix="ai/")
 
+    def test_run_command_count_is_bounded(self):
+        tx = {
+            "protocol": 2,
+            "kind": "transaction",
+            "transaction_id": "tx-too-many-commands",
+            "repo": "repo",
+            "base_sha": "0" * 40,
+            "branch": "ai/too-many-commands",
+            "patch": "diff --git a/a b/a\n",
+            "run": ["test"] * 17,
+        }
+        with self.assertRaisesRegex(BridgeError, "at most 16 commands"):
+            validate_transaction(tx, safe_branch_prefix="ai/")
+
     def test_run_command_names_are_safe_tokens(self):
         tx = {
             "protocol": 2,
@@ -932,11 +987,20 @@ class CoreTests(unittest.TestCase):
     def test_configured_command_workspace_omits_symlinks_and_obvious_secret_content(self):
         repo = self.make_repo()
         (repo / "innocent.txt").write_text(
-            "-----BEGIN PRIVATE KEY-----\nsecret\n-----END PRIVATE KEY-----\n",
+            PRIVATE_KEY_BEGIN + "\nsecret\n" + PRIVATE_KEY_END + "\n",
+            encoding="utf-8",
+        )
+        detector_json = json.dumps({
+            "type": SERVICE_ACCOUNT_TYPE,
+            PRIVATE_KEY_FIELD: "example",
+            CLIENT_EMAIL_FIELD: "x",
+        }, separators=(",", ":"))
+        (repo / "detector_source.py").write_text(
+            f'MARKER = "{PRIVATE_KEY_BEGIN}"\nSAMPLE = {detector_json!r}\n',
             encoding="utf-8",
         )
         os.symlink("README.md", repo / "readme-link")
-        sh(repo, "git", "add", "innocent.txt", "readme-link")
+        sh(repo, "git", "add", "innocent.txt", "detector_source.py", "readme-link")
         sh(repo, "git", "commit", "-qm", "add command workspace hazards")
         head = sh(repo, "git", "rev-parse", "HEAD")
         state = Path(tempfile.mkdtemp(prefix="llmgb-state-"))
@@ -959,6 +1023,7 @@ class CoreTests(unittest.TestCase):
         script = (
             "from pathlib import Path; "
             "print('secret=' + str(Path('innocent.txt').exists())); "
+            "print('source=' + str(Path('detector_source.py').exists())); "
             "print('symlink=' + str(Path('readme-link').exists()))"
         )
         process_transaction(
@@ -971,6 +1036,7 @@ class CoreTests(unittest.TestCase):
         )
         log = (state / "command-logs" / txid / "01.log").read_text(encoding="utf-8")
         self.assertIn("secret=False", log)
+        self.assertIn("source=True", log)
         self.assertIn("symlink=False", log)
 
     def test_command_environment_uses_worktree_pythonpath(self):

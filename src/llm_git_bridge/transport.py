@@ -14,6 +14,14 @@ from typing import Any
 from .core import BridgeError, atomic_write_text, run
 
 
+class TransientTransportError(BridgeError):
+    """A transport read failed before request bytes were available safely.
+
+    Callers must leave the remote request pending and retry later rather than
+    publishing a terminal application-level result for bytes they never read.
+    """
+
+
 class _RcloneRCUnavailable(BridgeError):
     """The RC socket could not be connected, so no operation was submitted."""
 
@@ -349,28 +357,41 @@ class RcloneTransport:
         rc_tmp.unlink(missing_ok=True)
         subprocess_tmp.unlink(missing_ok=True)
 
-        rc_obj = self._rc(
-            "operations/copyfile",
-            {
-                "srcFs": f"{self.remote}:",
-                "srcRemote": rel,
-                "dstFs": str(rc_tmp.parent),
-                "dstRemote": rc_tmp.name,
-            },
-            timeout=self.rc_download_timeout,
-        )
-        completed = rc_tmp if rc_obj is not None else subprocess_tmp
-        if rc_obj is None:
-            self.last_mode = "subprocess"
-            run(["rclone", "copyto", self._remote(rel), str(subprocess_tmp)], timeout=self.download_timeout)
-
         try:
-            if max_bytes is not None and completed.stat().st_size > max_bytes:
+            try:
+                rc_obj = self._rc(
+                    "operations/copyfile",
+                    {
+                        "srcFs": f"{self.remote}:",
+                        "srcRemote": rel,
+                        "dstFs": str(rc_tmp.parent),
+                        "dstRemote": rc_tmp.name,
+                    },
+                    timeout=self.rc_download_timeout,
+                )
+                completed = rc_tmp if rc_obj is not None else subprocess_tmp
+                if rc_obj is None:
+                    self.last_mode = "subprocess"
+                    run(["rclone", "copyto", self._remote(rel), str(subprocess_tmp)], timeout=self.download_timeout)
+            except BridgeError as exc:
+                raise TransientTransportError("transaction download failed; retry required") from exc
+
+            try:
+                size = completed.stat().st_size
+            except OSError as exc:
+                raise TransientTransportError("downloaded request is not yet available; retry required") from exc
+            if max_bytes is not None and size > max_bytes:
                 raise BridgeError("remote request exceeds maximum allowed size")
-            os.replace(completed, local)
-            return local.read_text(encoding="utf-8-sig")
-        except OSError as exc:
-            raise BridgeError("downloaded request cannot be inspected") from exc
+            try:
+                os.replace(completed, local)
+            except OSError as exc:
+                raise TransientTransportError("downloaded request cannot be stored safely; retry required") from exc
+            try:
+                return local.read_text(encoding="utf-8-sig")
+            except UnicodeError as exc:
+                raise BridgeError("remote request is not valid UTF-8 JSON text") from exc
+            except OSError as exc:
+                raise TransientTransportError("downloaded request cannot be read safely; retry required") from exc
         finally:
             # If an RC request timed out it may still be writing rc_tmp. Unlinking
             # the pathname is safe on POSIX and prevents a later poll from consuming

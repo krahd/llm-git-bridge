@@ -37,7 +37,7 @@ from .core import (
     validate_safe_branch_name,
     validate_transaction_id,
 )
-from .transport import RcloneRCProcess, RcloneTransport, start_rclone_rcd
+from .transport import RcloneRCProcess, RcloneTransport, start_rclone_rcd, TransientTransportError
 from . import __version__
 
 APP_NAME = "llm-git-bridge"
@@ -54,6 +54,7 @@ TX_FILENAME_RE = re.compile(r"[A-Za-z0-9][A-Za-z0-9_-]{0,119}\.json")
 MAX_REQUEST_BYTES = 12_000_000
 MAX_METRICS_BYTES = 2_000_000
 LOCAL_RESULT_RETENTION = 200
+COMMAND_LOG_RETENTION = 10
 RESULT_RETRY_GRACE_S = 15.0
 MAX_RESULT_BYTES = 2_000_000
 RESULT_AUTH_ALG = "hmac-sha256"
@@ -535,8 +536,24 @@ def _cleanup_remote_request(transport: RcloneTransport, filename: str, *, allow_
 def _cleanup_local_request_artifacts(filename: str) -> None:
     txid = filename[:-5]
     (STATE_DIR / "inbox" / filename).unlink(missing_ok=True)
-    for parent in ("transactions", "command-logs", "command-runs", "command-homes"):
+    for parent in ("transactions", "command-runs", "command-homes"):
         shutil.rmtree(STATE_DIR / parent / txid, ignore_errors=True)
+
+
+def _prune_command_logs(limit: int = COMMAND_LOG_RETENTION) -> None:
+    """Retain a small bounded set of local command logs for diagnosis."""
+    if limit < 1:
+        return
+    root = STATE_DIR / "command-logs"
+    if not root.exists():
+        return
+    try:
+        candidates = [path for path in root.iterdir() if path.is_dir()]
+        candidates.sort(key=lambda path: path.stat().st_mtime, reverse=True)
+        for path in candidates[limit:]:
+            shutil.rmtree(path, ignore_errors=True)
+    except OSError:
+        pass
 
 
 def _prune_local_results(limit: int = LOCAL_RESULT_RETENTION) -> None:
@@ -581,6 +598,7 @@ def _publish_local_result(
         cleanup_status, cleanup_s, cleanup_transport = _cleanup_remote_request(transport, filename)
         _cleanup_local_request_artifacts(filename)
         _prune_local_results()
+        _prune_command_logs()
         _append_metric({
             "event": "result-republish",
             "transaction_id": filename[:-5],
@@ -619,6 +637,7 @@ def _publish_local_result(
     cleanup_status, cleanup_s, cleanup_transport = _cleanup_remote_request(transport, filename)
     _cleanup_local_request_artifacts(filename)
     _prune_local_results()
+    _prune_command_logs()
     _append_metric({
         "event": "result-republish",
         "transaction_id": filename[:-5],
@@ -730,11 +749,31 @@ def process_pending_once(cfg: dict[str, Any]) -> int:
                 raise BridgeError("remote request exceeds maximum allowed size")
 
             download_started = time.monotonic()
-            raw = transport.download_text(
-                f"{REMOTE_ROOT}/transactions/{filename}",
-                tx_local,
-                max_bytes=MAX_REQUEST_BYTES,
-            )
+            try:
+                raw = transport.download_text(
+                    f"{REMOTE_ROOT}/transactions/{filename}",
+                    tx_local,
+                    max_bytes=MAX_REQUEST_BYTES,
+                )
+            except TransientTransportError:
+                transaction_download_s = round(time.monotonic() - download_started, 4)
+                transaction_download_transport = str(getattr(transport, "last_mode", "unknown"))
+                tx_local.unlink(missing_ok=True)
+                _append_metric({
+                    "event": "transaction-download-retry",
+                    "transaction_id": filename[:-5],
+                    "transaction_list_s": transaction_list_s,
+                    "transaction_download_s": transaction_download_s,
+                    "transaction_list_transport": transaction_list_transport,
+                    "transaction_download_transport": transaction_download_transport,
+                    "poll_total_s": round(time.monotonic() - poll_started, 4),
+                    "recorded_at": utc_now(),
+                })
+                # No request bytes were available to validate. Publishing a signed
+                # terminal result here would turn a transient Drive/rclone failure
+                # into durable application state. Leave the inbox object untouched
+                # so a later poll can retry it safely.
+                continue
             transaction_download_s = round(time.monotonic() - download_started, 4)
             transaction_download_transport = str(getattr(transport, "last_mode", "unknown"))
             obj = strict_json_loads(raw.lstrip("\ufeff"))
@@ -821,6 +860,7 @@ def process_pending_once(cfg: dict[str, Any]) -> int:
         cleanup_status, cleanup_s, cleanup_transport = _cleanup_remote_request(transport, filename)
         _cleanup_local_request_artifacts(filename)
         _prune_local_results()
+        _prune_command_logs()
         _append_metric({
             "event": "transaction",
             "transaction_id": filename[:-5],

@@ -8,6 +8,7 @@ The bridge deliberately exposes less protocol surface than a shell or a general-
 - create/edit/delete regular repository files through a validated patch;
 - create/update branches under the configured safe prefix;
 - request symbolic command names that the user has explicitly configured locally;
+- request no more than 16 configured command executions in one transaction;
 - create commits.
 
 ## Not allowed by the remote protocol

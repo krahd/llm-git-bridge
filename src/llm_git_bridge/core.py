@@ -20,6 +20,7 @@ DEFAULT_MAX_FILE_BYTES = 1_000_000
 DEFAULT_MAX_PATCH_BYTES = 5_000_000
 DEFAULT_MAX_SNAPSHOT_BYTES = 8_000_000
 DEFAULT_MAX_SNAPSHOT_FILES = 4_000
+DEFAULT_MAX_RUN_COMMANDS = 16
 TRANSACTION_ID_RE = re.compile(r"[A-Za-z0-9][A-Za-z0-9_-]{0,119}")
 COMMAND_NAME_RE = re.compile(r"[A-Za-z0-9][A-Za-z0-9_-]{0,63}")
 SENSITIVE_BASENAMES = {
@@ -340,26 +341,40 @@ def _is_sensitive(rel: Path) -> bool:
 
 def _contains_obvious_secret(data: bytes) -> bool:
     # Content-level defence for tracked secrets stored under innocuous filenames.
-    # Keep this deliberately high-confidence to avoid hiding normal source code.
+    # Keep this deliberately high-confidence to avoid hiding normal source/test
+    # files that merely contain secret *detector literals* or fixtures.
     sample = data[:1_000_000]
-    private_key_markers = (
-        b"-----BEGIN PRIVATE KEY-----",
-        b"-----BEGIN RSA PRIVATE KEY-----",
-        b"-----BEGIN OPENSSH PRIVATE KEY-----",
-        b"-----BEGIN EC PRIVATE KEY-----",
-        b"-----BEGIN DSA PRIVATE KEY-----",
+
+    pem_re = re.compile(
+        rb"(?ms)^[ \t]*-----BEGIN ((?:RSA |OPENSSH |EC |DSA )?PRIVATE KEY)-----[ \t]*\r?\n"
+        rb".+?\r?\n[ \t]*-----END \1-----[ \t]*(?:\r?\n|$)"
     )
-    if any(marker in sample for marker in private_key_markers):
+    if pem_re.search(sample):
         return True
-    lowered = sample.lower()
-    if (
-        b'"type"' in lowered
-        and b'"service_account"' in lowered
-        and b'"private_key"' in lowered
-        and b'"client_email"' in lowered
-    ):
-        return True
-    return False
+
+    # A service-account credential is structured JSON. Looking only for the
+    # field-name substrings incorrectly classifies source code that implements
+    # this detector (and tests containing example fixtures) as secret content.
+    try:
+        obj = json.loads(sample.decode("utf-8"))
+    except (UnicodeDecodeError, json.JSONDecodeError):
+        return False
+    service_account_type = "service" + "_account"
+    private_key_field = "private" + "_key"
+    client_email_field = "client" + "_email"
+    private_key_begin = "-----BEGIN " + "PRIVATE KEY-----"
+    private_key_end = "-----END " + "PRIVATE KEY-----"
+    if not isinstance(obj, dict) or obj.get("type") != service_account_type:
+        return False
+    private_key = obj.get(private_key_field)
+    client_email = obj.get(client_email_field)
+    return (
+        isinstance(private_key, str)
+        and private_key_begin in private_key
+        and private_key_end in private_key
+        and isinstance(client_email, str)
+        and bool(client_email.strip())
+    )
 
 
 def _is_push_protected(rel: Path) -> bool:
@@ -517,6 +532,8 @@ def validate_transaction(obj: dict[str, Any], *, safe_branch_prefix: str, max_pa
         isinstance(x, str) and COMMAND_NAME_RE.fullmatch(x) for x in run_names
     ):
         raise BridgeError("run must be a list of safe symbolic command names")
+    if len(run_names) > DEFAULT_MAX_RUN_COMMANDS:
+        raise BridgeError(f"run may contain at most {DEFAULT_MAX_RUN_COMMANDS} commands")
     message = obj.get("commit_message")
     if message is not None and (not isinstance(message, str) or not message.strip() or len(message) > 500):
         raise BridgeError("invalid commit_message")

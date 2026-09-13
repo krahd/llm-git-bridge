@@ -1,15 +1,17 @@
 from __future__ import annotations
 
 import json
+import os
 import subprocess
 import tempfile
+import time
 import unittest
 from pathlib import Path
 from unittest.mock import patch
 
 from llm_git_bridge import app
 from llm_git_bridge.core import BridgeError, build_registry, save_json
-from llm_git_bridge.transport import RcloneTransport, RemoteFileEntry
+from llm_git_bridge.transport import RcloneTransport, RemoteFileEntry, TransientTransportError
 
 
 def sh(cwd: Path, *args: str) -> str:
@@ -435,6 +437,55 @@ class AppTests(unittest.TestCase):
         self.assertEqual(result["status"], "error")
         self.assertIn("invalid JSON constant", result["error"])
 
+    def test_transient_transaction_download_failure_is_retried_without_terminal_result(self):
+        txid = "tx-download-retry"
+        request_path = f"v2/transactions/{txid}.json"
+        result_path = f"v2/results/{txid}.json"
+        self.fake.files[request_path] = json.dumps({
+            "protocol": 2,
+            "kind": "diagnostics",
+            "transaction_id": txid,
+            "limit": 1,
+        })
+
+        original_download = self.fake.download_text
+        calls = 0
+
+        def flaky_download(rel, local, *, max_bytes=None):
+            nonlocal calls
+            calls += 1
+            if calls == 1:
+                self.fake.last_mode = "subprocess"
+                raise TransientTransportError("transaction download failed; retry required")
+            return original_download(rel, local, max_bytes=max_bytes)
+
+        with patch.object(self.fake, "download_text", side_effect=flaky_download):
+            self.assertEqual(app.process_pending_once(self.cfg), 0)
+            self.assertIn(request_path, self.fake.files)
+            self.assertNotIn(result_path, self.fake.files)
+            self.assertFalse((app.PUBLISHED_DIR / f"{txid}.json").exists())
+
+            self.assertEqual(app.process_pending_once(self.cfg), 1)
+
+        result = json.loads(self.fake.files[result_path])
+        self.assertEqual(result["status"], "success")
+        self.assertNotIn(request_path, self.fake.files)
+
+    def test_download_content_rejection_still_produces_terminal_result(self):
+        txid = "tx-invalid-utf8-model"
+        self.fake.files[f"v2/transactions/{txid}.json"] = json.dumps({
+            "protocol": 2, "kind": "doctor", "transaction_id": txid
+        })
+        with patch.object(
+            self.fake,
+            "download_text",
+            side_effect=BridgeError("remote request is not valid UTF-8 JSON text"),
+        ):
+            self.assertEqual(app.process_pending_once(self.cfg), 1)
+        result = json.loads(self.fake.files[f"v2/results/{txid}.json"])
+        self.assertEqual(result["status"], "error")
+        self.assertIn("not valid UTF-8", result["error"])
+
     def test_non_bridge_exception_is_not_exposed_remotely(self):
         txid = "tx-internal-error"
         self.fake.files[f"v2/transactions/{txid}.json"] = json.dumps({
@@ -467,6 +518,24 @@ class AppTests(unittest.TestCase):
         self.assertTrue(path.with_name("metrics.jsonl.1").exists())
         self.assertIn('"event": "test"', path.read_text(encoding="utf-8"))
 
+    def test_command_logs_survive_request_cleanup_and_are_bounded(self):
+        keep_txid = "tx-command-log-keep"
+        keep = app.STATE_DIR / "command-logs" / keep_txid
+        keep.mkdir(parents=True, exist_ok=True)
+        (keep / "01.log").write_text("failure evidence\n", encoding="utf-8")
+        app._cleanup_local_request_artifacts(f"{keep_txid}.json")
+        self.assertTrue((keep / "01.log").exists())
+
+        root = app.STATE_DIR / "command-logs"
+        for index in range(4):
+            path = root / f"tx-old-{index}"
+            path.mkdir(parents=True, exist_ok=True)
+            (path / "01.log").write_text(str(index), encoding="utf-8")
+            stamp = time.time() - (20 - index)
+            os.utime(path, (stamp, stamp))
+        app._prune_command_logs(limit=2)
+        self.assertLessEqual(len([p for p in root.iterdir() if p.is_dir()]), 2)
+
     def test_local_result_cache_is_bounded_without_removing_replay_markers(self):
         result_dir = app.STATE_DIR / "results"
         result_dir.mkdir(parents=True, exist_ok=True)
@@ -478,7 +547,7 @@ class AppTests(unittest.TestCase):
         self.assertEqual(len(list(result_dir.glob("*.json"))), 2)
         self.assertEqual(len(list(app.PUBLISHED_DIR.glob("*.json"))), 5)
 
-    def test_local_request_cleanup_removes_command_logs_and_workspaces(self):
+    def test_local_request_cleanup_preserves_command_logs_but_removes_workspaces(self):
         filename = "tx-clean.json"
         txid = "tx-clean"
         (app.STATE_DIR / "inbox").mkdir(parents=True, exist_ok=True)
@@ -489,8 +558,9 @@ class AppTests(unittest.TestCase):
             (path / "artifact").write_text("x", encoding="utf-8")
         app._cleanup_local_request_artifacts(filename)
         self.assertFalse((app.STATE_DIR / "inbox" / filename).exists())
-        for parent in ("transactions", "command-logs", "command-runs", "command-homes"):
+        for parent in ("transactions", "command-runs", "command-homes"):
             self.assertFalse((app.STATE_DIR / parent / txid).exists())
+        self.assertTrue((app.STATE_DIR / "command-logs" / txid / "artifact").exists())
 
     def test_request_identity_rejects_dot_transaction_ids(self):
         with self.assertRaises(BridgeError):
@@ -594,6 +664,19 @@ class TransportTests(unittest.TestCase):
                     self.assertEqual(transport.download_text("v2/transactions/tx.json", local), "{}\n")
             self.assertEqual(mocked.call_args.kwargs["timeout"], 7)
             self.assertEqual(transport.last_mode, "subprocess")
+
+    def test_download_subprocess_failure_is_classified_as_transient(self):
+        with tempfile.TemporaryDirectory(prefix="llmgb-rc-") as tmp:
+            root = Path(tmp)
+            transport = RcloneTransport("fake", download_timeout=7)
+            local = root / "inbox" / "tx.json"
+            with patch(
+                "llm_git_bridge.transport.run",
+                side_effect=BridgeError("command timed out after 7s"),
+            ):
+                with self.assertRaises(TransientTransportError):
+                    transport.download_text("v2/transactions/tx.json", local)
+            self.assertFalse(local.exists())
 
     def test_download_timeouts_are_capped(self):
         transport = RcloneTransport("fake", timeout=6, download_timeout=20, rc_download_timeout=9)

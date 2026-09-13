@@ -96,3 +96,27 @@ The audit also makes the residual trust boundary explicit: a locally configured 
 The final audit cycle closed two additional failure classes and finished with 122 unit tests passing under repeated hash seeds, plus independent adversarial fuzz checks for transaction IDs, refs, authenticated results, strict JSON, and rclone-config preservation. Bridge commits now bind the transaction ID and canonical request hash in reserved commit trailers, allowing a daemon restart to recover a commit created immediately before a crash without rerunning remotely supplied code; changed payloads cannot reuse that transaction ID. Result-authentication key material is durable user-private configuration rather than disposable runtime state, with migration from the legacy state location.
 
 The OAuth migration helper now obscures the client secret through rclone over stdin, verifies candidate credentials with an actual mailbox create/read-back/delete probe before changing the authoritative config, detects concurrent rclone-config edits, and performs only guarded rollback so another writer's changes are never silently overwritten. Strict JSON parsing rejects duplicate keys and non-standard non-finite constants.
+
+
+### Post-promotion acceptance and midpoint audit
+
+After the adversarial-hardening branch was fast-forwarded onto the bootstrap branch, live acceptance materialised `bootstrap/v0.2-20260912-000856` at `f056de7493ee50e244326715287b4f9a5a7a7ca2`. A live doctor request then exposed a transport/application boundary defect: an rclone transaction-download timeout was being converted into a durable signed error acknowledgement even though the daemon had never obtained the request bytes.
+
+The midpoint audit rechecked transaction/replay identity, result authentication, safe refs, patch and worktree boundaries, sensitive-path handling, configured-command isolation, push policy, Drive write ambiguity, OAuth migration rollback/concurrency, daemon locking, packaging, and bounded observability. The transport defect was the concrete code fault found. Transaction downloads now classify pre-content transport failures as transient: no result or replay marker is created, the inbox object remains untouched, and a later poll retries it. Deterministic content/protocol rejection remains terminal. Regression tests cover both behaviours.
+
+
+### End-stage audit findings
+
+The end-stage adversarial pass found two additional bounded-resource/diagnostic issues. First, `run` validated command names but did not bound the number of entries, allowing one valid request to amplify into an arbitrarily long sequence of locally configured command executions. Transactions now accept at most 16 command executions. Second, command stdout/stderr was correctly kept off the remote result but its local log directory was deleted immediately after acknowledgement, contradicting the documented diagnostic model and making failures unnecessarily opaque. Recent command logs are now retained locally with a ten-transaction retention bound; disposable command workspaces/homes are still removed immediately.
+
+### Final acceptance gate repair
+
+Live post-promotion self-testing exposed an integrity defect in the configured-command workspace filter. The content-level secret detector treated any occurrence of a private-key marker, or the field-name substrings used by a Google service-account credential, as a secret. The bridge's own `core.py` and `test_core.py` contain those literals as detector implementation and test fixtures, so they were silently omitted from the Git-metadata-free command workspace. This made the live test gate incomplete and caused `test_app.py` imports to fail. Secret-content recognition now requires an actual PEM block or a parsed service-account JSON object; source/test files that merely discuss or test those structures remain available to configured commands. Regression coverage checks both the positive secret cases and the false-positive source-code case.
+
+### Legacy-filter bootstrap compatibility and final release gate
+
+A second live isolation pass established that the repaired detector could not initially validate itself because the currently running pre-fix daemon still used the old literal-substring secret filter while constructing the candidate's configured-command workspace. In other words, the candidate's improved detector was never reached: the old daemon removed `core.py`/`test_core.py` before launching the candidate tests. This was a bootstrap-compatibility failure, not a Python 3.14 or application-runtime defect.
+
+The candidate now avoids embedding the legacy private-key/service-account marker sequences literally in bridge source/test files while preserving the same positive secret-detection semantics at runtime. A regression test asserts both that real PEM/service-account credentials are detected and that the bridge's own source fixtures do not trigger the legacy filter. The complete repaired candidate passes 129 unit tests, including repeated runs under distinct `PYTHONHASHSEED` values, plus `git diff --check` and Python compilation.
+
+The remaining release gate is deliberately operational rather than local: submit these exact bytes through the currently running bridge, require its configured `test` command to pass on macOS, require an explicit opt-in push of the resulting safe `ai/*` branch, then materialise that branch and verify its commit SHA/content independently. Only after those gates pass should the bootstrap branch be fast-forwarded again and the daemon restarted on the new commit.
