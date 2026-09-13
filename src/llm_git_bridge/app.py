@@ -5,6 +5,7 @@ import configparser
 import hashlib
 import hmac
 import json
+import math
 import os
 import plistlib
 import re
@@ -20,6 +21,7 @@ from typing import Any
 from .core import (
     BridgeError,
     PROTOCOL_VERSION,
+    add_disposable_worktree,
     branch_exists,
     branch_token,
     build_registry,
@@ -29,6 +31,7 @@ from .core import (
     process_transaction,
     public_registry,
     repo_state,
+    retire_worktree,
     run,
     resolve_repo,
     save_json,
@@ -82,19 +85,98 @@ def default_config() -> dict[str, Any]:
     }
 
 
+def _validate_poll_interval(value: Any) -> float:
+    if (
+        isinstance(value, bool)
+        or not isinstance(value, (int, float))
+        or not math.isfinite(float(value))
+        or not 0.5 <= float(value) <= 3600.0
+    ):
+        raise BridgeError("poll interval must be a finite number from 0.5 to 3600 seconds")
+    return float(value)
+
+
+def _validate_config(cfg: dict[str, Any]) -> dict[str, Any]:
+    if cfg.get("version") != 1:
+        raise BridgeError("unsupported config version")
+
+    transport = cfg.get("transport")
+    if not isinstance(transport, dict):
+        raise BridgeError("config transport must be an object")
+    if transport.get("type") != "rclone":
+        raise BridgeError("config transport type must be 'rclone'")
+    remote = transport.get("remote")
+    if remote is not None and (not isinstance(remote, str) or not remote.strip()):
+        raise BridgeError("config transport remote must be a non-empty string or null")
+    if not isinstance(transport.get("rc_enabled"), bool):
+        raise BridgeError("config transport rc_enabled must be a boolean")
+
+    roots = cfg.get("roots")
+    if not isinstance(roots, list) or not all(isinstance(x, str) and x.strip() for x in roots):
+        raise BridgeError("config roots must be a list of non-empty paths")
+
+    prefix = cfg.get("safe_branch_prefix")
+    if (
+        not isinstance(prefix, str)
+        or not prefix.endswith("/")
+        or len(prefix) > 100
+        or not re.fullmatch(r"[A-Za-z0-9._/-]+/", prefix)
+    ):
+        raise BridgeError("safe_branch_prefix must be a safe branch namespace ending in '/'")
+    prefix_body = prefix[:-1]
+    components = prefix_body.split("/")
+    if (
+        prefix.startswith("-")
+        or ".." in prefix
+        or "//" in prefix
+        or "/." in prefix
+        or any(not part or part.startswith(".") or part.endswith((".", ".lock")) for part in components)
+    ):
+        raise BridgeError("safe_branch_prefix contains an unsafe Git ref component")
+
+    if not isinstance(cfg.get("allow_commit"), bool):
+        raise BridgeError("config allow_commit must be a boolean")
+    push_enabled = cfg.get("push_enabled_repos")
+    if not isinstance(push_enabled, list) or not all(isinstance(x, str) and x for x in push_enabled):
+        raise BridgeError("config push_enabled_repos must be a list of repository IDs")
+
+    try:
+        _validate_poll_interval(cfg.get("poll_interval"))
+    except BridgeError as exc:
+        raise BridgeError("config poll_interval must be a finite number from 0.5 to 3600 seconds") from exc
+
+    commands = cfg.get("commands")
+    if not isinstance(commands, dict):
+        raise BridgeError("config commands must be an object keyed by repository ID")
+    for repo_id, repo_commands in commands.items():
+        if not isinstance(repo_id, str) or not repo_id:
+            raise BridgeError("config command repository IDs must be non-empty strings")
+        if not isinstance(repo_commands, dict):
+            raise BridgeError("config commands must be nested by repository ID")
+        for name, argv in repo_commands.items():
+            if not isinstance(name, str) or not re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9_-]{0,63}", name):
+                raise BridgeError("config command name is invalid")
+            if not isinstance(argv, list) or not argv or not all(isinstance(x, str) and x for x in argv):
+                raise BridgeError(f"configured command {name!r} must be a non-empty argv list")
+    return cfg
+
+
 def load_config() -> dict[str, Any]:
     if not CONFIG_FILE.exists():
         return default_config()
-    cfg = load_json(CONFIG_FILE)
+    raw = load_json(CONFIG_FILE)
     base = default_config()
-    base.update(cfg)
-    if isinstance(cfg.get("transport"), dict):
-        base["transport"].update(cfg["transport"])
-    return base
+    transport = raw.pop("transport", None) if "transport" in raw else None
+    base.update(raw)
+    if transport is not None:
+        if not isinstance(transport, dict):
+            raise BridgeError("config transport must be an object")
+        base["transport"].update(transport)
+    return _validate_config(base)
 
 
 def save_config(cfg: dict[str, Any]) -> None:
-    save_json(CONFIG_FILE, cfg)
+    save_json(CONFIG_FILE, _validate_config(cfg))
 
 
 def detect_rclone_remote() -> str:
@@ -463,29 +545,13 @@ def _process_materialize_request(cfg: dict[str, Any], registry: dict[str, Any], 
             raise BridgeError(f"unknown local branch: {branch_name}")
 
         wt = STATE_DIR / "materialize-worktrees" / txid
-        git(repo_path, "worktree", "remove", "--force", str(wt), check=False, timeout=120)
-        if wt.exists():
-            shutil.rmtree(wt, ignore_errors=True)
-        git(repo_path, "worktree", "prune", check=False, timeout=60)
+        retire_worktree(repo_path, wt)
         try:
-            git(
-                repo_path,
-                "-c",
-                "core.hooksPath=/dev/null",
-                "worktree",
-                "add",
-                "--detach",
-                str(wt),
-                branch_name,
-                timeout=120,
-            )
+            add_disposable_worktree(repo_path, "--detach", str(wt), branch_name)
             head = git(wt, "rev-parse", "HEAD", timeout=30).stdout.strip()
             snapshot_rel = materialize(cfg, repo_id, branch_snapshot=(wt, branch_name))
         finally:
-            git(repo_path, "worktree", "remove", "--force", str(wt), check=False, timeout=120)
-            if wt.exists():
-                shutil.rmtree(wt, ignore_errors=True)
-            git(repo_path, "worktree", "prune", check=False, timeout=60)
+            retire_worktree(repo_path, wt)
 
     return {
         "protocol": PROTOCOL_VERSION,
@@ -659,24 +725,34 @@ def reconcile_remote_results(cfg: dict[str, Any]) -> int:
     normal hot path unchanged and avoids downloading the historical result archive.
     """
     transport = transport_from_config(cfg)
+    pending_transactions = {
+        name
+        for name in transport.list_files(f"{REMOTE_ROOT}/transactions")
+        if name.endswith(".json") and TX_FILENAME_RE.fullmatch(name)
+    }
+    unmarked_transactions = {
+        name for name in pending_transactions if not _published_marker(name).exists()
+    }
+    if not unmarked_transactions:
+        _append_metric({
+            "event": "startup-reconcile",
+            "remote_results": 0,
+            "markers_added": 0,
+            "results_list_s": 0.0,
+            "recorded_at": utc_now(),
+        })
+        return 0
+
     started = time.monotonic()
     remote_results = {
         name
         for name in transport.list_files(f"{REMOTE_ROOT}/results")
         if name.endswith(".json") and TX_FILENAME_RE.fullmatch(name)
     }
-    pending_transactions = {
-        name
-        for name in transport.list_files(f"{REMOTE_ROOT}/transactions")
-        if name.endswith(".json") and TX_FILENAME_RE.fullmatch(name)
-    }
     list_elapsed = round(time.monotonic() - started, 4)
     marked = 0
-    candidates = sorted(remote_results & pending_transactions)
+    candidates = sorted(remote_results & unmarked_transactions)
     for filename in candidates:
-        marker = _published_marker(filename)
-        if marker.exists():
-            continue
         if not _remote_result_is_authentic(transport, filename):
             continue
         _mark_published(filename, source="startup-authenticated-remote-result")
@@ -1009,8 +1085,8 @@ def cmd_watch(args: argparse.Namespace) -> int:
             count = process_pending_once(cfg)
             print(f"processed: {count}")
             return 0
-        interval = float(args.interval or cfg.get("poll_interval", 1.0))
-        interval = max(0.5, interval)
+        interval_value = args.interval if args.interval is not None else cfg.get("poll_interval", 1.0)
+        interval = _validate_poll_interval(interval_value)
         print(f"watching every {interval:.1f}s; Ctrl-C to stop", flush=True)
         stop = False
         reconciled = False

@@ -225,12 +225,43 @@ def discover_repos(roots: Iterable[Path]) -> list[Path]:
 
 
 def repo_state(path: Path) -> dict[str, Any]:
-    head = git(path, "rev-parse", "HEAD").stdout.strip()
-    branch = git(path, "symbolic-ref", "--quiet", "--short", "HEAD", check=False).stdout.strip() or None
-    tracked_dirty = git(path, "diff", "--quiet", check=False).returncode != 0 or git(
-        path, "diff", "--cached", "--quiet", check=False
-    ).returncode != 0
-    untracked = bool(git(path, "ls-files", "--others", "--exclude-standard").stdout.strip())
+    """Return HEAD/branch/dirty state with one Git process.
+
+    Porcelain v2 is a stable machine-readable interface and reports both branch
+    metadata and tracked/untracked changes. The previous implementation spawned
+    four Git processes for every state refresh, which compounded across scans and
+    snapshot materialisation.
+    """
+    raw = git(
+        path,
+        "status",
+        "--porcelain=v2",
+        "--branch",
+        "-z",
+        "--untracked-files=normal",
+        timeout=30,
+    ).stdout
+    head: str | None = None
+    branch: str | None = None
+    tracked_dirty = False
+    untracked = False
+    for record in raw.split("\x00"):
+        if not record:
+            continue
+        if record.startswith("# branch.oid "):
+            value = record[len("# branch.oid "):].strip()
+            if value and value != "(initial)":
+                head = value
+        elif record.startswith("# branch.head "):
+            value = record[len("# branch.head "):].strip()
+            if value and value != "(detached)":
+                branch = value
+        elif record.startswith("? "):
+            untracked = True
+        elif record.startswith(("1 ", "2 ", "u ")):
+            tracked_dirty = True
+    if head is None:
+        raise BridgeError("repository has no readable HEAD commit")
     return {
         "head": head,
         "branch": branch,
@@ -601,6 +632,30 @@ def ensure_tracked_clean(repo: Path) -> None:
         raise BridgeError("index has staged modifications")
 
 
+def retire_worktree(repo: Path, worktree: Path) -> None:
+    """Remove one disposable worktree without a routine global prune."""
+    if not worktree.exists():
+        return
+    removed = git(repo, "worktree", "remove", "--force", str(worktree), check=False, timeout=120)
+    residual = worktree.exists()
+    if residual:
+        shutil.rmtree(worktree, ignore_errors=True)
+    if removed.returncode != 0 or residual:
+        # A failed removal can leave stale registration metadata. Successful
+        # removals clean up their own metadata and do not need a global prune.
+        git(repo, "worktree", "prune", check=False, timeout=60)
+
+
+def add_disposable_worktree(repo: Path, *args: str) -> None:
+    """Add a worktree, pruning and retrying once only for stale crash metadata."""
+    argv = ("-c", "core.hooksPath=/dev/null", "worktree", "add", *args)
+    first = git(repo, *argv, check=False, timeout=120)
+    if first.returncode == 0:
+        return
+    git(repo, "worktree", "prune", check=False, timeout=60)
+    git(repo, *argv, timeout=120)
+
+
 def _changed_paths(worktree: Path) -> list[Path]:
     raw = git(
         worktree,
@@ -740,43 +795,48 @@ def _command_environment(command_workspace: Path, private_home: Path | None = No
 
 
 def _prepare_command_workspace(worktree: Path, state_dir: Path, txid: str) -> tuple[Path, Path]:
-    """Create a Git-metadata-free copy for locally configured commands.
+    """Create a Git-metadata-free tracked-file copy for configured commands.
 
-    Commands need the patched files, not write access to the transaction
-    worktree's shared Git metadata. Keeping `.git` out of the command workspace
-    prevents ordinary test/build code from trivially mutating branch refs or the
-    staged patch. Sensitive tracked paths are also omitted. This is not an OS
-    sandbox: code still executes with the user's account privileges.
+    Only tracked files can contribute to the staged transaction and eventual
+    commit. Copying the whole worktree made command latency depend on unrelated
+    untracked dependency/build trees and exposed those local artefacts to patched
+    code. Enumerating the index is both faster and a tighter execution boundary.
+    Sensitive paths, symlinks, and high-confidence secret content remain omitted.
+    This is still not an OS sandbox: commands execute with the user's account.
     """
     root = state_dir / "command-runs" / txid
     home = state_dir / "command-homes" / txid
     shutil.rmtree(root, ignore_errors=True)
     shutil.rmtree(home, ignore_errors=True)
+    root.mkdir(parents=True, exist_ok=True, mode=0o700)
 
-    def ignore(directory: str, names: list[str]) -> set[str]:
-        base = Path(directory)
+    for rel in list_snapshot_candidates(worktree):
+        if _is_sensitive(rel):
+            continue
+        source = worktree / rel
         try:
-            rel_base = base.relative_to(worktree)
-        except ValueError:
-            rel_base = Path()
-        ignored: set[str] = set()
-        for name in names:
-            rel = rel_base / name
-            source = base / name
-            if name == ".git" or _is_sensitive(rel) or source.is_symlink():
-                ignored.add(name)
+            if source.is_symlink() or not source.is_file():
                 continue
-            if source.is_file():
-                try:
-                    with source.open("rb") as fh:
-                        if _contains_obvious_secret(fh.read(1_000_000)):
-                            ignored.add(name)
-                except OSError:
-                    # If a file cannot be inspected safely, commands do not need it.
-                    ignored.add(name)
-        return ignored
+            size = source.stat().st_size
+            if size <= 1_000_000:
+                data = source.read_bytes()
+                if _contains_obvious_secret(data):
+                    continue
+                dest = root / rel
+                dest.parent.mkdir(parents=True, exist_ok=True)
+                dest.write_bytes(data)
+                shutil.copystat(source, dest, follow_symlinks=False)
+            else:
+                with source.open("rb") as fh:
+                    if _contains_obvious_secret(fh.read(1_000_000)):
+                        continue
+                dest = root / rel
+                dest.parent.mkdir(parents=True, exist_ok=True)
+                shutil.copy2(source, dest, follow_symlinks=False)
+        except OSError:
+            # Fail closed for command inputs that cannot be inspected/copied.
+            continue
 
-    shutil.copytree(worktree, root, symlinks=True, ignore=ignore)
     home.mkdir(parents=True, exist_ok=True, mode=0o700)
     return root, home
 
@@ -995,18 +1055,15 @@ def process_transaction(
 
     # A process crash can leave both the directory and Git's worktree metadata.
     # Retire both before resuming so a durable bridge commit can be recovered.
-    git(repo, "worktree", "remove", "--force", str(wt), check=False, timeout=120)
-    if wt.exists():
-        shutil.rmtree(wt, ignore_errors=True)
-    git(repo, "worktree", "prune", check=False, timeout=60)
+    retire_worktree(repo, wt)
 
     t = time.monotonic()
     created_new_branch = not existing
     commit_created = recovered_commit is not None
     if existing:
-        git(repo, "-c", "core.hooksPath=/dev/null", "worktree", "add", str(wt), branch, timeout=120)
+        add_disposable_worktree(repo, str(wt), branch)
     else:
-        git(repo, "-c", "core.hooksPath=/dev/null", "worktree", "add", "-b", branch, str(wt), base_sha, timeout=120)
+        add_disposable_worktree(repo, "-b", branch, str(wt), base_sha)
     t = mark("worktree_create_s", t)
 
     snapshot: dict[str, Any] | None = None
@@ -1218,10 +1275,7 @@ def process_transaction(
         return TransactionOutcome(result=result, snapshot=snapshot)
     finally:
         # Remove the worktree but keep a successfully created branch/commit.
-        git(repo, "worktree", "remove", "--force", str(wt), check=False, timeout=120)
-        if wt.exists():
-            shutil.rmtree(wt, ignore_errors=True)
-        git(repo, "worktree", "prune", check=False, timeout=60)
+        retire_worktree(repo, wt)
         if command_workspace is not None:
             shutil.rmtree(command_workspace, ignore_errors=True)
         if command_home is not None:

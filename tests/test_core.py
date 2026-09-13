@@ -11,7 +11,6 @@ from unittest.mock import patch
 from pathlib import Path
 
 import llm_git_bridge.core as core_mod
-
 import llm_git_bridge.core as core
 
 from llm_git_bridge.core import (
@@ -1396,6 +1395,58 @@ class CoreTests(unittest.TestCase):
         }
         with self.assertRaisesRegex(BridgeError, "reserved bridge trailer"):
             validate_transaction(tx, safe_branch_prefix="ai/")
+
+
+    def test_repo_state_reports_clean_tracked_untracked_and_detached_states(self):
+        repo = self.make_repo()
+        clean = core.repo_state(repo)
+        self.assertFalse(clean["dirty"])
+        self.assertEqual(clean["branch"], sh(repo, "git", "branch", "--show-current"))
+
+        (repo / "README.md").write_text("changed\n", encoding="utf-8")
+        tracked = core.repo_state(repo)
+        self.assertTrue(tracked["tracked_dirty"])
+        self.assertFalse(tracked["untracked"])
+
+        sh(repo, "git", "checkout", "--", "README.md")
+        (repo / "untracked.txt").write_text("x\n", encoding="utf-8")
+        untracked = core.repo_state(repo)
+        self.assertFalse(untracked["tracked_dirty"])
+        self.assertTrue(untracked["untracked"])
+
+        (repo / "untracked.txt").unlink()
+        sh(repo, "git", "checkout", "--detach", "HEAD")
+        detached = core.repo_state(repo)
+        self.assertIsNone(detached["branch"])
+        self.assertEqual(detached["head"], sh(repo, "git", "rev-parse", "HEAD"))
+
+    def test_command_workspace_contains_tracked_files_but_not_untracked_tree(self):
+        repo = self.make_repo()
+        (repo / "tracked.txt").write_text("tracked\n", encoding="utf-8")
+        sh(repo, "git", "add", "tracked.txt")
+        sh(repo, "git", "commit", "-qm", "tracked")
+        (repo / "tracked.txt").write_text("staged version\n", encoding="utf-8")
+        sh(repo, "git", "add", "tracked.txt")
+        untracked = repo / "node_modules" / "pkg"
+        untracked.mkdir(parents=True)
+        (untracked / "large.js").write_text("untracked\n" * 1000, encoding="utf-8")
+
+        state = Path(tempfile.mkdtemp(prefix="llmgb-state-"))
+        workspace, _home = core._prepare_command_workspace(repo, state, "tx-workspace")
+        self.assertEqual((workspace / "tracked.txt").read_text(encoding="utf-8"), "staged version\n")
+        self.assertFalse((workspace / "node_modules").exists())
+        self.assertFalse((workspace / ".git").exists())
+
+    def test_add_disposable_worktree_recovers_stale_registration(self):
+        repo = self.make_repo()
+        worktree = Path(tempfile.mkdtemp(prefix="llmgb-wt-parent-")) / "worktree"
+        sh(repo, "git", "worktree", "add", "--detach", str(worktree), "HEAD")
+        __import__("shutil").rmtree(worktree)
+        core.add_disposable_worktree(repo, "--detach", str(worktree), "HEAD")
+        try:
+            self.assertTrue((worktree / "README.md").exists())
+        finally:
+            core.retire_worktree(repo, worktree)
 
 
 if __name__ == "__main__":

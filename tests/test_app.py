@@ -910,5 +910,99 @@ class TransportTests(unittest.TestCase):
             self.assertEqual(mocked.call_args.kwargs["timeout"], 7)
 
 
+    def test_materialize_parser_accepts_exactly_one_repo_argument(self):
+        parser = app.build_parser()
+        args = parser.parse_args(["materialize", "demo"] )
+        self.assertEqual(args.repo, "demo")
+        with patch("sys.stderr"):
+            with self.assertRaises(SystemExit):
+                parser.parse_args(["materialize", "demo", "extra"])
+
+    def test_poll_interval_validation_rejects_nonfinite_and_out_of_range_values(self):
+        for value in (float("nan"), float("inf"), -1.0, 0.1, 3600.1, True):
+            with self.subTest(value=value):
+                with self.assertRaises(BridgeError):
+                    app._validate_poll_interval(value)
+        self.assertEqual(app._validate_poll_interval(0.5), 0.5)
+        self.assertEqual(app._validate_poll_interval(3600), 3600.0)
+
+    def test_save_config_refuses_to_persist_invalid_config(self):
+        temp = Path(tempfile.mkdtemp(prefix="llmgb-config-write-"))
+        old_config_file = app.CONFIG_FILE
+        app.CONFIG_FILE = temp / "config.json"
+        self.addCleanup(setattr, app, "CONFIG_FILE", old_config_file)
+        cfg = app.default_config()
+        cfg["poll_interval"] = float("inf")
+        with self.assertRaises(BridgeError):
+            app.save_config(cfg)
+        self.assertFalse(app.CONFIG_FILE.exists())
+
+    def test_load_config_rejects_malformed_and_nonfinite_values(self):
+        temp = Path(tempfile.mkdtemp(prefix="llmgb-config-"))
+        old_config_file = app.CONFIG_FILE
+        app.CONFIG_FILE = temp / "config.json"
+        self.addCleanup(setattr, app, "CONFIG_FILE", old_config_file)
+        base = app.default_config()
+        base["transport"]["remote"] = "fake"
+        base["roots"] = [str(temp)]
+        cases = [
+            {**base, "transport": "not-an-object"},
+            {**base, "poll_interval": float("nan")},
+            {**base, "poll_interval": 0.1},
+            {**base, "safe_branch_prefix": "ai//"},
+            {**base, "safe_branch_prefix": ".hidden/"},
+            {**base, "commands": {"repo": {"bad name": ["true"]}}},
+        ]
+        for index, cfg in enumerate(cases):
+            with self.subTest(index=index):
+                save_json(app.CONFIG_FILE, cfg)
+                with self.assertRaises(BridgeError):
+                    app.load_config()
+
+    def test_load_config_accepts_repo_scoped_commands(self):
+        temp = Path(tempfile.mkdtemp(prefix="llmgb-config-"))
+        old_config_file = app.CONFIG_FILE
+        app.CONFIG_FILE = temp / "config.json"
+        self.addCleanup(setattr, app, "CONFIG_FILE", old_config_file)
+        cfg = app.default_config()
+        cfg["transport"]["remote"] = "fake"
+        cfg["roots"] = [str(temp)]
+        cfg["commands"] = {"demo": {"test": ["python3", "-m", "unittest"]}}
+        save_json(app.CONFIG_FILE, cfg)
+        loaded = app.load_config()
+        self.assertEqual(loaded["commands"], cfg["commands"])
+
+    def test_startup_reconciliation_skips_result_archive_when_all_pending_are_marked(self):
+        fake = FakeTransport()
+        filename = "tx-marked.json"
+        fake.files[f"v2/transactions/{filename}"] = "{}"
+        fake.files[f"v2/results/{filename}"] = "{}"
+        temp = Path(tempfile.mkdtemp(prefix="llmgb-reconcile-marked-"))
+        old_state, old_published = app.STATE_DIR, app.PUBLISHED_DIR
+        app.STATE_DIR = temp / "state"
+        app.PUBLISHED_DIR = app.STATE_DIR / "published-results"
+        self.addCleanup(setattr, app, "STATE_DIR", old_state)
+        self.addCleanup(setattr, app, "PUBLISHED_DIR", old_published)
+        app.PUBLISHED_DIR.mkdir(parents=True)
+        save_json(app.PUBLISHED_DIR / filename, {"transaction_id": "tx-marked"})
+        with patch("llm_git_bridge.app.transport_from_config", return_value=fake):
+            self.assertEqual(app.reconcile_remote_results(app.default_config()), 0)
+        self.assertEqual(fake.list_calls, ["v2/transactions"])
+
+    def test_startup_reconciliation_skips_result_archive_when_no_requests_pending(self):
+        fake = FakeTransport()
+        for i in range(20):
+            fake.files[f"v2/results/old-{i}.json"] = "{}"
+        temp = Path(tempfile.mkdtemp(prefix="llmgb-reconcile-"))
+        old_state, old_published = app.STATE_DIR, app.PUBLISHED_DIR
+        app.STATE_DIR = temp / "state"
+        app.PUBLISHED_DIR = app.STATE_DIR / "published-results"
+        self.addCleanup(setattr, app, "STATE_DIR", old_state)
+        self.addCleanup(setattr, app, "PUBLISHED_DIR", old_published)
+        with patch("llm_git_bridge.app.transport_from_config", return_value=fake):
+            self.assertEqual(app.reconcile_remote_results(app.default_config()), 0)
+        self.assertEqual(fake.list_calls, ["v2/transactions"])
+
+
 if __name__ == "__main__":
     unittest.main()
