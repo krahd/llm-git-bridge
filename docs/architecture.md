@@ -8,7 +8,15 @@
 
 ## Execution and concurrency model
 
-The mailbox may have multiple remote writers, but exactly one local watcher consumes it. Requests are executed serially and queue order is not guaranteed to be FIFO. This avoids concurrent local Git mutation but means long configured commands cause head-of-line blocking. See [concurrency.md](concurrency.md) for multi-client guidance.
+The mailbox may have multiple remote writers, but exactly one local watcher consumes it and owns all Drive/rclone side effects. The release-candidate scheduler can execute local transactions concurrently across different canonical repository paths when `max_workers > 1`; same-repository mutation remains serialised and the migration default is still `max_workers=1`. A bounded watcher-owned backlog and round-robin repository admission prevent avoidable head-of-line blocking without promising global FIFO. See [concurrency.md](concurrency.md) for multi-client guidance.
+
+The post-v0.3 scheduler refactor preserves these semantics behind explicit poll,
+classification, recovery, download/validation, execution, durable-result, and
+publication/cleanup stages before any worker count is raised. See
+[scheduler-architecture.md](scheduler-architecture.md) for the staged contracts
+and worker-lifecycle rationale.
+
+Version `1.0.0rc1` retains the Phase B ownership boundary while allowing a bounded number of repository-local workers. Drive/rclone transport and durable result publication remain watcher-owned; the scheduler owns worker lifecycle, canonical-repository exclusion, bounded backlog admission and fairness. The complete ownership and recovery contract is documented in `scheduler-architecture.md`.
 
 ## Multi-repository model
 

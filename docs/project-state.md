@@ -146,3 +146,27 @@ A second source-and-documentation audit removed further redundant Git invocation
 After the second pass the suite contains 143 tests and passes locally. Instrumentation counts 591 Git subprocess launches for the full suite, a 55.2% reduction from the 1,319 baseline and a further 23.5% reduction from the first pass. A normal one-file transaction with no configured command now uses nine Git processes, half of the first-pass 18-process measurement and 65.4% below the earlier 26-process baseline. The production-Mac acceptance result remains to be measured for these exact bytes before promotion.
 
 The transport audit also found an operational requirement rather than a code hot-path defect: the live `doctor` reports `custom_drive_client_id_configured=false`. Current rclone Google Drive documentation states that rclone's shared Drive client ID is being retired during 2026 and recommends a user-owned client ID; the existing `scripts/google_drive_oauth.py` migration remains the supported path and must be completed interactively because Google requires browser-side project/OAuth consent actions. No global Git configuration or mailbox semantics are changed by this pass.
+
+## v0.3 single-thread gold baseline (2026-09-13)
+
+Phase A hardened, fuzzed, fault-injected, and re-profiled the serial execution model before any daemon concurrency was introduced. `0.3.0` freezes that behaviour as the semantic oracle for the scheduler refactor. The verified A3 precursor is `ai/single-thread-a3-20260913` at `33ffcdd091fcae1be80915d4f8a18389ff31be0e`, with 193 tests and an independent 33/33 tracked-file hash match.
+
+The gold line retains one watcher and one synchronous local execution stream. Test validation may use the repository's bounded sharded test runner; this does not change daemon execution semantics. Concurrency work must first reproduce this behaviour with a one-worker scheduler before enabling simultaneous work across independent repositories.
+
+The gold qualification hardened the bounded test runner after one initial Mac run exposed scheduler-contention sensitivity in three real-time process cancellation/timeout tests. Those tests remain fully enabled but now execute serially after the parallel Git-heavy shards drain. The resulting 196-test tree passed three production-Mac qualification runs at 67.322 s, 67.967 s, and 71.158 s (median 67.967 s), replacing the earlier 50.426 s A3 fast tail as the defensible gold baseline. The qualification corpus also records live request/materialisation/restart evidence outside the repository so measured host variance is preserved without rewriting code to chase a single best-case number.
+
+
+## Phase B scheduler baseline
+
+Version `0.3.1` is the one-worker scheduler/refactor milestone. B1 split the mailbox loop into explicit durable stages; B2 introduced the bounded explicit worker lifecycle at `max_workers=1`; B3 records an ownership/thread-safety policy for every mutable component before any second worker is enabled. The frozen `0.3.0` gold baseline remains the semantic/performance oracle rather than being rewritten by the scheduler refactor.
+
+
+## Concurrent release candidate (2026-09-13)
+
+The C–K programme converts the one-worker Phase B boundary into a bounded multi-repository scheduler while preserving watcher-only mailbox ownership. The first C1 candidate was independently materialised at `60247307a4215ecf5b426dc6f7682142e0b14493`. Adversarial follow-up found one head-of-line defect in the C1 watcher: inbox order `A1, A2, B1` could wait for `A1` before discovering runnable `B1`. The release-candidate scheduler replaces that blocking admission path with a bounded watcher-owned pending set and round-robin repository selection.
+
+The resulting contract is: fixed 1–8 workers; 1–32 pending validated jobs with the pending bound at least the worker count; at most one active mutation per canonical repository path; watcher-only transport, durability, publication, registry mutation and metrics; immediate safe control-plane handling; watcher-side quiescent materialisation; and durable recovery independent of scheduler memory. Scheduler metrics and diagnostics expose queue/active/timing state without local paths.
+
+Concurrent fault tests prove repository-isolated worker failure, publication-outage recovery without mutation re-execution, cancellation/shutdown ownership cleanup, and exact result mapping despite out-of-order completion. Scale tests exercise ten repositories with four workers and enforce zero same-repository overlap and queue bounds. Transport concurrency and adaptive worker selection were deliberately rejected: neither supplied enough measured benefit to justify the larger correctness surface.
+
+The public candidate remains conservative on activation: `max_workers=1` is the migration default, while `configure-concurrency --workers 2 --max-pending-jobs 8` is the recommended first concurrent configuration after host qualification.

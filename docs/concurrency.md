@@ -1,6 +1,6 @@
 # Concurrency and multiple clients
 
-`llm-git-bridge` supports multiple remote writers, including several ChatGPT sessions, but it is deliberately a **single-consumer** local execution system.
+`llm-git-bridge` `1.0.0rc1` keeps the frozen `0.3.0` release as its semantic oracle and adds **bounded local concurrency across different canonical repositories** while retaining one mailbox owner. `max_workers` still defaults to `1` as a conservative migration policy; operators can explicitly enable the recommended initial setting of two workers after qualification on their host.
 
 ## What is concurrent
 
@@ -15,9 +15,7 @@ This is suitable for:
 
 ## What is serialised
 
-Only one local watcher may hold the mailbox lock. The watcher processes pending requests serially. There is no concurrent patch application, test execution, commit creation, or push from separate bridge workers.
-
-This design prevents two local consumers from racing the same mailbox request and keeps Git mutation easy to reason about.
+Only one local watcher may hold the mailbox lock. Drive/rclone request download, signed-result publication, request deletion, metrics, and reconciliation stay serial and watcher-owned. With `max_workers > 1`, local transaction execution may overlap only when the resolved repository paths differ. The scheduler permits at most one in-flight transaction per canonical repository; materialisation remains a watcher-side quiescent barrier.
 
 ## Queue ordering is not FIFO
 
@@ -57,9 +55,9 @@ For a brand-new branch, the requested base must still equal the authoritative re
 
 ## Head-of-line blocking
 
-Because configured commands run serially, one slow transaction delays all later mailbox requests. This is the main scaling limitation for many active sessions.
+With the default `max_workers=1`, one slow transaction still delays later edit transactions. With `max_workers=2`, a slow transaction for repository A can overlap local execution for repository B, while same-repository work remains serialised. Mailbox transport and result publication remain serial. A bounded watcher-owned backlog (`max_pending_jobs`, default 8, valid 1–32 and never lower than `max_workers`) allows the watcher to look past blocked same-repository work without accepting an unbounded amount of untrusted request data. Repository admission is round-robin across runnable repositories while preserving per-repository discovery order.
 
-On the reference host, the bridge's own full validation suite currently takes about 56 seconds. A transaction running that suite therefore occupies the single worker for roughly a minute before the next edit transaction can start.
+The A3 precursor once completed the configured validation gate in 50.4 seconds, but A4 deliberately established a repeated-run gold baseline instead: the hardened 196-test tree completed three production-Mac runs in 67.3–71.2 seconds (median 68.0 s). A transaction running that suite therefore still occupies the single execution stream for roughly a minute before the next edit transaction can start.
 
 Lightweight `doctor`/diagnostics requests are much faster but still wait behind an already-running edit transaction.
 
@@ -74,4 +72,13 @@ Lightweight `doctor`/diagnostics requests are much faster but still wait behind 
 
 ## Future scaling
 
-Parallel workers would require explicit scheduling and locking by repository/branch, ordering semantics, and careful result/recovery rules. The current implementation intentionally chooses deterministic serial local execution over maximum throughput.
+The release candidate has completed the deterministic concurrency, fairness, recovery, scale, and security test campaigns. Serial mailbox transport is intentional: workers never share the rclone transport object, and observed edit latency is dominated by local validation rather than ordinary RC mailbox operations. Adaptive worker counts were rejected in favour of explicit fixed limits because no evidence showed that a more complex policy improves correctness or predictable host load.
+
+Enable two workers with:
+
+```bash
+bin/llm-git-bridge configure-concurrency --workers 2 --max-pending-jobs 8
+bin/llm-git-bridge daemon restart
+```
+
+`status` reports the configured worker/backlog limits. `diagnostics` results include live scheduler counts when processed by the concurrent path, and scheduler metrics expose queue depth, active workers/repositories, queue wait, execution timing, and utilisation without exposing local paths.

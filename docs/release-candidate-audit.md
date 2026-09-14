@@ -1,0 +1,128 @@
+# v1.0.0rc1 concurrent-architecture audit
+
+Date: 2026-09-13
+
+This audit closes the multi-repository concurrency programme against the frozen
+`0.3.0` single-thread semantic oracle. It is intentionally adversarial: the
+release gate is not "threads exist", but that concurrency cannot weaken replay,
+stale-base, repository-isolation, durable-result, command, transport, or resource
+bounds.
+
+## Scope and fixed invariants
+
+The audited design retains one watcher/mailbox owner and parallelises only local
+transaction execution. Drive/rclone I/O, result signing and persistence,
+publication markers, registry mutation, metrics, reconciliation, materialisation,
+and retention remain watcher-owned. Worker tasks contain frozen local inputs and
+never receive the transport object or mutable registry/config objects.
+
+At most one mutating transaction may be active for a resolved canonical repository
+path. `max_workers` is fixed and validated from 1 through 8. The watcher-owned
+validated backlog is separately bounded by `max_pending_jobs` from 1 through 32
+and may not be lower than the worker count. The migration default remains one
+worker; two workers/eight pending jobs is the recommended first concurrent setting.
+
+## Adversarial finding fixed after C1
+
+The first C1 implementation correctly excluded same-repository overlap but still
+had a scheduler-level head-of-line defect. With mailbox order `A1, A2, B1`, the
+watcher could encounter blocked `A2`, wait for `A1`, and therefore fail to discover
+independent `B1` in time to overlap it.
+
+The release candidate replaces that blocking admission path with a bounded
+watcher-owned pending set. Busy-repository jobs wait there while discovery
+continues within the configured bound. Runnable repositories are selected by a
+round-robin cursor, while the first queued request for each repository remains the
+only eligible request from that repository. Canonical-path exclusion is rechecked
+from the latest registry immediately before worker handoff.
+
+A deterministic regression test forces the adverse `A1, A2, B1` ordering and
+requires `B1` to start before `A2`, while independently asserting that `A2` cannot
+start before `A1` releases repository ownership.
+
+## Concurrency / recovery attack matrix
+
+| Scenario | Release-candidate result |
+| --- | --- |
+| different repositories overlap | deterministic barrier test passes |
+| same repository overlaps | rejected by canonical-path in-flight ownership |
+| two registry IDs point to same path | alias test serialises them by resolved path |
+| same-repository burst hides independent work | fixed; adverse ordering regression passes |
+| worker A raises while worker B succeeds | B result remains correctly mapped/successful |
+| completions arrive out of submission order | per-handle result mapping remains exact |
+| publication fails with multiple workers complete | all workers are reaped and signed local results remain durable |
+| daemon/scheduler restart after publication outage | fresh scheduler republishes durable results without local re-execution |
+| command-log retention during execution | active transaction IDs are excluded from pruning |
+| materialisation during edit work | watcher drains local transaction work first; materialisation is a quiescent barrier |
+| control request during long edit | doctor/diagnostics remain watcher fast-path operations |
+| cancellation / shutdown | one Event reaches all workers; non-daemon workers are joined explicitly |
+| mailbox flood | bounded validated backlog and fixed worker count prevent unbounded local scheduler growth |
+| 10 repositories / 4 workers | bounded-scale soak passes with zero same-repository overlap |
+
+The pre-concurrency A-phase crash matrix remains authoritative for the local Git
+transaction boundaries: worktree creation, patch/stage, configured commands,
+commit identity, push, local result persistence, result upload, marker creation,
+request deletion, and retry/recovery. The concurrent layer does not replace those
+durable facts with scheduler memory.
+
+## Resource / denial-of-service audit
+
+Remote writers cannot select worker count, queue size, command argv, transport
+parallelism, or process count. The operator controls fixed worker/backlog limits.
+Each request remains subject to the protocol's size/patch/command/snapshot/output
+bounds before or during execution. When the validated local backlog reaches its
+configured bound, the watcher drains work before downloading another untrusted
+request.
+
+The scheduler does not allocate one thread per request. Worker threads are created
+once at daemon start. Repository aliases cannot create additional mutation slots
+for the same canonical path. Transaction IDs are reserved while active. Existing
+A/J protections continue to cover duplicate IDs/filenames, malformed JSON,
+result replay/forgery, path/symlink/submodule changes, protected automation paths,
+command-output amplification, snapshot filtering/limits, and watch-lock ownership.
+
+No unresolved high- or critical-severity concurrency/resource finding remains.
+
+## Transport decision (Phase F)
+
+Mailbox transport stays serial and watcher-owned. The normal persistent-RC
+measurements are small compared with repository validation. The first C1 Mac gate
+showed a one-off 8.012 s subprocess-fallback directory listing beside a 74.137 s
+configured test command and 80.244 s local transaction; that is a transport-health
+outlier, not evidence that concurrent Drive mutation is worth the uncertain-write
+and shared-client race surface. Parallel rclone transport is therefore rejected for
+this release.
+
+## Adaptive scheduling decision (Phase I)
+
+Adaptive worker counts are rejected. Configured repository commands may already
+spawn parallel builds, so CPU count is not a reliable safe capacity signal. No
+benchmark demonstrates enough benefit to justify adding feedback/control state to
+the correctness boundary. Fixed validated limits are retained.
+
+## Observability gate
+
+Watcher-owned metrics now expose queue depth, active workers, active repositories,
+queue wait, observed execution interval, and worker utilisation. Concurrent
+`diagnostics` additionally reports the live scheduler/backlog limits and counts.
+These fields contain no repository filesystem paths. Metrics remain bounded and
+best-effort; transaction correctness never depends on them.
+
+## Release gates
+
+Before the candidate may be called `1.0.0rc1`:
+
+1. complete suite passes under bounded default sharding;
+2. complete suite passes under an independent hash seed and an alternate bounded shard count;
+3. deterministic concurrency/recovery/fairness/scale regressions pass;
+4. the external-process canary proves two-worker makespan is materially below the
+   one-worker sum on the qualification host;
+5. compile, shell-syntax, and `git diff --check` gates pass;
+6. the exact cumulative patch is exercised by the production Mac through the
+   bridge's configured `test` command;
+7. the pushed candidate is independently materialised from Drive and every tracked
+   file hash is compared with the exact local candidate tree;
+8. no high/critical audit finding remains unexplained.
+
+The release candidate does not require parallel transport or adaptive scheduling;
+those are explicit rejected designs, not unfinished implementation.
