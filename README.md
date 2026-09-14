@@ -4,7 +4,7 @@
 
 It exposes a deliberately small mailbox protocol for repository discovery, filtered snapshots, patch transactions, local validation commands, commits, and optional safe-branch pushes. Google Drive through `rclone` is the first transport, but the core protocol is provider-neutral: the remote client does not need direct filesystem access, a GitHub token, or arbitrary shell access on the host.
 
-> **Status:** alpha (`0.2.0a1`, protocol v2). The project is usable and tested, but its protocol and operational model may still change before a stable release.
+> **Status:** single-thread gold baseline (`0.3.0`, protocol v2). This pre-1.0 release is the frozen semantic reference for the upcoming scheduler and multi-repository concurrency work; protocol and operational details may still change before 1.0.
 
 ## Why use it?
 
@@ -131,7 +131,7 @@ A five-request live probe on the reference host completed all five successfully 
 
 ## Performance
 
-The September 2026 performance audit reduced the full live validation suite from **373.2 s to 55.8 s** while increasing coverage from 139 to 147 tests: about **6.7x faster** and **85% less wall-clock time** on the reference macOS host.
+The September 2026 performance programme reduced the original **373.2 s / 139-test** live validation baseline to **50.4 s / 193 tests** in the A3 production acceptance run. That is about **7.4x faster** and **86.5% less wall-clock time** while materially expanding correctness, replay, crash-recovery, transport, and adversarial coverage. A4 qualifies `0.3.0` with repeated production runs rather than treating one best-case result as an SLA.
 
 After the final daemon restart, lightweight control-plane requests used the persistent `rclone rcd` path with transaction-directory listing around **0.23 s** and small request download around **0.44 s** in the post-promotion doctor/materialisation checks. Real edit latency is then dominated by the repository's configured validation commands, not the mailbox itself.
 
@@ -165,6 +165,7 @@ Read [docs/security.md](docs/security.md) before enabling push or running valida
 - [Concurrency and multiple clients](docs/concurrency.md)
 - [Performance](docs/performance.md)
 - [Architecture](docs/architecture.md)
+- [Transaction state machine](docs/transaction-state-machine.md)
 - [Protocol v2](docs/protocol.md)
 - [Security model](docs/security.md)
 - [Google Drive OAuth migration](docs/google-drive-oauth.md)
