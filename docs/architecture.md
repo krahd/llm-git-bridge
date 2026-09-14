@@ -16,7 +16,7 @@ publication/cleanup stages before any worker count is raised. See
 [scheduler-architecture.md](scheduler-architecture.md) for the staged contracts
 and worker-lifecycle rationale.
 
-Version `1.0.0rc2` retains the Phase B ownership boundary while allowing a bounded number of repository-local workers. Drive/rclone transport and durable result publication remain watcher-owned; the scheduler owns worker lifecycle, canonical-repository exclusion, bounded backlog admission and fairness. The complete ownership and recovery contract is documented in `scheduler-architecture.md`.
+Version `1.0.0rc3` retains the Phase B ownership boundary while allowing a bounded number of repository-local workers. Drive/rclone transport and durable result publication remain watcher-owned; the scheduler owns worker lifecycle, canonical-repository exclusion, bounded backlog admission and fairness. The complete ownership and recovery contract is documented in `scheduler-architecture.md`.
 
 ## Multi-repository model
 

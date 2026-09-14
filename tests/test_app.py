@@ -1028,6 +1028,115 @@ class AppTests(unittest.TestCase):
         for txid in ("tx-live-a1", "tx-live-a2", "tx-live-b1"):
             self.assertEqual(json.loads(self.fake.files[f"v2/results/{txid}.json"])["status"], "success")
 
+    def test_c2_transient_live_poll_failure_preserves_pending_and_recovers_discovery(self):
+        """A live-list failure must not discard queued work or drain active workers."""
+        repo_b = self.tmp / "repo-b-live-poll-retry"
+        shutil.copytree(self._seed_repo, repo_b, symlinks=True)
+        registry = json.loads(app.REGISTRY_FILE.read_text(encoding="utf-8"))
+        registry["repos"]["repo-b"] = {
+            **registry["repos"]["repo"],
+            "id": "repo-b",
+            "name": "repo-b",
+            "path": str(repo_b),
+        }
+        save_json(app.REGISTRY_FILE, registry)
+
+        def request(txid: str, repo_id: str) -> str:
+            return json.dumps({
+                "protocol": 2,
+                "kind": "transaction",
+                "transaction_id": txid,
+                "repo": repo_id,
+                "base_sha": self._seed_head,
+                "branch": f"ai/{txid}",
+                "patch": "",
+                "run": [],
+            }) + "\n"
+
+        self.fake.files["v2/transactions/tx-live-retry-a1.json"] = request(
+            "tx-live-retry-a1", "repo"
+        )
+        a1_started = threading.Event()
+        b1_started = threading.Event()
+        release_a1 = threading.Event()
+        a2_started_early = threading.Event()
+        observed: list[str] = []
+        lock = threading.Lock()
+
+        def fake_process(_repo_path, repo_id, obj, **_kwargs):
+            txid = obj["transaction_id"]
+            with lock:
+                observed.append(txid)
+            if txid == "tx-live-retry-a1":
+                a1_started.set()
+                self.assertTrue(b1_started.wait(5.0), "live repoll did not recover after list failure")
+                release_a1.wait(2.0)
+            elif txid == "tx-live-retry-a2":
+                if not release_a1.is_set():
+                    a2_started_early.set()
+            elif txid == "tx-live-retry-b1":
+                b1_started.set()
+                release_a1.set()
+            return Mock(
+                result={
+                    "protocol": 2,
+                    "kind": "result",
+                    "transaction_id": txid,
+                    "repo": repo_id,
+                    "branch": obj["branch"],
+                    "status": "success",
+                    "processed_at": "test",
+                },
+                snapshot=None,
+            )
+
+        real_list_entries = self.fake.list_entries
+        list_calls = 0
+
+        def flaky_live_list(rel: str):
+            nonlocal list_calls
+            if rel != "v2/transactions":
+                return real_list_entries(rel)
+            list_calls += 1
+            if list_calls == 2:
+                self.fake.files["v2/transactions/tx-live-retry-a2.json"] = request(
+                    "tx-live-retry-a2", "repo"
+                )
+            elif list_calls == 3:
+                self.fake.files["v2/transactions/tx-live-retry-b1.json"] = request(
+                    "tx-live-retry-b1", "repo-b"
+                )
+                raise BridgeError("temporary live mailbox list failure")
+            return real_list_entries(rel)
+
+        cfg = dict(self.cfg)
+        cfg["max_workers"] = 2
+        cfg["max_pending_jobs"] = 8
+        cfg["poll_interval"] = 0.5
+        scheduler = app._LocalWorkerScheduler(max_workers=2, queue_capacity=2)
+        scheduler.start()
+        try:
+            with patch.object(self.fake, "list_entries", side_effect=flaky_live_list):
+                with patch("llm_git_bridge.app.process_transaction", side_effect=fake_process):
+                    self.assertEqual(app.process_pending_once(cfg, scheduler=scheduler), 3)
+        finally:
+            release_a1.set()
+            scheduler.shutdown(cancel_running=True)
+
+        self.assertGreaterEqual(list_calls, 4)
+        self.assertFalse(a2_started_early.is_set())
+        self.assertLess(observed.index("tx-live-retry-b1"), observed.index("tx-live-retry-a2"))
+        scheduler_events = [
+            item for item in app._recent_metrics(50)
+            if item.get("event", "").startswith("scheduler-")
+        ]
+        self.assertTrue(any(item.get("event") == "scheduler-live-poll-error" for item in scheduler_events))
+        tx_events = [item for item in scheduler_events if item.get("event") in {
+            "scheduler-enqueue", "scheduler-dispatch", "scheduler-finish"
+        }]
+        self.assertTrue(tx_events)
+        self.assertTrue(all(item.get("transaction_id") for item in tx_events))
+
     def test_g_scheduler_metrics_expose_bounded_public_operational_fields(self):
         self.cfg["max_workers"] = 2
         txid = "tx-g-metrics"

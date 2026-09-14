@@ -1773,7 +1773,13 @@ def _process_pending_concurrent(
     live_poll_interval = _validate_poll_interval(cfg.get("poll_interval", 1.0))
     next_live_poll_at = time.monotonic() + live_poll_interval
 
-    def scheduler_metric(event: str, *, queue_wait_s: float | None = None, execution_s: float | None = None) -> None:
+    def scheduler_metric(
+        event: str,
+        *,
+        transaction_id: str | None = None,
+        queue_wait_s: float | None = None,
+        execution_s: float | None = None,
+    ) -> None:
         active_workers = scheduler.active_count()
         metric: dict[str, Any] = {
             "event": event,
@@ -1783,6 +1789,8 @@ def _process_pending_concurrent(
             "scheduler_utilization": round(active_workers / scheduler.max_workers, 4),
             "recorded_at": utc_now(),
         }
+        if transaction_id is not None:
+            metric["transaction_id"] = transaction_id
         if queue_wait_s is not None:
             metric["queue_wait_s"] = round(queue_wait_s, 4)
         if execution_s is not None:
@@ -1814,7 +1822,11 @@ def _process_pending_concurrent(
                 "error": _public_error_message(exc),
             }
         execution_s = time.monotonic() - item.dispatched_at
-        scheduler_metric("scheduler-finish", execution_s=execution_s)
+        scheduler_metric(
+            "scheduler-finish",
+            transaction_id=filename[:-5],
+            execution_s=execution_s,
+        )
         _finalize_request_result(
             transport,
             filename,
@@ -1924,7 +1936,11 @@ def _process_pending_concurrent(
                 poll=item.poll,
                 poll_started=item.poll_started,
             ))
-            scheduler_metric("scheduler-dispatch", queue_wait_s=dispatched_at - item.enqueued_at)
+            scheduler_metric(
+                "scheduler-dispatch",
+                transaction_id=item.request.downloaded.filename[:-5],
+                queue_wait_s=dispatched_at - item.enqueued_at,
+            )
             dispatched += 1
         return dispatched
 
@@ -1991,7 +2007,10 @@ def _process_pending_concurrent(
                         current_poll,
                         current_poll_started,
                     ))
-                    scheduler_metric("scheduler-enqueue")
+                    scheduler_metric(
+                        "scheduler-enqueue",
+                        transaction_id=request.downloaded.filename[:-5],
+                    )
                     dispatch_pending()
                     continue
 
@@ -2070,19 +2089,27 @@ def _process_pending_concurrent(
             now = time.monotonic()
             if now >= next_live_poll_at and not (cancel_check is not None and cancel_check()):
                 live_poll_started = time.monotonic()
-                live_poll = _poll_transaction_mailbox(transport)
-                classified = _classify_transaction_mailbox(transport, live_poll)
-                owned = owned_filenames()
-                fresh_candidates = tuple(
-                    filename for filename in classified.candidates if filename not in owned
-                )
-                recovered, fresh_pending = _recover_durable_local_results(
-                    transport,
-                    fresh_candidates,
-                )
-                processed += recovered
-                if fresh_pending:
-                    ingest_requests(live_poll, live_poll_started, fresh_pending)
+                try:
+                    live_poll = _poll_transaction_mailbox(transport)
+                    classified = _classify_transaction_mailbox(transport, live_poll)
+                    owned = owned_filenames()
+                    fresh_candidates = tuple(
+                        filename for filename in classified.candidates if filename not in owned
+                    )
+                    recovered, fresh_pending = _recover_durable_local_results(
+                        transport,
+                        fresh_candidates,
+                    )
+                    processed += recovered
+                    if fresh_pending:
+                        ingest_requests(live_poll, live_poll_started, fresh_pending)
+                except BridgeError:
+                    # Discovery transport can fail transiently while repository work
+                    # is active. Never clear already validated pending work or block
+                    # on active workers merely because a live repoll failed. The
+                    # ordinary outer watch loop will still surface persistent
+                    # failures once this active batch drains.
+                    scheduler_metric("scheduler-live-poll-error")
                 next_live_poll_at = time.monotonic() + live_poll_interval
                 continue
 

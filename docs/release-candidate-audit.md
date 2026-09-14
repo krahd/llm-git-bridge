@@ -1,4 +1,4 @@
-# v1.0.0rc2 concurrent-architecture audit
+# v1.0.0rc3 concurrent-architecture audit
 
 Date: 2026-09-13
 
@@ -135,7 +135,7 @@ best-effort; transaction correctness never depends on them.
 
 ## Release gates
 
-Before the candidate may be called `1.0.0rc2`:
+Before the candidate may be called `1.0.0rc3`:
 
 1. complete suite passes under bounded default sharding;
 2. complete suite passes under an independent hash seed and an alternate bounded shard count;
@@ -151,3 +151,11 @@ Before the candidate may be called `1.0.0rc2`:
 
 The release candidate does not require parallel transport or adaptive scheduling;
 those are explicit rejected designs, not unfinished implementation.
+
+## RC2 production live-canary finding and RC3 hardening
+
+The RC2 production canary exposed a second watcher-level failure mode after the original live-arrival repair. A later same-repository request could be discovered and retained while A1 was active, but a subsequent transient mailbox-list failure caused the concurrent processing frame to unwind. The exception cleanup path cleared the validated pending queue and then blocked while reaping active workers. Any independent repository request arriving during that interval could not be discovered until the active worker finished and the outer watch loop restarted. This recreated head-of-line blocking under a transport hiccup even though the steady-state scheduler was correct.
+
+RC3 changes the live-repoll failure boundary: `BridgeError` during active live discovery is recorded as `scheduler-live-poll-error`, already validated pending work and active workers are preserved, and discovery is retried on the next live-poll interval. Persistent transport failure is still surfaced by the ordinary outer poll after the active batch drains, so the change does not convert a broken mailbox into silent success. Scheduler enqueue/dispatch/finish metrics now include the bounded public `transaction_id`, allowing production canaries to prove ordering directly rather than inferring job identity from execution duration.
+
+A dedicated regression injects A1, later A2 on the same repository, then a transient live-list failure before later B1 on an independent repository. RC3 must retain A2, retry discovery, dispatch B1 before A2, prevent A2 from starting before A1 releases, emit the live-poll-error metric, and attach transaction identity to scheduler lifecycle metrics.
