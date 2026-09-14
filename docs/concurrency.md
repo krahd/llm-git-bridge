@@ -1,6 +1,6 @@
 # Concurrency and multiple clients
 
-`llm-git-bridge` supports multiple remote writers, including several ChatGPT sessions, but it is deliberately a **single-consumer** local execution system.
+`llm-git-bridge` `0.3.0` supports multiple remote writers, including several ChatGPT sessions, but deliberately remains a **single-consumer, single-execution-stream** local system. This release is the semantic oracle that later concurrent versions must preserve in one-worker mode.
 
 ## What is concurrent
 
@@ -59,7 +59,7 @@ For a brand-new branch, the requested base must still equal the authoritative re
 
 Because configured commands run serially, one slow transaction delays all later mailbox requests. This is the main scaling limitation for many active sessions.
 
-On the reference host, the bridge's own full validation suite currently takes about 56 seconds. A transaction running that suite therefore occupies the single worker for roughly a minute before the next edit transaction can start.
+The A3 precursor to the `0.3.0` gold baseline completed the 193-test configured validation gate in 50.4 seconds on the reference production Mac. A4 uses repeated runs to establish variance. A transaction running that suite therefore still occupies the single execution stream for roughly a minute before the next edit transaction can start.
 
 Lightweight `doctor`/diagnostics requests are much faster but still wait behind an already-running edit transaction.
 
