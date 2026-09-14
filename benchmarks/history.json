@@ -1,0 +1,79 @@
+{
+  "schema": 1,
+  "reference_host": {
+    "os": "macOS",
+    "python": "3.14.7",
+    "git": "Apple Git 2.50.1",
+    "rclone": "1.75.1"
+  },
+  "records": [
+    {
+      "label": "pre-remediation",
+      "test_count": 139,
+      "configured_test_s": 373.1983
+    },
+    {
+      "label": "performance-pass1",
+      "configured_test_s": 106.3
+    },
+    {
+      "label": "performance-pass2",
+      "test_count": 143,
+      "configured_test_s": 73.2
+    },
+    {
+      "label": "performance-pass3",
+      "test_count": 147,
+      "configured_test_s": 55.798
+    },
+    {
+      "label": "A1",
+      "commit": "9d4a61445b99bbf1d5b0b66b06fce27a4c3866dd",
+      "test_count": 184,
+      "configured_test_s": 124.5133
+    },
+    {
+      "label": "A2",
+      "commit": "01d55b91a6a48d7406b678eb530228a25a4b0305",
+      "test_count": 192,
+      "configured_test_s": 238.9342
+    },
+    {
+      "label": "A3",
+      "commit": "33ffcdd091fcae1be80915d4f8a18389ff31be0e",
+      "test_count": 193,
+      "configured_test_s": 50.4264,
+      "total_local_s": 55.6871,
+      "git_subprocesses_sequential_isolated": 925
+    },
+    {
+      "label": "A4-gold",
+      "version": "0.3.0",
+      "test_count": 196,
+      "configured_test_runs_s": [
+        67.9666,
+        71.1582,
+        67.3222
+      ],
+      "configured_test_median_s": 67.9666,
+      "configured_test_min_s": 67.3222,
+      "configured_test_max_s": 71.1582,
+      "total_local_runs_s": [
+        73.7196,
+        76.5629,
+        72.5426
+      ],
+      "qualification_commits": [
+        "12a9588d9d5d57949bcfe1c432dc91e45fa3e938",
+        "b7c124939c0749721a7de3aa39b931813c466214",
+        "3556fe977a56ad8dfffb259945bc8a66be9ff968"
+      ],
+      "isolated_default_runs_s": [
+        7.6979,
+        7.5965,
+        7.4388
+      ],
+      "notes": "Identical source tree across three production-Mac qualification branches; timing-sensitive process timeout/cancellation tests execute serially after bounded parallel shards."
+    }
+  ]
+}
