@@ -146,3 +146,11 @@ A second source-and-documentation audit removed further redundant Git invocation
 After the second pass the suite contains 143 tests and passes locally. Instrumentation counts 591 Git subprocess launches for the full suite, a 55.2% reduction from the 1,319 baseline and a further 23.5% reduction from the first pass. A normal one-file transaction with no configured command now uses nine Git processes, half of the first-pass 18-process measurement and 65.4% below the earlier 26-process baseline. The production-Mac acceptance result remains to be measured for these exact bytes before promotion.
 
 The transport audit also found an operational requirement rather than a code hot-path defect: the live `doctor` reports `custom_drive_client_id_configured=false`. Current rclone Google Drive documentation states that rclone's shared Drive client ID is being retired during 2026 and recommends a user-owned client ID; the existing `scripts/google_drive_oauth.py` migration remains the supported path and must be completed interactively because Google requires browser-side project/OAuth consent actions. No global Git configuration or mailbox semantics are changed by this pass.
+
+## v0.3 single-thread gold baseline (2026-09-13)
+
+Phase A hardened, fuzzed, fault-injected, and re-profiled the serial execution model before any daemon concurrency was introduced. `0.3.0` freezes that behaviour as the semantic oracle for the scheduler refactor. The verified A3 precursor is `ai/single-thread-a3-20260913` at `33ffcdd091fcae1be80915d4f8a18389ff31be0e`, with 193 tests and an independent 33/33 tracked-file hash match.
+
+The gold line retains one watcher and one synchronous local execution stream. Test validation may use the repository's bounded sharded test runner; this does not change daemon execution semantics. Concurrency work must first reproduce this behaviour with a one-worker scheduler before enabling simultaneous work across independent repositories.
+
+The gold qualification corpus records repeated production-Mac test runs and live request/materialisation/restart samples outside the repository so measured host variance is preserved without rewriting code to chase a single best-case number.
