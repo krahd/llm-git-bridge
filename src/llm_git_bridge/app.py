@@ -8,15 +8,18 @@ import json
 import math
 import os
 import plistlib
+import queue
 import re
 import secrets
 import shutil
 import signal
 import sys
 import tempfile
+import threading
 import time
+from dataclasses import dataclass
 from pathlib import Path
-from typing import Any
+from typing import Any, Callable
 
 from .core import (
     BridgeError,
@@ -40,7 +43,13 @@ from .core import (
     validate_safe_branch_name,
     validate_transaction_id,
 )
-from .transport import RcloneRCProcess, RcloneTransport, start_rclone_rcd, TransientTransportError
+from .transport import (
+    RcloneRCProcess,
+    RcloneTransport,
+    RemoteFileEntry,
+    TransientTransportError,
+    start_rclone_rcd,
+)
 from . import __version__
 
 APP_NAME = "llm-git-bridge"
@@ -249,7 +258,12 @@ def refresh_repo_entry(cfg: dict[str, Any], repo_ref: str, *, publish: bool = Tr
     return registry, repo_id, entry
 
 
-def materialize(cfg: dict[str, Any], repo_ref: str, *, branch_snapshot: tuple[Path, str] | None = None) -> str:
+def _materialize_with_snapshot(
+    cfg: dict[str, Any],
+    repo_ref: str,
+    *,
+    branch_snapshot: tuple[Path, str] | None = None,
+) -> tuple[str, dict[str, Any]]:
     registry = load_registry()
     repo_id, entry = resolve_repo(registry, repo_ref)
     repo_path = branch_snapshot[0] if branch_snapshot else Path(entry["path"])
@@ -262,15 +276,64 @@ def materialize(cfg: dict[str, Any], repo_ref: str, *, branch_snapshot: tuple[Pa
         remote_rel = f"{REMOTE_ROOT}/repos/{repo_id}/snapshot.json"
     transport = transport_from_config(cfg)
     transport.upload_json(remote_rel, snapshot, STATE_DIR / "outbox" / f"snapshot-{repo_id}.json")
-    return remote_rel
+    return remote_rel, snapshot
+
+
+def materialize(cfg: dict[str, Any], repo_ref: str, *, branch_snapshot: tuple[Path, str] | None = None) -> str:
+    return _materialize_with_snapshot(cfg, repo_ref, branch_snapshot=branch_snapshot)[0]
 
 
 def _published_marker(filename: str) -> Path:
     return PUBLISHED_DIR / filename
 
 
-def _mark_published(filename: str, *, source: str) -> None:
-    save_json(_published_marker(filename), {"filename": filename, "published_at": utc_now(), "source": source})
+def _quarantine_corrupt_marker(filename: str, marker_path: Path) -> None:
+    quarantine_dir = STATE_DIR / "corrupt-markers"
+    quarantine_dir.mkdir(parents=True, exist_ok=True, mode=0o700)
+    try:
+        os.chmod(quarantine_dir, 0o700)
+    except OSError:
+        pass
+    try:
+        os.replace(marker_path, quarantine_dir / filename)
+    except OSError:
+        marker_path.unlink(missing_ok=True)
+    _append_metric({
+        "event": "publication-marker-quarantined",
+        "transaction_id": filename[:-5],
+        "recorded_at": utc_now(),
+    })
+
+
+def _load_published_marker(filename: str) -> dict[str, Any] | None:
+    marker_path = _published_marker(filename)
+    if not marker_path.exists():
+        return None
+    try:
+        marker = load_json(marker_path)
+    except BridgeError:
+        _quarantine_corrupt_marker(filename, marker_path)
+        return None
+    request_bytes_sha256 = marker.get("request_bytes_sha256")
+    if (
+        marker.get("filename") != filename
+        or not isinstance(marker.get("published_at"), str)
+        or not isinstance(marker.get("source"), str)
+        or (
+            request_bytes_sha256 is not None
+            and (not isinstance(request_bytes_sha256, str) or not re.fullmatch(r"[0-9a-f]{64}", request_bytes_sha256))
+        )
+    ):
+        _quarantine_corrupt_marker(filename, marker_path)
+        return None
+    return marker
+
+
+def _mark_published(filename: str, *, source: str, request_bytes_sha256: str | None = None) -> None:
+    marker: dict[str, Any] = {"filename": filename, "published_at": utc_now(), "source": source}
+    if request_bytes_sha256 is not None:
+        marker["request_bytes_sha256"] = request_bytes_sha256
+    save_json(_published_marker(filename), marker)
 
 
 def _validate_request_identity(obj: dict[str, Any], filename: str) -> str:
@@ -360,7 +423,31 @@ def _sign_result(filename: str, result: dict[str, Any]) -> dict[str, Any]:
     return signed
 
 
+def _result_identity_is_valid(filename: str, result: dict[str, Any]) -> bool:
+    txid = result.get("transaction_id")
+    if not isinstance(txid, str) or not TX_FILENAME_RE.fullmatch(filename):
+        return False
+    if f"{txid}.json" != filename:
+        return False
+    if result.get("status") not in {"success", "error"}:
+        return False
+    protocol = result.get("protocol")
+    if protocol is not None and protocol != PROTOCOL_VERSION:
+        return False
+    kind = result.get("kind")
+    if kind is not None and kind != "result":
+        return False
+    request_bytes_sha256 = result.get("request_bytes_sha256")
+    if request_bytes_sha256 is not None and (
+        not isinstance(request_bytes_sha256, str) or not re.fullmatch(r"[0-9a-f]{64}", request_bytes_sha256)
+    ):
+        return False
+    return True
+
+
 def _verify_result(filename: str, result: dict[str, Any]) -> bool:
+    if not _result_identity_is_valid(filename, result):
+        return False
     auth = result.get("bridge_auth")
     if not isinstance(auth, dict) or auth.get("alg") != RESULT_AUTH_ALG:
         return False
@@ -371,7 +458,7 @@ def _verify_result(filename: str, result: dict[str, Any]) -> bool:
     return hmac.compare_digest(tag, expected)
 
 
-def _remote_result_is_authentic(transport: RcloneTransport, filename: str) -> bool:
+def _load_authentic_remote_result(transport: RcloneTransport, filename: str) -> dict[str, Any] | None:
     tmp = STATE_DIR / "reconcile" / filename
     try:
         raw = transport.download_text(
@@ -380,11 +467,17 @@ def _remote_result_is_authentic(transport: RcloneTransport, filename: str) -> bo
             max_bytes=MAX_RESULT_BYTES,
         )
         obj = strict_json_loads(raw.lstrip("\ufeff"))
-        return isinstance(obj, dict) and _verify_result(filename, obj)
+        if isinstance(obj, dict) and _verify_result(filename, obj):
+            return obj
     except Exception:
-        return False
+        return None
     finally:
         tmp.unlink(missing_ok=True)
+    return None
+
+
+def _remote_result_is_authentic(transport: RcloneTransport, filename: str) -> bool:
+    return _load_authentic_remote_result(transport, filename) is not None
 
 
 def _public_error_message(exc: Exception) -> str:
@@ -537,9 +630,9 @@ def _process_materialize_request(cfg: dict[str, Any], registry: dict[str, Any], 
 
     if branch is None:
         registry, repo_id, entry = refresh_repo_entry(cfg, repo_id, publish=True)
-        snapshot_rel = materialize(cfg, repo_id)
-        head = entry["head"]
-        branch_name = entry["branch"]
+        snapshot_rel, snapshot = _materialize_with_snapshot(cfg, repo_id)
+        head = snapshot["head"]
+        branch_name = snapshot["branch"]
     else:
         branch_name = validate_safe_branch_name(branch, str(cfg.get("safe_branch_prefix", "ai/")))
         repo_path = Path(entry["path"])
@@ -550,8 +643,12 @@ def _process_materialize_request(cfg: dict[str, Any], registry: dict[str, Any], 
         wt = STATE_DIR / "materialize-worktrees" / txid
         retire_worktree(repo_path, wt)
         try:
-            add_disposable_worktree(repo_path, "--detach", str(wt), branch_name)
-            snapshot_rel = materialize(cfg, repo_id, branch_snapshot=(wt, branch_name))
+            add_disposable_worktree(repo_path, "--detach", str(wt), head)
+            snapshot_rel, snapshot = _materialize_with_snapshot(
+                cfg, repo_id, branch_snapshot=(wt, branch_name)
+            )
+            if snapshot.get("head") != head:
+                raise BridgeError("materialized branch snapshot HEAD changed unexpectedly")
         finally:
             retire_worktree(repo_path, wt)
 
@@ -607,6 +704,71 @@ def _cleanup_local_request_artifacts(filename: str) -> None:
     for parent in ("transactions", "command-runs", "command-homes"):
         shutil.rmtree(STATE_DIR / parent / txid, ignore_errors=True)
 
+    # Outbox JSON is only a staging source for rclone. Replay durability lives in
+    # results/<tx>.json plus the publication marker, so successful acknowledgement
+    # can remove per-transaction staging files instead of leaking one forever.
+    outbox = STATE_DIR / "outbox"
+    (outbox / f"result-{filename}").unlink(missing_ok=True)
+    if outbox.exists():
+        for path in outbox.glob(f"snapshot-*-{txid}.json"):
+            path.unlink(missing_ok=True)
+
+
+def reconcile_local_acknowledged_artifacts() -> int:
+    """Retire crash-left transient state whose acknowledgement is durable.
+
+    A process can die after the remote request has already been deleted but
+    before `_cleanup_local_request_artifacts` finishes. With no inbox object
+    left, ordinary polling cannot rediscover that transaction. Derive cleanup
+    candidates from local transient state and trust only an existing valid local
+    publication marker. Outbox JSON is staging, never replay authority, and may
+    be removed unconditionally at watcher startup because durable local results
+    live under `results/`.
+    """
+    txids: set[str] = set()
+    inbox = STATE_DIR / "inbox"
+    if inbox.exists():
+        for path in inbox.glob("*.json"):
+            if TX_FILENAME_RE.fullmatch(path.name):
+                txids.add(path.stem)
+    for parent_name in ("transactions", "command-runs", "command-homes"):
+        parent = STATE_DIR / parent_name
+        if not parent.exists():
+            continue
+        try:
+            children = list(parent.iterdir())
+        except OSError:
+            continue
+        for path in children:
+            if path.is_dir() and TX_FILENAME_RE.fullmatch(path.name + ".json"):
+                txids.add(path.name)
+
+    cleaned = 0
+    for txid in sorted(txids):
+        filename = f"{txid}.json"
+        if _load_published_marker(filename) is None:
+            continue
+        _cleanup_local_request_artifacts(filename)
+        cleaned += 1
+
+    outbox = STATE_DIR / "outbox"
+    if outbox.exists():
+        try:
+            staging = list(outbox.iterdir())
+        except OSError:
+            staging = []
+        for path in staging:
+            if path.is_file() and (path.name.startswith("result-") or path.name.startswith("snapshot-")):
+                path.unlink(missing_ok=True)
+
+    if cleaned:
+        _append_metric({
+            "event": "startup-local-cleanup",
+            "cleaned_transactions": cleaned,
+            "recorded_at": utc_now(),
+        })
+    return cleaned
+
 
 def _prune_command_logs(limit: int = COMMAND_LOG_RETENTION) -> None:
     """Retain a small bounded set of local command logs for diagnosis."""
@@ -629,6 +791,11 @@ def _prune_local_results(limit: int = LOCAL_RESULT_RETENTION) -> None:
 
     Replay safety lives in the much smaller publication marker plus the remote
     result. Local result JSON is retained only as a recent diagnostic/retry cache.
+
+    The steady state normally contains exactly ``limit`` acknowledged results.
+    Validate publication markers only for the oldest files that actually need
+    deletion instead of reparsing every retained marker on every transaction.
+    Unacknowledged results remain durable even when they are older than the cache.
     """
     if limit < 1:
         return
@@ -636,16 +803,269 @@ def _prune_local_results(limit: int = LOCAL_RESULT_RETENTION) -> None:
     if not result_dir.exists():
         return
     try:
-        candidates = [
-            path
-            for path in result_dir.glob("*.json")
-            if path.is_file() and _published_marker(path.name).exists()
-        ]
-        candidates.sort(key=lambda path: path.stat().st_mtime, reverse=True)
-        for path in candidates[limit:]:
+        candidates = [path for path in result_dir.glob("*.json") if path.is_file()]
+        excess = len(candidates) - limit
+        if excess <= 0:
+            return
+        candidates.sort(key=lambda path: path.stat().st_mtime)
+        deleted = 0
+        for path in candidates:
+            if _load_published_marker(path.name) is None:
+                continue
             path.unlink(missing_ok=True)
+            deleted += 1
+            if deleted >= excess:
+                break
     except OSError:
         pass
+
+
+class _CorruptLocalResult(BridgeError):
+    """A durable local acknowledgement exists but cannot be trusted/read."""
+
+
+@dataclass(frozen=True)
+class _TransactionPoll:
+    """One immutable view of the remote transaction inbox."""
+
+    entries: tuple[RemoteFileEntry, ...]
+    list_s: float
+    list_transport: str
+
+    @property
+    def filenames(self) -> tuple[str, ...]:
+        return tuple(entry.name for entry in self.entries)
+
+    def size_for(self, filename: str) -> int | None:
+        for entry in self.entries:
+            if entry.name == filename:
+                return entry.size
+        return None
+
+
+@dataclass(frozen=True)
+class _MailboxClassification:
+    """Requests eligible for execution versus already acknowledged requests."""
+
+    candidates: tuple[str, ...]
+    published: tuple[str, ...]
+
+
+@dataclass(frozen=True)
+class _DownloadedRequest:
+    """Exact downloaded request bytes plus transport metadata."""
+
+    filename: str
+    raw: str
+    request_bytes_sha256: str
+    download_s: float
+    download_transport: str
+
+
+@dataclass(frozen=True)
+class _ValidatedRequest:
+    """A protocol-validated request ready for local dispatch."""
+
+    downloaded: _DownloadedRequest
+    obj: dict[str, Any]
+
+
+@dataclass(frozen=True)
+class _LocalJob:
+    """Scheduler-facing classification of one validated request."""
+
+    request: _ValidatedRequest
+    kind: str
+    resource_class: str
+    scheduling_key: str | None
+
+
+@dataclass(frozen=True)
+class _TransactionWorkerTask:
+    """Immutable local-execution handoff for the B2 worker boundary."""
+
+    filename: str
+    request_raw: str
+    repo_id: str
+    repo_path: Path
+    commands_json: str
+    safe_branch_prefix: str
+    allow_commit: bool
+    allow_push: bool
+
+
+@dataclass(frozen=True)
+class _TransactionWorkerOutcome:
+    """Worker-local transaction result returned to the watcher owner."""
+
+    result: dict[str, Any]
+    snapshot: dict[str, Any] | None
+
+
+@dataclass(frozen=True)
+class _WorkerCompletion:
+    task_id: int
+    outcome: _TransactionWorkerOutcome | None
+    error: BaseException | None
+
+
+@dataclass(frozen=True)
+class _WorkerHandle:
+    task_id: int
+    completion: queue.Queue[Any]
+
+
+@dataclass(frozen=True)
+class _QueuedWorkerTask:
+    task_id: int
+    task: _TransactionWorkerTask
+    completion: queue.Queue[Any]
+
+
+_WORKER_STOP = object()
+
+
+class _LocalWorkerScheduler:
+    """Bounded explicit worker lifecycle used by the B2 one-worker daemon.
+
+    The watcher/main thread owns this scheduler and all mailbox I/O. Worker
+    threads receive only immutable local transaction specifications and return
+    outcomes over per-task queues. The implementation intentionally avoids
+    ``ThreadPoolExecutor`` and Python 3.13+'s ``Queue.shutdown()`` so lifecycle
+    semantics remain explicit and compatible with the Python 3.11 minimum.
+    """
+
+    def __init__(
+        self,
+        *,
+        max_workers: int = 1,
+        queue_capacity: int | None = None,
+        worker_fn: Callable[[_TransactionWorkerTask, Callable[[], bool]], _TransactionWorkerOutcome] | None = None,
+    ) -> None:
+        if not isinstance(max_workers, int) or isinstance(max_workers, bool) or max_workers < 1:
+            raise BridgeError("scheduler max_workers must be a positive integer")
+        capacity = max_workers if queue_capacity is None else queue_capacity
+        if not isinstance(capacity, int) or isinstance(capacity, bool) or capacity < 1:
+            raise BridgeError("scheduler queue_capacity must be a positive integer")
+        self.max_workers = max_workers
+        self.queue_capacity = capacity
+        self._worker_fn = worker_fn or _run_transaction_worker
+        self._jobs: queue.Queue[Any] = queue.Queue(maxsize=capacity)
+        self._cancel = threading.Event()
+        self._threads: list[threading.Thread] = []
+        self._owner_thread_id = threading.get_ident()
+        self._next_task_id = 1
+        self._started = False
+        self._closed = False
+
+    def _assert_owner(self) -> None:
+        if threading.get_ident() != self._owner_thread_id:
+            raise BridgeError("scheduler API must be called by its owner thread")
+
+    def start(self) -> None:
+        self._assert_owner()
+        if self._closed:
+            raise BridgeError("scheduler is already closed")
+        if self._started:
+            return
+        for index in range(self.max_workers):
+            thread = threading.Thread(
+                target=self._worker_loop,
+                name=f"{APP_NAME}-worker-{index + 1}",
+                daemon=False,
+            )
+            thread.start()
+            self._threads.append(thread)
+        self._started = True
+
+    def _worker_loop(self) -> None:
+        while True:
+            queued = self._jobs.get()
+            try:
+                if queued is _WORKER_STOP:
+                    return
+                assert isinstance(queued, _QueuedWorkerTask)
+                try:
+                    outcome = self._worker_fn(queued.task, self.cancel_requested)
+                except BaseException as exc:
+                    completion = _WorkerCompletion(queued.task_id, None, exc)
+                else:
+                    completion = _WorkerCompletion(queued.task_id, outcome, None)
+                queued.completion.put(completion)
+            finally:
+                self._jobs.task_done()
+
+    def submit(self, task: _TransactionWorkerTask) -> _WorkerHandle:
+        self._assert_owner()
+        if not self._started:
+            raise BridgeError("scheduler is not started")
+        if self._closed:
+            raise BridgeError("scheduler is closed")
+        task_id = self._next_task_id
+        self._next_task_id += 1
+        completion: queue.Queue[Any] = queue.Queue(maxsize=1)
+        self._jobs.put(_QueuedWorkerTask(task_id, task, completion))
+        return _WorkerHandle(task_id, completion)
+
+    def wait(self, handle: _WorkerHandle) -> _TransactionWorkerOutcome:
+        self._assert_owner()
+        completion = handle.completion.get()
+        if not isinstance(completion, _WorkerCompletion) or completion.task_id != handle.task_id:
+            raise BridgeError("scheduler returned an invalid completion")
+        if completion.error is not None:
+            raise completion.error
+        if completion.outcome is None:
+            raise BridgeError("scheduler returned no outcome")
+        return completion.outcome
+
+    def execute(self, task: _TransactionWorkerTask) -> _TransactionWorkerOutcome:
+        return self.wait(self.submit(task))
+
+    def request_cancel(self) -> None:
+        self._cancel.set()
+
+    def cancel_requested(self) -> bool:
+        return self._cancel.is_set()
+
+    def shutdown(self, *, cancel_running: bool = False) -> None:
+        self._assert_owner()
+        if self._closed:
+            return
+        if cancel_running:
+            self.request_cancel()
+        if self._started:
+            for _thread in self._threads:
+                self._jobs.put(_WORKER_STOP)
+            self._jobs.join()
+            for thread in self._threads:
+                thread.join()
+        self._closed = True
+
+    def __enter__(self) -> _LocalWorkerScheduler:
+        self.start()
+        return self
+
+    def __exit__(self, _exc_type: Any, _exc: Any, _tb: Any) -> None:
+        self.shutdown(cancel_running=True)
+
+
+def _quarantine_corrupt_local_result(filename: str, local_result: Path) -> None:
+    quarantine_dir = STATE_DIR / "corrupt-results"
+    quarantine_dir.mkdir(parents=True, exist_ok=True, mode=0o700)
+    try:
+        os.chmod(quarantine_dir, 0o700)
+    except OSError:
+        pass
+    target = quarantine_dir / filename
+    try:
+        os.replace(local_result, target)
+    except OSError as exc:
+        raise BridgeError(f"cannot quarantine corrupt local result: {type(exc).__name__}") from exc
+    _append_metric({
+        "event": "local-result-quarantined",
+        "transaction_id": filename[:-5],
+        "recorded_at": utc_now(),
+    })
 
 
 def _publish_local_result(
@@ -656,13 +1076,18 @@ def _publish_local_result(
     # A previous upload may have timed out after Drive accepted the write. Resolve
     # that ambiguous outcome by checking the result directory before attempting a
     # second mutating upload, which could otherwise create a duplicate Drive file.
-    result = load_json(local_result)
-
+    # Check the authenticated remote acknowledgement before parsing the local copy:
+    # a torn local file must not mask an acknowledgement that Drive already accepted.
     remote_results = transport.list_files(f"{REMOTE_ROOT}/results")
     if filename in remote_results:
-        if not _remote_result_is_authentic(transport, filename):
+        remote_result = _load_authentic_remote_result(transport, filename)
+        if remote_result is None:
             raise BridgeError("conflicting unauthenticated remote result")
-        _mark_published(filename, source="remote-result-existing")
+        _mark_published(
+            filename,
+            source="remote-result-existing",
+            request_bytes_sha256=remote_result.get("request_bytes_sha256"),
+        )
         cleanup_status, cleanup_s, cleanup_transport = _cleanup_remote_request(transport, filename)
         _cleanup_local_request_artifacts(filename)
         _prune_local_results()
@@ -679,6 +1104,15 @@ def _publish_local_result(
         return 0.0
 
     try:
+        result = load_json(local_result)
+    except BridgeError as exc:
+        _quarantine_corrupt_local_result(filename, local_result)
+        raise _CorruptLocalResult("corrupt local durable result quarantined") from exc
+    if not _result_identity_is_valid(filename, result) or not _verify_result(filename, result):
+        _quarantine_corrupt_local_result(filename, local_result)
+        raise _CorruptLocalResult("local durable result authentication is invalid")
+
+    try:
         delta = time.time() - local_result.stat().st_mtime
         age = RESULT_RETRY_GRACE_S if delta < -RESULT_RETRY_GRACE_S else max(0.0, delta)
     except OSError:
@@ -687,13 +1121,6 @@ def _publish_local_result(
         # Give an in-flight/timed-out provider write time to become visible.
         return None
 
-    if not _verify_result(filename, result):
-        # Legacy/trusted local durable results from an older bridge version can be
-        # upgraded in place immediately before a retry. Remote objects are never
-        # granted this trust.
-        result = _sign_result(filename, result)
-        save_json(local_result, result)
-
     started = time.monotonic()
     transport.upload_control_json(
         f"{REMOTE_ROOT}/results/{filename}",
@@ -701,7 +1128,7 @@ def _publish_local_result(
         STATE_DIR / "outbox" / f"result-{filename}",
     )
     elapsed = round(time.monotonic() - started, 4)
-    _mark_published(filename, source="local-result")
+    _mark_published(filename, source="local-result", request_bytes_sha256=result.get("request_bytes_sha256"))
     cleanup_status, cleanup_s, cleanup_transport = _cleanup_remote_request(transport, filename)
     _cleanup_local_request_artifacts(filename)
     _prune_local_results()
@@ -733,7 +1160,7 @@ def reconcile_remote_results(cfg: dict[str, Any]) -> int:
         if name.endswith(".json") and TX_FILENAME_RE.fullmatch(name)
     }
     unmarked_transactions = {
-        name for name in pending_transactions if not _published_marker(name).exists()
+        name for name in pending_transactions if _load_published_marker(name) is None
     }
     if not unmarked_transactions:
         _append_metric({
@@ -755,9 +1182,14 @@ def reconcile_remote_results(cfg: dict[str, Any]) -> int:
     marked = 0
     candidates = sorted(remote_results & unmarked_transactions)
     for filename in candidates:
-        if not _remote_result_is_authentic(transport, filename):
+        remote_result = _load_authentic_remote_result(transport, filename)
+        if remote_result is None:
             continue
-        _mark_published(filename, source="startup-authenticated-remote-result")
+        _mark_published(
+            filename,
+            source="startup-authenticated-remote-result",
+            request_bytes_sha256=remote_result.get("request_bytes_sha256"),
+        )
         marked += 1
     _append_metric({
         "event": "startup-reconcile",
@@ -769,193 +1201,454 @@ def reconcile_remote_results(cfg: dict[str, Any]) -> int:
     return marked
 
 
-def process_pending_once(cfg: dict[str, Any]) -> int:
-    transport = transport_from_config(cfg)
-    poll_started = time.monotonic()
-    list_started = time.monotonic()
-    tx_entries = [
+def _poll_transaction_mailbox(transport: RcloneTransport) -> _TransactionPoll:
+    """List the inbox once and freeze the entries used by this poll."""
+    started = time.monotonic()
+    entries = tuple(
         entry
         for entry in transport.list_entries(f"{REMOTE_ROOT}/transactions")
         if entry.name.endswith(".json") and TX_FILENAME_RE.fullmatch(entry.name)
-    ]
-    tx_files = [entry.name for entry in tx_entries]
-    tx_sizes = {entry.name: entry.size for entry in tx_entries}
-    transaction_list_s = round(time.monotonic() - list_started, 4)
-    transaction_list_transport = str(getattr(transport, "last_mode", "unknown"))
+    )
+    return _TransactionPoll(
+        entries=entries,
+        list_s=round(time.monotonic() - started, 4),
+        list_transport=str(getattr(transport, "last_mode", "unknown")),
+    )
 
-    # Normal polling lists only transactions. Replay recovery against the remote
-    # result directory is performed once at watcher startup instead of here.
-    candidates = [name for name in tx_files if not _published_marker(name).exists()]
-    if not candidates:
-        # The transaction directory is an inbox, not an audit log. Reap one old
-        # acknowledged request per idle poll so listing cost remains bounded even
-        # after long-lived use. RC-only cleanup avoids turning maintenance into a
-        # subprocess latency penalty; failed cleanup is simply retried later.
-        published = [name for name in tx_files if _published_marker(name).exists()]
-        if published:
-            _cleanup_remote_request(transport, published[0], allow_fallback=False)
-        return 0
 
+def _classify_transaction_mailbox(
+    transport: RcloneTransport,
+    poll: _TransactionPoll,
+) -> _MailboxClassification:
+    """Separate executable requests from durable acknowledgements.
+
+    Invalid local publication markers are repaired only from authenticated remote
+    results; otherwise their requests remain executable. This preserves the A4
+    replay semantics while exposing a narrow scheduler-facing classification stage.
+    """
+    candidates: list[str] = []
+    published: list[str] = []
+    invalid_marker_names: list[str] = []
+    for name in poll.filenames:
+        marker_path = _published_marker(name)
+        marker_existed = marker_path.exists()
+        if _load_published_marker(name) is not None:
+            published.append(name)
+        else:
+            candidates.append(name)
+            if marker_existed:
+                invalid_marker_names.append(name)
+
+    if invalid_marker_names:
+        remote_results = set(transport.list_files(f"{REMOTE_ROOT}/results"))
+        for name in invalid_marker_names:
+            if name not in remote_results:
+                continue
+            remote_result = _load_authentic_remote_result(transport, name)
+            if remote_result is None:
+                continue
+            _mark_published(
+                name,
+                source="invalid-marker-authenticated-remote-result",
+                request_bytes_sha256=remote_result.get("request_bytes_sha256"),
+            )
+            if name in candidates:
+                candidates.remove(name)
+            published.append(name)
+
+    return _MailboxClassification(tuple(candidates), tuple(published))
+
+
+def _idle_acknowledgement_maintenance(
+    transport: RcloneTransport,
+    published: tuple[str, ...],
+) -> None:
+    """Retire at most one acknowledged inbox object during an idle poll."""
+    if not published:
+        return
+    acknowledged = published[0]
+    _cleanup_remote_request(transport, acknowledged, allow_fallback=False)
+    _cleanup_local_request_artifacts(acknowledged)
+    _prune_local_results()
+    _prune_command_logs()
+
+
+def _recover_durable_local_results(
+    transport: RcloneTransport,
+    candidates: tuple[str, ...],
+) -> tuple[int, tuple[str, ...]]:
+    """Publish durable local results before allowing any request to re-execute."""
     processed = 0
     still_pending: list[str] = []
     for filename in candidates:
         local_result = STATE_DIR / "results" / filename
         if local_result.exists():
-            if _publish_local_result(transport, filename, local_result) is not None:
-                processed += 1
+            try:
+                if _publish_local_result(transport, filename, local_result) is not None:
+                    processed += 1
+            except _CorruptLocalResult:
+                # The durable copy is unusable, but the remote request still exists.
+                # Re-enter the ordinary request state machine. Git transactions are
+                # protected against duplicate mutation by request-hash commit trailers.
+                still_pending.append(filename)
         else:
             still_pending.append(filename)
+    return processed, tuple(still_pending)
 
+
+def _ensure_registry_for_dispatch(cfg: dict[str, Any]) -> dict[str, Any]:
+    if not REGISTRY_FILE.exists():
+        return refresh_registry(cfg, publish=True)
+    return load_registry()
+
+
+def _download_remote_request(
+    transport: RcloneTransport,
+    filename: str,
+    *,
+    reported_size: int | None,
+    poll: _TransactionPoll,
+    poll_started: float,
+) -> _DownloadedRequest | None:
+    """Download exact request text, returning None only for transient transport failure."""
+    if reported_size is not None and reported_size > MAX_REQUEST_BYTES:
+        raise BridgeError("remote request exceeds maximum allowed size")
+
+    tx_local = STATE_DIR / "inbox" / filename
+    started = time.monotonic()
+    try:
+        raw = transport.download_text(
+            f"{REMOTE_ROOT}/transactions/{filename}",
+            tx_local,
+            max_bytes=MAX_REQUEST_BYTES,
+        )
+    except TransientTransportError:
+        download_s = round(time.monotonic() - started, 4)
+        download_transport = str(getattr(transport, "last_mode", "unknown"))
+        tx_local.unlink(missing_ok=True)
+        _append_metric({
+            "event": "transaction-download-retry",
+            "transaction_id": filename[:-5],
+            "transaction_list_s": poll.list_s,
+            "transaction_download_s": download_s,
+            "transaction_list_transport": poll.list_transport,
+            "transaction_download_transport": download_transport,
+            "poll_total_s": round(time.monotonic() - poll_started, 4),
+            "recorded_at": utc_now(),
+        })
+        return None
+
+    return _DownloadedRequest(
+        filename=filename,
+        raw=raw,
+        request_bytes_sha256=hashlib.sha256(raw.encode("utf-8")).hexdigest(),
+        download_s=round(time.monotonic() - started, 4),
+        download_transport=str(getattr(transport, "last_mode", "unknown")),
+    )
+
+
+def _validate_downloaded_request(downloaded: _DownloadedRequest) -> _ValidatedRequest:
+    obj = strict_json_loads(downloaded.raw.lstrip("\ufeff"))
+    if not isinstance(obj, dict):
+        raise BridgeError("request JSON must be an object")
+    _validate_request_identity(obj, downloaded.filename)
+    return _ValidatedRequest(downloaded=downloaded, obj=obj)
+
+
+def _plan_local_job(
+    registry: dict[str, Any],
+    request: _ValidatedRequest,
+) -> _LocalJob:
+    """Classify a validated envelope without changing execution semantics.
+
+    Valid repository references are canonicalised to the registry repository ID so
+    B2 can use one mutual-exclusion domain even when clients use different accepted
+    references. Invalid/missing references are left unkeyed and will fail through
+    the existing execution validation path before any repository mutation.
+    """
+    kind = request.obj.get("kind")
+    if kind in {"transaction", "materialize"}:
+        repo_ref = request.obj.get("repo")
+        scheduling_key: str | None = None
+        if isinstance(repo_ref, str) and repo_ref.strip():
+            repo_id, _entry = resolve_repo(registry, repo_ref)
+            scheduling_key = repo_id
+        return _LocalJob(
+            request=request,
+            kind=str(kind),
+            resource_class="repository",
+            scheduling_key=scheduling_key,
+        )
+    if kind in {"doctor", "diagnostics"}:
+        return _LocalJob(
+            request=request,
+            kind=str(kind),
+            resource_class="control",
+            scheduling_key=None,
+        )
+    return _LocalJob(
+        request=request,
+        kind=str(kind),
+        resource_class="invalid",
+        scheduling_key=None,
+    )
+
+
+def _prepare_transaction_worker_task(
+    cfg: dict[str, Any],
+    registry: dict[str, Any],
+    request: _ValidatedRequest,
+) -> _TransactionWorkerTask:
+    """Freeze all transaction inputs before handing work to a worker thread."""
+    obj = request.obj
+    repo_id, entry = resolve_repo(registry, obj.get("repo", ""))
+    commands_cfg = cfg.get("commands", {}).get(repo_id, {})
+    commands_json = json.dumps(commands_cfg, sort_keys=True, separators=(",", ":"), ensure_ascii=False)
+    return _TransactionWorkerTask(
+        filename=request.downloaded.filename,
+        request_raw=request.downloaded.raw,
+        repo_id=repo_id,
+        repo_path=Path(entry["path"]),
+        commands_json=commands_json,
+        safe_branch_prefix=str(cfg.get("safe_branch_prefix", "ai/")),
+        allow_commit=bool(cfg.get("allow_commit", True)),
+        allow_push=repo_id in {str(x) for x in cfg.get("push_enabled_repos", [])},
+    )
+
+
+def _run_transaction_worker(
+    task: _TransactionWorkerTask,
+    cancel_check: Callable[[], bool],
+) -> _TransactionWorkerOutcome:
+    """Execute only local Git/command work; never perform mailbox transport I/O."""
+    obj = strict_json_loads(task.request_raw.lstrip("\ufeff"))
+    if not isinstance(obj, dict):
+        raise BridgeError("request JSON must be an object")
+    _validate_request_identity(obj, task.filename)
+    outcome = process_transaction(
+        task.repo_path,
+        task.repo_id,
+        obj,
+        state_dir=STATE_DIR,
+        safe_branch_prefix=task.safe_branch_prefix,
+        commands=json.loads(task.commands_json),
+        allow_commit=task.allow_commit,
+        allow_push=task.allow_push,
+        cancel_check=cancel_check,
+    )
+    return _TransactionWorkerOutcome(dict(outcome.result), outcome.snapshot)
+
+
+def _publish_transaction_snapshot(
+    transport: RcloneTransport,
+    request: _ValidatedRequest,
+    outcome: _TransactionWorkerOutcome,
+) -> dict[str, Any]:
+    """Watcher-owned optional snapshot publication after local worker completion."""
+    result = dict(outcome.result)
+    if outcome.snapshot is None or not request.obj.get("publish_snapshot", False):
+        return result
+    branch = result["branch"]
+    repo_id = result["repo"]
+    snap_rel = f"{REMOTE_ROOT}/repos/{repo_id}/branches/{branch_token(branch)}/snapshot.json"
+    try:
+        transport.upload_json(
+            snap_rel,
+            outcome.snapshot,
+            STATE_DIR / "outbox" / f"snapshot-{repo_id}-{result['transaction_id']}.json",
+        )
+        result["snapshot"] = snap_rel
+    except Exception:
+        result["snapshot_error"] = "snapshot publication failed"
+    return result
+
+
+def _execute_validated_request(
+    cfg: dict[str, Any],
+    transport: RcloneTransport,
+    registry: dict[str, Any],
+    request: _ValidatedRequest,
+    *,
+    cancel_check: Callable[[], bool] | None,
+    scheduler: _LocalWorkerScheduler | None = None,
+) -> tuple[dict[str, Any], dict[str, Any]]:
+    """Execute one validated request synchronously and return updated registry state."""
+    obj = request.obj
+    filename = request.downloaded.filename
+    kind = obj.get("kind")
+
+    # Re-read the atomically-written registry immediately before repo-dependent
+    # dispatch so a concurrent local scan cannot leave queued work using stale paths.
+    if kind in {"materialize", "transaction"}:
+        registry = load_registry()
+
+    if kind == "materialize":
+        result = _process_materialize_request(cfg, registry, obj, filename)
+        registry = load_registry()
+    elif kind == "diagnostics":
+        result = _process_diagnostics_request(obj, filename)
+    elif kind == "doctor":
+        result = _process_doctor_request(cfg, obj, filename)
+    elif kind == "transaction":
+        worker_task = _prepare_transaction_worker_task(cfg, registry, request)
+        if scheduler is None:
+            worker_outcome = _run_transaction_worker(worker_task, cancel_check or (lambda: False))
+        else:
+            worker_outcome = scheduler.execute(worker_task)
+        result = _publish_transaction_snapshot(transport, request, worker_outcome)
+    else:
+        raise BridgeError(f"unsupported request kind: {kind!r}")
+    return result, registry
+
+
+def _build_signed_result(
+    filename: str,
+    result: dict[str, Any],
+    *,
+    downloaded: _DownloadedRequest | None,
+    poll: _TransactionPoll,
+    request_started: float,
+) -> dict[str, Any]:
+    """Bind execution outcome to exact input bytes and authenticate it."""
+    result = dict(result)
+    if downloaded is not None:
+        result["request_bytes_sha256"] = downloaded.request_bytes_sha256
+        download_s = downloaded.download_s
+        download_transport = downloaded.download_transport
+    else:
+        download_s = 0.0
+        download_transport = "none"
+    result["transport_timings"] = {
+        "transaction_list_s": poll.list_s,
+        "transaction_download_s": download_s,
+        "transaction_list_transport": poll.list_transport,
+        "transaction_download_transport": download_transport,
+        "pre_result_upload_s": round(time.monotonic() - request_started, 4),
+    }
+    return _sign_result(filename, result)
+
+
+def _persist_signed_result(filename: str, result: dict[str, Any]) -> Path:
+    """Persist the signed acknowledgement before any remote publication attempt."""
+    local_result = STATE_DIR / "results" / filename
+    save_json(local_result, result)
+    return local_result
+
+
+def _publish_and_cleanup_result(
+    transport: RcloneTransport,
+    filename: str,
+    result: dict[str, Any],
+    *,
+    poll: _TransactionPoll,
+    poll_started: float,
+    request_started: float,
+) -> None:
+    """Publish a durable result, acknowledge the request, then retire transient state."""
+    upload_started = time.monotonic()
+    transport.upload_control_json(
+        f"{REMOTE_ROOT}/results/{filename}",
+        result,
+        STATE_DIR / "outbox" / f"result-{filename}",
+    )
+    result_upload_s = round(time.monotonic() - upload_started, 4)
+    result_upload_transport = str(getattr(transport, "last_mode", "unknown"))
+    _mark_published(filename, source="processed", request_bytes_sha256=result.get("request_bytes_sha256"))
+    cleanup_status, cleanup_s, cleanup_transport = _cleanup_remote_request(transport, filename)
+    _cleanup_local_request_artifacts(filename)
+    _prune_local_results()
+    _prune_command_logs()
+    timings = result["transport_timings"]
+    _append_metric({
+        "event": "transaction",
+        "transaction_id": filename[:-5],
+        "transaction_list_s": poll.list_s,
+        "transaction_download_s": timings["transaction_download_s"],
+        "pre_result_upload_s": timings["pre_result_upload_s"],
+        "result_upload_s": result_upload_s,
+        "transaction_list_transport": poll.list_transport,
+        "transaction_download_transport": timings["transaction_download_transport"],
+        "result_upload_transport": result_upload_transport,
+        "request_cleanup_status": cleanup_status,
+        "request_cleanup_s": cleanup_s,
+        "request_cleanup_transport": cleanup_transport,
+        "request_total_s": round(time.monotonic() - request_started, 4),
+        "poll_total_s": round(time.monotonic() - poll_started, 4),
+        "recorded_at": utc_now(),
+    })
+
+
+def process_pending_once(
+    cfg: dict[str, Any],
+    *,
+    cancel_check: Callable[[], bool] | None = None,
+    scheduler: _LocalWorkerScheduler | None = None,
+) -> int:
+    """Run one synchronous mailbox cycle through explicit durable stages."""
+    transport = transport_from_config(cfg)
+    poll_started = time.monotonic()
+    poll = _poll_transaction_mailbox(transport)
+    classified = _classify_transaction_mailbox(transport, poll)
+
+    if not classified.candidates:
+        _idle_acknowledgement_maintenance(transport, classified.published)
+        return 0
+
+    processed, still_pending = _recover_durable_local_results(transport, classified.candidates)
     if not still_pending:
         return processed
 
-    if not REGISTRY_FILE.exists():
-        registry = refresh_registry(cfg, publish=True)
-    else:
-        registry = load_registry()
-
+    registry = _ensure_registry_for_dispatch(cfg)
     for filename in still_pending:
         request_started = time.monotonic()
-        tx_local = STATE_DIR / "inbox" / filename
-        local_result = STATE_DIR / "results" / filename
-        result: dict[str, Any]
-        transaction_download_s = 0.0
-        transaction_download_transport = "none"
+        downloaded: _DownloadedRequest | None = None
         try:
-            reported_size = tx_sizes.get(filename)
-            if reported_size is not None and reported_size > MAX_REQUEST_BYTES:
-                raise BridgeError("remote request exceeds maximum allowed size")
-
-            download_started = time.monotonic()
-            try:
-                raw = transport.download_text(
-                    f"{REMOTE_ROOT}/transactions/{filename}",
-                    tx_local,
-                    max_bytes=MAX_REQUEST_BYTES,
-                )
-            except TransientTransportError:
-                transaction_download_s = round(time.monotonic() - download_started, 4)
-                transaction_download_transport = str(getattr(transport, "last_mode", "unknown"))
-                tx_local.unlink(missing_ok=True)
-                _append_metric({
-                    "event": "transaction-download-retry",
-                    "transaction_id": filename[:-5],
-                    "transaction_list_s": transaction_list_s,
-                    "transaction_download_s": transaction_download_s,
-                    "transaction_list_transport": transaction_list_transport,
-                    "transaction_download_transport": transaction_download_transport,
-                    "poll_total_s": round(time.monotonic() - poll_started, 4),
-                    "recorded_at": utc_now(),
-                })
-                # No request bytes were available to validate. Publishing a signed
-                # terminal result here would turn a transient Drive/rclone failure
-                # into durable application state. Leave the inbox object untouched
-                # so a later poll can retry it safely.
+            downloaded = _download_remote_request(
+                transport,
+                filename,
+                reported_size=poll.size_for(filename),
+                poll=poll,
+                poll_started=poll_started,
+            )
+            if downloaded is None:
+                # A transient provider failure is not terminal application state.
                 continue
-            transaction_download_s = round(time.monotonic() - download_started, 4)
-            transaction_download_transport = str(getattr(transport, "last_mode", "unknown"))
-            obj = strict_json_loads(raw.lstrip("\ufeff"))
-            if not isinstance(obj, dict):
-                raise BridgeError("request JSON must be an object")
-            _validate_request_identity(obj, filename)
-            kind = obj.get("kind")
-
-            if kind == "materialize":
-                result = _process_materialize_request(cfg, registry, obj, filename)
-                registry = load_registry()
-            elif kind == "diagnostics":
-                result = _process_diagnostics_request(obj, filename)
-            elif kind == "doctor":
-                result = _process_doctor_request(cfg, obj, filename)
-            elif kind == "transaction":
-                repo_id, entry = resolve_repo(registry, obj.get("repo", ""))
-                commands = cfg.get("commands", {}).get(repo_id, {})
-                outcome = process_transaction(
-                    Path(entry["path"]),
-                    repo_id,
-                    obj,
-                    state_dir=STATE_DIR,
-                    safe_branch_prefix=str(cfg.get("safe_branch_prefix", "ai/")),
-                    commands=commands,
-                    allow_commit=bool(cfg.get("allow_commit", True)),
-                    allow_push=repo_id in {str(x) for x in cfg.get("push_enabled_repos", [])},
-                )
-                result = outcome.result
-                if outcome.snapshot is not None and obj.get("publish_snapshot", False):
-                    branch = result["branch"]
-                    snap_rel = f"{REMOTE_ROOT}/repos/{repo_id}/branches/{branch_token(branch)}/snapshot.json"
-                    try:
-                        transport.upload_json(
-                            snap_rel,
-                            outcome.snapshot,
-                            STATE_DIR / "outbox" / f"snapshot-{repo_id}-{result['transaction_id']}.json",
-                        )
-                        result["snapshot"] = snap_rel
-                    except Exception:
-                        # The Git commit already succeeded. Preserve that success and
-                        # report only the secondary snapshot-publication failure.
-                        result["snapshot_error"] = "snapshot publication failed"
-            else:
-                raise BridgeError(f"unsupported request kind: {kind!r}")
+            request = _validate_downloaded_request(downloaded)
+            job = _plan_local_job(registry, request)
+            result, registry = _execute_validated_request(
+                cfg,
+                transport,
+                registry,
+                job.request,
+                cancel_check=cancel_check,
+                scheduler=scheduler,
+            )
         except Exception as exc:
-            txid = filename[:-5]
             result = {
                 "protocol": PROTOCOL_VERSION,
                 "kind": "result",
-                "transaction_id": txid,
+                "transaction_id": filename[:-5],
                 "status": "error",
                 "processed_at": utc_now(),
                 "error": _public_error_message(exc),
             }
 
-        # Include timings knowable before acknowledgement in the durable result.
-        # The result-upload duration itself is recorded locally after upload completes.
-        result["transport_timings"] = {
-            "transaction_list_s": transaction_list_s,
-            "transaction_download_s": transaction_download_s,
-            "transaction_list_transport": transaction_list_transport,
-            "transaction_download_transport": transaction_download_transport,
-            "pre_result_upload_s": round(time.monotonic() - request_started, 4),
-        }
-
-        # Authenticate the acknowledgement before either local or remote storage.
-        # Mailbox writers can create files in results/, so startup replay recovery
-        # never trusts a result filename or unsigned object on its own.
-        result = _sign_result(filename, result)
-
-        # Durable local result first; remote acknowledgement second. If upload fails,
-        # the next poll republishes this result rather than re-executing the request.
-        save_json(local_result, result)
-        upload_started = time.monotonic()
-        transport.upload_control_json(
-            f"{REMOTE_ROOT}/results/{filename}",
+        result = _build_signed_result(
+            filename,
             result,
-            STATE_DIR / "outbox" / f"result-{filename}",
+            downloaded=downloaded,
+            poll=poll,
+            request_started=request_started,
         )
-        result_upload_s = round(time.monotonic() - upload_started, 4)
-        result_upload_transport = str(getattr(transport, "last_mode", "unknown"))
-        _mark_published(filename, source="processed")
-        cleanup_status, cleanup_s, cleanup_transport = _cleanup_remote_request(transport, filename)
-        _cleanup_local_request_artifacts(filename)
-        _prune_local_results()
-        _prune_command_logs()
-        _append_metric({
-            "event": "transaction",
-            "transaction_id": filename[:-5],
-            "transaction_list_s": transaction_list_s,
-            "transaction_download_s": transaction_download_s,
-            "pre_result_upload_s": result["transport_timings"]["pre_result_upload_s"],
-            "result_upload_s": result_upload_s,
-            "transaction_list_transport": transaction_list_transport,
-            "transaction_download_transport": transaction_download_transport,
-            "result_upload_transport": result_upload_transport,
-            "request_cleanup_status": cleanup_status,
-            "request_cleanup_s": cleanup_s,
-            "request_cleanup_transport": cleanup_transport,
-            "request_total_s": round(time.monotonic() - request_started, 4),
-            "poll_total_s": round(time.monotonic() - poll_started, 4),
-            "recorded_at": utc_now(),
-        })
+        _persist_signed_result(filename, result)
+        _publish_and_cleanup_result(
+            transport,
+            filename,
+            result,
+            poll=poll,
+            poll_started=poll_started,
+            request_started=request_started,
+        )
         processed += 1
     return processed
 
@@ -1095,12 +1788,16 @@ def _ensure_watch_rcd(cfg: dict[str, Any], handle: RcloneRCProcess | None) -> Rc
 def cmd_watch(args: argparse.Namespace) -> int:
     lock_fh = _acquire_watch_lock()
     rc_handle: RcloneRCProcess | None = None
+    scheduler: _LocalWorkerScheduler | None = None
     try:
         cfg = load_config()
         rc_handle = _start_watch_rcd(cfg)
+        scheduler = _LocalWorkerScheduler(max_workers=1, queue_capacity=1)
+        scheduler.start()
         if args.once:
             reconcile_remote_results(cfg)
-            count = process_pending_once(cfg)
+            reconcile_local_acknowledged_artifacts()
+            count = process_pending_once(cfg, scheduler=scheduler)
             print(f"processed: {count}")
             return 0
         interval_value = args.interval if args.interval is not None else cfg.get("poll_interval", 1.0)
@@ -1112,6 +1809,8 @@ def cmd_watch(args: argparse.Namespace) -> int:
         def handle_stop(_sig: int, _frame: Any) -> None:
             nonlocal stop
             stop = True
+            if scheduler is not None:
+                scheduler.request_cancel()
 
         signal.signal(signal.SIGTERM, handle_stop)
         signal.signal(signal.SIGINT, handle_stop)
@@ -1124,10 +1823,18 @@ def cmd_watch(args: argparse.Namespace) -> int:
                 rc_handle = _ensure_watch_rcd(current_cfg, rc_handle)
                 if not reconciled:
                     marked = reconcile_remote_results(current_cfg)
+                    cleaned = reconcile_local_acknowledged_artifacts()
                     reconciled = True
-                    if marked:
-                        print(f"startup reconciliation: {marked} marker(s)", flush=True)
-                count = process_pending_once(current_cfg)
+                    if marked or cleaned:
+                        print(
+                            f"startup reconciliation: {marked} marker(s), {cleaned} local cleanup(s)",
+                            flush=True,
+                        )
+                count = process_pending_once(
+                    current_cfg,
+                    cancel_check=lambda: stop,
+                    scheduler=scheduler,
+                )
                 if count:
                     print(f"processed: {count}", flush=True)
             except Exception as exc:
@@ -1137,6 +1844,8 @@ def cmd_watch(args: argparse.Namespace) -> int:
                 time.sleep(min(0.1, max(0.0, deadline - time.monotonic())))
         return 0
     finally:
+        if scheduler is not None:
+            scheduler.shutdown(cancel_running=True)
         if rc_handle is not None:
             rc_handle.stop()
         _release_watch_lock(lock_fh)
@@ -1205,8 +1914,17 @@ def cmd_daemon(args: argparse.Namespace) -> int:
     if args.action == "restart":
         if not PLIST_PATH.exists():
             raise BridgeError("daemon is not installed")
-        _launchctl("kickstart", "-k", f"{domain}/{LABEL}")
-        print("daemon restarted")
+        # Ask the running job to unwind cleanly. KeepAlive=true causes launchd to
+        # start a replacement after the SIGTERM handler exits. This avoids the
+        # force-kill-first semantics of `kickstart -k`, which can strand a
+        # configured-command process group if the daemon dies mid-command. If the
+        # job is already stopped, first try to kickstart a loaded service and then
+        # bootstrap the plist if it is no longer registered with launchd.
+        service = f"{domain}/{LABEL}"
+        if _launchctl("kill", "SIGTERM", service, check=False) != 0:
+            if _launchctl("kickstart", service, check=False) != 0:
+                _launchctl("bootstrap", domain, str(PLIST_PATH))
+        print("daemon restart requested")
         return 0
     raise BridgeError(f"unknown daemon action: {args.action}")
 
