@@ -13,7 +13,7 @@ import time
 from dataclasses import dataclass
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import Any, Iterable
+from typing import Any, Callable, Iterable
 
 PROTOCOL_VERSION = 2
 DEFAULT_MAX_FILE_BYTES = 1_000_000
@@ -74,7 +74,28 @@ SENSITIVE_ENV_EXACT = {
 COMMAND_OUTPUT_LIMIT = 256_000
 BRIDGE_TX_TRAILER = "LLM-Git-Bridge-Transaction"
 BRIDGE_REQUEST_HASH_TRAILER = "LLM-Git-Bridge-Request-SHA256"
-
+BRIDGE_TX_CLAIM_REF_PREFIX = "refs/llm-git-bridge/transactions/"
+GIT_ENVIRONMENT_OVERRIDES = {
+    "GIT_DIR",
+    "GIT_WORK_TREE",
+    "GIT_INDEX_FILE",
+    "GIT_OBJECT_DIRECTORY",
+    "GIT_ALTERNATE_OBJECT_DIRECTORIES",
+    "GIT_COMMON_DIR",
+    "GIT_NAMESPACE",
+    "GIT_CEILING_DIRECTORIES",
+    "GIT_DISCOVERY_ACROSS_FILESYSTEM",
+    "GIT_IMPLICIT_WORK_TREE",
+    "GIT_LITERAL_PATHSPECS",
+    "GIT_GLOB_PATHSPECS",
+    "GIT_NOGLOB_PATHSPECS",
+    "GIT_ICASE_PATHSPECS",
+    "GIT_ATTR_SOURCE",
+    "GIT_NO_REPLACE_OBJECTS",
+    "GIT_CONFIG_COUNT",
+    "GIT_CONFIG_PARAMETERS",
+}
+GIT_ENVIRONMENT_OVERRIDE_PREFIXES = ("GIT_CONFIG_KEY_", "GIT_CONFIG_VALUE_")
 
 
 class BridgeError(RuntimeError):
@@ -93,6 +114,9 @@ def run(
     timeout: float | None = 60,
     env: dict[str, str] | None = None,
 ) -> subprocess.CompletedProcess[str]:
+    effective_env = env
+    if argv and Path(argv[0]).name == "git":
+        effective_env = _git_environment(env)
     try:
         proc = subprocess.run(
             argv,
@@ -101,7 +125,7 @@ def run(
             stdout=subprocess.PIPE,
             stderr=subprocess.PIPE,
             timeout=timeout,
-            env=env,
+            env=effective_env,
         )
     except subprocess.TimeoutExpired as exc:
         raise BridgeError(f"command timed out after {timeout}s") from exc
@@ -110,6 +134,23 @@ def run(
     if check and proc.returncode != 0:
         raise BridgeError(f"command failed with exit code {proc.returncode}")
     return proc
+
+
+def _is_git_environment_override(name: str) -> bool:
+    upper = name.upper()
+    return upper in GIT_ENVIRONMENT_OVERRIDES or upper.startswith(GIT_ENVIRONMENT_OVERRIDE_PREFIXES)
+
+
+def _git_environment(source: dict[str, str] | None = None) -> dict[str, str]:
+    env = dict(os.environ if source is None else source)
+    for key in list(env):
+        if _is_git_environment_override(key):
+            env.pop(key, None)
+    # Replacement refs rewrite object contents transparently for most Git
+    # commands. Bridge identity, parent, and tree verification must always read
+    # the actual object named by the OID, not refs/replace substitutions.
+    env["GIT_NO_REPLACE_OBJECTS"] = "1"
+    return env
 
 
 def git(repo: Path, *args: str, check: bool = True, timeout: float | None = 60) -> subprocess.CompletedProcess[str]:
@@ -144,13 +185,29 @@ def strict_json_loads(text: str) -> Any:
         raise BridgeError(f"invalid JSON constant: {value}")
 
     try:
-        return json.loads(
+        obj = json.loads(
             text,
             object_pairs_hook=reject_duplicates,
             parse_constant=reject_constant,
         )
     except json.JSONDecodeError as exc:
         raise BridgeError(f"invalid JSON: {exc.msg}") from exc
+
+    # Python's JSON decoder accepts escaped lone UTF-16 surrogate code units.
+    # They are not valid Unicode scalar values and later UTF-8 encoding can fail
+    # outside the normal BridgeError path. Reject them deterministically here.
+    stack = [obj]
+    while stack:
+        value = stack.pop()
+        if isinstance(value, str):
+            if any(0xD800 <= ord(ch) <= 0xDFFF for ch in value):
+                raise BridgeError("invalid Unicode surrogate in JSON string")
+        elif isinstance(value, dict):
+            stack.extend(value.keys())
+            stack.extend(value.values())
+        elif isinstance(value, list):
+            stack.extend(value)
+    return obj
 
 
 def load_json(path: Path) -> dict[str, Any]:
@@ -202,7 +259,7 @@ def path_fingerprint(path: Path) -> str:
 
 
 def is_git_repo(path: Path) -> bool:
-    p = run(["git", "-C", str(path), "rev-parse", "--is-inside-work-tree"], check=False, timeout=10)
+    p = git(path, "rev-parse", "--is-inside-work-tree", check=False, timeout=10)
     return p.returncode == 0 and p.stdout.strip() == "true"
 
 
@@ -581,19 +638,29 @@ def validate_transaction(obj: dict[str, Any], *, safe_branch_prefix: str, max_pa
     return obj
 
 
-def _bridge_commit_details(
+def _bridge_commit_record(
     repo: Path,
     commit: str,
-) -> tuple[str, tuple[str, str] | None, list[str]]:
-    """Return resolved OID, authenticated bridge identity, and parents in one Git process."""
-    raw = git(repo, "show", "-s", "--format=%H%x00%P%x00%B", commit, timeout=30).stdout
-    resolved, separator, remainder = raw.partition("\x00")
+) -> tuple[str, str, tuple[str, str] | None, list[str]]:
+    """Read one raw commit object without revision replacement/graft semantics."""
+    commit_oid = commit.strip().lower()
+    if not re.fullmatch(r"[0-9a-f]{40,64}", commit_oid):
+        return "", "", None, []
+    raw = git(repo, "cat-file", "commit", commit_oid, timeout=30).stdout
+    headers, separator, body = raw.partition("\n\n")
     if not separator:
-        return "", None, []
-    parents_text, separator, body = remainder.partition("\x00")
-    if not separator:
-        return "", None, []
-    parents = parents_text.split()
+        return "", "", None, []
+    tree = ""
+    parents: list[str] = []
+    for line in headers.splitlines():
+        if line.startswith("tree "):
+            tree = line[5:].strip().lower()
+        elif line.startswith("parent "):
+            parents.append(line[7:].strip().lower())
+    if not re.fullmatch(r"[0-9a-f]{40,64}", tree):
+        return commit_oid, "", None, parents
+    if any(not re.fullmatch(r"[0-9a-f]{40,64}", parent) for parent in parents):
+        return commit_oid, tree, None, []
     tx_matches = re.findall(
         rf"(?im)^{re.escape(BRIDGE_TX_TRAILER)}:\s*([^\s]+)\s*$",
         body,
@@ -603,12 +670,21 @@ def _bridge_commit_details(
         body,
     )
     if len(tx_matches) != 1 or len(hash_matches) != 1:
-        return resolved.strip().lower(), None, parents
+        return commit_oid, tree, None, parents
     try:
         txid = validate_transaction_id(tx_matches[0])
     except BridgeError:
-        return resolved.strip().lower(), None, parents
-    return resolved.strip().lower(), (txid, hash_matches[0]), parents
+        return commit_oid, tree, None, parents
+    return commit_oid, tree, (txid, hash_matches[0]), parents
+
+
+def _bridge_commit_details(
+    repo: Path,
+    commit: str,
+) -> tuple[str, tuple[str, str] | None, list[str]]:
+    """Return resolved OID, authenticated bridge identity, and parents in one Git process."""
+    resolved, _tree, identity, parents = _bridge_commit_record(repo, commit)
+    return resolved, identity, parents
 
 
 def _bridge_commit_metadata(
@@ -632,35 +708,120 @@ def _bridge_commit_matches_request(
     txid: str,
     request_hash: str,
     base_sha: str,
+    expected_tree: str | None = None,
 ) -> bool:
-    identity, parents = _bridge_commit_metadata(repo, commit)
+    resolved, tree, identity, parents = _bridge_commit_record(repo, commit)
     return (
-        identity == (txid, request_hash)
+        resolved == commit.lower()
+        and identity == (txid, request_hash)
         and len(parents) == 1
         and parents[0].lower() == base_sha.lower()
+        and (expected_tree is None or tree == expected_tree.lower())
     )
+
+
+def _exact_direct_ref_oid(
+    repo: Path,
+    ref: str,
+    *,
+    description: str,
+) -> str | None:
+    """Return an exact direct ref OID and reject symbolic-ref aliases.
+
+    `git update-ref` dereferences symbolic refs by default.  Any ref used as a
+    bridge mutation boundary must therefore be proven to be the exact direct
+    ref we intend to mutate, rather than a safe-looking alias to some other
+    namespace.  `for-each-ref` exposes both the object name and `%(symref)` in
+    one Git process; exact refname comparison also prevents prefix matches.
+    """
+    proc = git(
+        repo,
+        "for-each-ref",
+        "--format=%(refname)%00%(objectname)%00%(symref)",
+        ref,
+        timeout=30,
+    )
+    records = [line for line in proc.stdout.splitlines() if line]
+    exact: list[tuple[str, str, str]] = []
+    for line in records:
+        parts = line.split("\0")
+        if len(parts) != 3:
+            raise BridgeError(f"could not parse {description}")
+        refname, oid, symref = parts
+        if refname == ref:
+            exact.append((refname, oid.lower(), symref))
+    if not exact:
+        return None
+    if len(exact) != 1:
+        raise BridgeError(f"ambiguous {description}")
+    _refname, oid, symref = exact[0]
+    if symref:
+        raise BridgeError(f"symbolic {description} is not allowed")
+    if not re.fullmatch(r"[0-9a-f]{40,64}", oid):
+        raise BridgeError(f"could not parse {description}")
+    return oid
 
 
 def branch_tip(repo: Path, branch: str) -> str | None:
-    """Return the exact local branch OID, or None when the branch does not exist."""
-    proc = git(
+    """Return the exact direct local branch OID, or None when absent."""
+    return _exact_direct_ref_oid(
         repo,
-        "show-ref",
-        "--verify",
-        "--hash",
         f"refs/heads/{branch}",
-        check=False,
-        timeout=30,
+        description="local branch ref",
     )
-    if proc.returncode == 0:
-        oid = proc.stdout.strip().lower()
-        if not re.fullmatch(r"[0-9a-f]{40,64}", oid):
-            raise BridgeError("could not parse local branch tip")
-        return oid
-    # `show-ref --verify` returns a non-zero status for a missing exact ref;
-    # Git versions differ in the precise status value. Preserve the boolean
-    # missing-ref semantics while obtaining the OID on success.
-    return None
+
+
+def _transaction_claim_ref(txid: str) -> str:
+    # validate_transaction_id already restricts txids to one safe ref component.
+    return f"{BRIDGE_TX_CLAIM_REF_PREFIX}{txid}"
+
+
+def _read_transaction_claim(repo: Path, txid: str) -> str | None:
+    ref = _transaction_claim_ref(txid)
+    oid = _exact_direct_ref_oid(
+        repo,
+        ref,
+        description="transaction identity claim ref",
+    )
+    if oid is None:
+        return None
+    payload = git(repo, "cat-file", "blob", oid, timeout=30).stdout.strip()
+    if not re.fullmatch(r"[0-9a-f]{64}", payload):
+        raise BridgeError("transaction identity claim is malformed")
+    return payload
+
+
+def _create_transaction_claim(
+    repo: Path,
+    txid: str,
+    request_hash: str,
+    *,
+    state_dir: Path,
+) -> None:
+    claim_path = state_dir / "transactions" / txid / "request-sha256"
+    atomic_write_text(claim_path, request_hash + "\n")
+    oid = git(
+        repo,
+        "hash-object",
+        "-w",
+        "--no-filters",
+        str(claim_path),
+        timeout=30,
+    ).stdout.strip().lower()
+    if not re.fullmatch(r"[0-9a-f]{40,64}", oid):
+        raise BridgeError("could not create transaction identity object")
+    ref = _transaction_claim_ref(txid)
+    created = git(repo, "update-ref", "--no-deref", ref, oid, "", check=False, timeout=30)
+    if created.returncode == 0:
+        return
+    # Another retry/process may have won the compare-and-create race. Accept only
+    # the identical request claim; never overwrite a conflicting identity.
+    existing = _read_transaction_claim(repo, txid)
+    if existing == request_hash:
+        return
+    if existing is not None:
+        raise BridgeError("transaction_id was already claimed by a different request")
+    raise BridgeError("could not create transaction identity claim")
 
 
 def ensure_tracked_clean(repo: Path) -> str:
@@ -855,6 +1016,8 @@ def _command_environment(command_workspace: Path, private_home: Path | None = No
         upper = key.upper()
         if upper in SENSITIVE_ENV_EXACT:
             continue
+        if _is_git_environment_override(upper):
+            continue
         if upper.startswith(SENSITIVE_ENV_PREFIXES):
             continue
         if SENSITIVE_ENV_NAME_RE.search(upper):
@@ -946,6 +1109,7 @@ class ConfiguredCommandResult:
     stdout: str
     stderr: str
     timed_out: bool = False
+    cancelled: bool = False
 
 
 def _bounded_append(buf: bytearray, data: bytes, limit: int) -> None:
@@ -963,6 +1127,7 @@ def run_configured_command(
     env: dict[str, str],
     timeout: float,
     output_limit: int = COMMAND_OUTPUT_LIMIT,
+    cancel_check: Callable[[], bool] | None = None,
 ) -> ConfiguredCommandResult:
     """Run a locally configured command with bounded captured output.
 
@@ -1014,16 +1179,22 @@ def run_configured_command(
 
     deadline = time.monotonic() + max(0.1, float(timeout))
     timed_out = False
+    cancelled = False
     try:
         while proc.poll() is None:
+            if cancel_check is not None and cancel_check():
+                cancelled = True
+                break
             remaining = deadline - time.monotonic()
             if remaining <= 0:
                 timed_out = True
                 break
             drain_once(min(0.1, remaining))
 
-        # The main process is finished (or timed out), but children may remain in
-        # the isolated process group. Always retire that group.
+        # The main process is finished (or was cancelled/timed out), but children
+        # may remain in the isolated process group. Always retire that group. A
+        # daemon-stop cancellation gets a brief SIGTERM grace period; timeouts are
+        # already overdue and are killed immediately.
         if timed_out:
             try:
                 os.killpg(proc.pid, signal.SIGKILL)
@@ -1053,6 +1224,15 @@ def run_configured_command(
         while selector.get_map() and time.monotonic() < drain_deadline:
             drain_once(0.05)
     finally:
+        if proc.poll() is None:
+            try:
+                os.killpg(proc.pid, signal.SIGKILL)
+            except OSError:
+                pass
+            try:
+                proc.wait(timeout=2)
+            except Exception:
+                pass
         selector.close()
         proc.stdout.close()
         proc.stderr.close()
@@ -1060,7 +1240,9 @@ def run_configured_command(
     buffers = list(streams.values())
     stdout = bytes(buffers[0][1]).decode("utf-8", errors="replace")
     stderr = bytes(buffers[1][1]).decode("utf-8", errors="replace")
-    return ConfiguredCommandResult(returncode=returncode, stdout=stdout, stderr=stderr, timed_out=timed_out)
+    return ConfiguredCommandResult(
+        returncode=returncode, stdout=stdout, stderr=stderr, timed_out=timed_out, cancelled=cancelled
+    )
 
 
 def _write_command_log(
@@ -1093,6 +1275,7 @@ def process_transaction(
     commands: dict[str, list[str]] | None = None,
     allow_commit: bool = True,
     allow_push: bool = False,
+    cancel_check: Callable[[], bool] | None = None,
 ) -> TransactionOutcome:
     started = time.monotonic()
     timings: dict[str, float] = {}
@@ -1109,6 +1292,9 @@ def process_transaction(
     request_hash = transaction_request_sha256(tx)
     repo = repo.resolve()
     current_head = ensure_tracked_clean(repo)
+    transaction_claim = _read_transaction_claim(repo, txid)
+    if transaction_claim is not None and transaction_claim != request_hash:
+        raise BridgeError("transaction_id was already claimed by a different request")
 
     push_requested = bool(tx.get("push", False))
     publish_snapshot_requested = bool(tx.get("publish_snapshot", False))
@@ -1143,6 +1329,14 @@ def process_transaction(
     if recovered_commit is None and push_requested and not allow_push:
         raise BridgeError("push requested but is not enabled locally for this repository")
 
+    if transaction_claim is None:
+        _create_transaction_claim(
+            repo,
+            txid,
+            request_hash,
+            state_dir=state_dir,
+        )
+
     worktrees = state_dir / "worktrees"
     worktrees.mkdir(parents=True, exist_ok=True)
     wt = worktrees / txid
@@ -1152,12 +1346,27 @@ def process_transaction(
     retire_worktree(repo, wt)
 
     t = time.monotonic()
-    created_new_branch = not existing
     commit_created = recovered_commit is not None
-    if existing:
+    if recovered_commit is not None:
+        # Recovery no longer needs to mutate the target branch, so a detached
+        # worktree avoids interfering with a user who checked out the durable
+        # bridge commit after the previous daemon died.
+        add_disposable_worktree(repo, "--detach", str(wt), recovered_commit)
+        worktree_head_ref = ""
+    elif existing:
+        # Attach an existing target branch while building the transaction. Git
+        # refuses this when that branch is checked out in another worktree, which
+        # preserves its checked-out-branch safety guard. The eventual ref update
+        # still uses compare-and-swap below, so an external ref move cannot be
+        # overwritten between validation and publication.
         add_disposable_worktree(repo, str(wt), branch)
+        worktree_head_ref = f"refs/heads/{branch}"
     else:
-        add_disposable_worktree(repo, "-b", branch, str(wt), base_sha)
+        # Do not create a new branch until the patch/tests have succeeded. A
+        # detached worktree plus update-ref(..., old="") makes branch creation
+        # atomic and fails if another actor creates the branch first.
+        add_disposable_worktree(repo, "--detach", str(wt), base_sha)
+        worktree_head_ref = ""
     t = mark("worktree_create_s", t)
 
     snapshot: dict[str, Any] | None = None
@@ -1196,14 +1405,14 @@ def process_transaction(
                 raise BridgeError("patch produced no changes")
             t = mark("patch_apply_s", t)
 
+            staged_tree = git(wt, "write-tree", timeout=30).stdout.strip()
             allowed_commands = commands or {}
             command_state: dict[str, str] | None = None
             if tx.get("run"):
-                staged_tree = git(wt, "write-tree", timeout=30).stdout.strip()
                 command_state = _repo_control_state(
                     wt,
                     known_head=base_sha,
-                    known_head_ref=f"refs/heads/{branch}",
+                    known_head_ref=worktree_head_ref,
                     known_index_tree=staged_tree,
                 )
                 command_workspace, command_home = _prepare_command_workspace(wt, state_dir, txid)
@@ -1221,6 +1430,7 @@ def process_transaction(
                     cwd=command_workspace,
                     timeout=600,
                     env=_command_environment(command_workspace, command_home),
+                    cancel_check=cancel_check,
                 )
                 _write_command_log(state_dir, txid, index, name, proc)
                 command_results.append(
@@ -1230,6 +1440,8 @@ def process_transaction(
                         "duration_s": round(time.monotonic() - command_started, 4),
                     }
                 )
+                if proc.cancelled:
+                    raise BridgeError(f"configured command cancelled: {name}")
                 if proc.timed_out:
                     raise BridgeError(f"configured command timed out: {name}")
                 if proc.returncode != 0:
@@ -1243,16 +1455,15 @@ def process_transaction(
                 f"{BRIDGE_TX_TRAILER}: {txid}\n"
                 f"{BRIDGE_REQUEST_HASH_TRAILER}: {request_hash}"
             )
-            run(
+            commit_proc = run(
                 [
                     "git",
                     "-C",
                     str(wt),
-                    "-c",
-                    "core.hooksPath=/dev/null",
-                    "-c",
-                    "commit.gpgSign=false",
-                    "commit",
+                    "commit-tree",
+                    staged_tree,
+                    "-p",
+                    base_sha,
                     "-m",
                     message,
                     "-m",
@@ -1260,14 +1471,44 @@ def process_transaction(
                 ],
                 timeout=120,
             )
-            commit_created = True
-            commit_sha, identity, parents = _bridge_commit_details(wt, "HEAD")
-            if not (
-                identity == (txid, request_hash)
-                and len(parents) == 1
-                and parents[0].lower() == base_sha
+            commit_sha = commit_proc.stdout.strip().lower()
+            if not re.fullmatch(r"[0-9a-f]{40,64}", commit_sha):
+                raise BridgeError("git commit-tree returned an invalid commit object id")
+            if not _bridge_commit_matches_request(
+                repo,
+                commit_sha,
+                txid=txid,
+                request_hash=request_hash,
+                base_sha=base_sha,
+                expected_tree=staged_tree,
             ):
-                raise BridgeError("bridge commit identity invariant failed")
+                raise BridgeError("commit object verification failed")
+
+            # Publish the commit with a ref-level compare-and-swap. For an existing
+            # branch the old value must still be the declared base; for a new branch
+            # an empty old oid requires that the ref still not exist. This closes the
+            # validation-to-commit race without widening the trusted state surface.
+            target_ref = f"refs/heads/{branch}"
+            expected_old = base_sha if existing else ""
+            update_proc = run(
+                [
+                    "git",
+                    "-C",
+                    str(repo),
+                    "update-ref",
+                    "--no-deref",
+                    "-m",
+                    f"llm-git-bridge transaction {txid}",
+                    target_ref,
+                    commit_sha,
+                    expected_old,
+                ],
+                check=False,
+                timeout=60,
+            )
+            if update_proc.returncode != 0:
+                raise BridgeError("target branch changed before commit publication")
+            commit_created = True
             t = mark("commit_s", t)
 
         push_result: dict[str, Any] | None = None
@@ -1298,7 +1539,7 @@ def process_transaction(
                             "push",
                             "--porcelain",
                             "origin",
-                            f"{ref}:{ref}",
+                            f"{commit_sha}:{ref}",
                         ],
                         check=False,
                         timeout=120,
@@ -1335,7 +1576,23 @@ def process_transaction(
         snapshot_error = False
         if publish_snapshot_requested:
             try:
+                if not existing:
+                    # A new target branch is published from a detached worktree.
+                    # commit-tree creates the durable commit without moving that
+                    # worktree's detached HEAD, so advance only the disposable
+                    # worktree before snapshotting. The index/worktree already
+                    # match commit_sha; reset makes snapshot metadata describe the
+                    # exact durable commit rather than the old base.
+                    reset = git(wt, "reset", "--hard", commit_sha, check=False, timeout=60)
+                    if reset.returncode != 0:
+                        raise BridgeError("could not prepare committed snapshot worktree")
                 snapshot = build_snapshot(wt, repo_id)
+                if snapshot.get("head") != commit_sha or snapshot.get("dirty"):
+                    raise BridgeError("committed snapshot state is inconsistent")
+                # Recovered commits use a detached worktree and therefore have no
+                # symbolic branch name. The snapshot represents the transaction's
+                # durable target branch, so bind that logical identity explicitly.
+                snapshot["branch"] = branch
             except Exception:
                 # Snapshotting is secondary to the already-created commit. Do not
                 # expose filesystem or command details in a remote result.
@@ -1372,5 +1629,3 @@ def process_transaction(
             shutil.rmtree(command_workspace, ignore_errors=True)
         if command_home is not None:
             shutil.rmtree(command_home, ignore_errors=True)
-        if created_new_branch and not commit_created:
-            git(repo, "branch", "-D", branch, check=False, timeout=60)

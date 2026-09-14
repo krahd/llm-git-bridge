@@ -165,6 +165,7 @@ Read [docs/security.md](docs/security.md) before enabling push or running valida
 - [Concurrency and multiple clients](docs/concurrency.md)
 - [Performance](docs/performance.md)
 - [Architecture](docs/architecture.md)
+- [Transaction state machine](docs/transaction-state-machine.md)
 - [Protocol v2](docs/protocol.md)
 - [Security model](docs/security.md)
 - [Google Drive OAuth migration](docs/google-drive-oauth.md)

@@ -16,7 +16,7 @@ import sys
 import tempfile
 import time
 from pathlib import Path
-from typing import Any
+from typing import Any, Callable
 
 from .core import (
     BridgeError,
@@ -249,7 +249,12 @@ def refresh_repo_entry(cfg: dict[str, Any], repo_ref: str, *, publish: bool = Tr
     return registry, repo_id, entry
 
 
-def materialize(cfg: dict[str, Any], repo_ref: str, *, branch_snapshot: tuple[Path, str] | None = None) -> str:
+def _materialize_with_snapshot(
+    cfg: dict[str, Any],
+    repo_ref: str,
+    *,
+    branch_snapshot: tuple[Path, str] | None = None,
+) -> tuple[str, dict[str, Any]]:
     registry = load_registry()
     repo_id, entry = resolve_repo(registry, repo_ref)
     repo_path = branch_snapshot[0] if branch_snapshot else Path(entry["path"])
@@ -262,15 +267,64 @@ def materialize(cfg: dict[str, Any], repo_ref: str, *, branch_snapshot: tuple[Pa
         remote_rel = f"{REMOTE_ROOT}/repos/{repo_id}/snapshot.json"
     transport = transport_from_config(cfg)
     transport.upload_json(remote_rel, snapshot, STATE_DIR / "outbox" / f"snapshot-{repo_id}.json")
-    return remote_rel
+    return remote_rel, snapshot
+
+
+def materialize(cfg: dict[str, Any], repo_ref: str, *, branch_snapshot: tuple[Path, str] | None = None) -> str:
+    return _materialize_with_snapshot(cfg, repo_ref, branch_snapshot=branch_snapshot)[0]
 
 
 def _published_marker(filename: str) -> Path:
     return PUBLISHED_DIR / filename
 
 
-def _mark_published(filename: str, *, source: str) -> None:
-    save_json(_published_marker(filename), {"filename": filename, "published_at": utc_now(), "source": source})
+def _quarantine_corrupt_marker(filename: str, marker_path: Path) -> None:
+    quarantine_dir = STATE_DIR / "corrupt-markers"
+    quarantine_dir.mkdir(parents=True, exist_ok=True, mode=0o700)
+    try:
+        os.chmod(quarantine_dir, 0o700)
+    except OSError:
+        pass
+    try:
+        os.replace(marker_path, quarantine_dir / filename)
+    except OSError:
+        marker_path.unlink(missing_ok=True)
+    _append_metric({
+        "event": "publication-marker-quarantined",
+        "transaction_id": filename[:-5],
+        "recorded_at": utc_now(),
+    })
+
+
+def _load_published_marker(filename: str) -> dict[str, Any] | None:
+    marker_path = _published_marker(filename)
+    if not marker_path.exists():
+        return None
+    try:
+        marker = load_json(marker_path)
+    except BridgeError:
+        _quarantine_corrupt_marker(filename, marker_path)
+        return None
+    request_bytes_sha256 = marker.get("request_bytes_sha256")
+    if (
+        marker.get("filename") != filename
+        or not isinstance(marker.get("published_at"), str)
+        or not isinstance(marker.get("source"), str)
+        or (
+            request_bytes_sha256 is not None
+            and (not isinstance(request_bytes_sha256, str) or not re.fullmatch(r"[0-9a-f]{64}", request_bytes_sha256))
+        )
+    ):
+        _quarantine_corrupt_marker(filename, marker_path)
+        return None
+    return marker
+
+
+def _mark_published(filename: str, *, source: str, request_bytes_sha256: str | None = None) -> None:
+    marker: dict[str, Any] = {"filename": filename, "published_at": utc_now(), "source": source}
+    if request_bytes_sha256 is not None:
+        marker["request_bytes_sha256"] = request_bytes_sha256
+    save_json(_published_marker(filename), marker)
 
 
 def _validate_request_identity(obj: dict[str, Any], filename: str) -> str:
@@ -360,7 +414,31 @@ def _sign_result(filename: str, result: dict[str, Any]) -> dict[str, Any]:
     return signed
 
 
+def _result_identity_is_valid(filename: str, result: dict[str, Any]) -> bool:
+    txid = result.get("transaction_id")
+    if not isinstance(txid, str) or not TX_FILENAME_RE.fullmatch(filename):
+        return False
+    if f"{txid}.json" != filename:
+        return False
+    if result.get("status") not in {"success", "error"}:
+        return False
+    protocol = result.get("protocol")
+    if protocol is not None and protocol != PROTOCOL_VERSION:
+        return False
+    kind = result.get("kind")
+    if kind is not None and kind != "result":
+        return False
+    request_bytes_sha256 = result.get("request_bytes_sha256")
+    if request_bytes_sha256 is not None and (
+        not isinstance(request_bytes_sha256, str) or not re.fullmatch(r"[0-9a-f]{64}", request_bytes_sha256)
+    ):
+        return False
+    return True
+
+
 def _verify_result(filename: str, result: dict[str, Any]) -> bool:
+    if not _result_identity_is_valid(filename, result):
+        return False
     auth = result.get("bridge_auth")
     if not isinstance(auth, dict) or auth.get("alg") != RESULT_AUTH_ALG:
         return False
@@ -371,7 +449,7 @@ def _verify_result(filename: str, result: dict[str, Any]) -> bool:
     return hmac.compare_digest(tag, expected)
 
 
-def _remote_result_is_authentic(transport: RcloneTransport, filename: str) -> bool:
+def _load_authentic_remote_result(transport: RcloneTransport, filename: str) -> dict[str, Any] | None:
     tmp = STATE_DIR / "reconcile" / filename
     try:
         raw = transport.download_text(
@@ -380,11 +458,17 @@ def _remote_result_is_authentic(transport: RcloneTransport, filename: str) -> bo
             max_bytes=MAX_RESULT_BYTES,
         )
         obj = strict_json_loads(raw.lstrip("\ufeff"))
-        return isinstance(obj, dict) and _verify_result(filename, obj)
+        if isinstance(obj, dict) and _verify_result(filename, obj):
+            return obj
     except Exception:
-        return False
+        return None
     finally:
         tmp.unlink(missing_ok=True)
+    return None
+
+
+def _remote_result_is_authentic(transport: RcloneTransport, filename: str) -> bool:
+    return _load_authentic_remote_result(transport, filename) is not None
 
 
 def _public_error_message(exc: Exception) -> str:
@@ -537,9 +621,9 @@ def _process_materialize_request(cfg: dict[str, Any], registry: dict[str, Any], 
 
     if branch is None:
         registry, repo_id, entry = refresh_repo_entry(cfg, repo_id, publish=True)
-        snapshot_rel = materialize(cfg, repo_id)
-        head = entry["head"]
-        branch_name = entry["branch"]
+        snapshot_rel, snapshot = _materialize_with_snapshot(cfg, repo_id)
+        head = snapshot["head"]
+        branch_name = snapshot["branch"]
     else:
         branch_name = validate_safe_branch_name(branch, str(cfg.get("safe_branch_prefix", "ai/")))
         repo_path = Path(entry["path"])
@@ -550,8 +634,12 @@ def _process_materialize_request(cfg: dict[str, Any], registry: dict[str, Any], 
         wt = STATE_DIR / "materialize-worktrees" / txid
         retire_worktree(repo_path, wt)
         try:
-            add_disposable_worktree(repo_path, "--detach", str(wt), branch_name)
-            snapshot_rel = materialize(cfg, repo_id, branch_snapshot=(wt, branch_name))
+            add_disposable_worktree(repo_path, "--detach", str(wt), head)
+            snapshot_rel, snapshot = _materialize_with_snapshot(
+                cfg, repo_id, branch_snapshot=(wt, branch_name)
+            )
+            if snapshot.get("head") != head:
+                raise BridgeError("materialized branch snapshot HEAD changed unexpectedly")
         finally:
             retire_worktree(repo_path, wt)
 
@@ -607,6 +695,71 @@ def _cleanup_local_request_artifacts(filename: str) -> None:
     for parent in ("transactions", "command-runs", "command-homes"):
         shutil.rmtree(STATE_DIR / parent / txid, ignore_errors=True)
 
+    # Outbox JSON is only a staging source for rclone. Replay durability lives in
+    # results/<tx>.json plus the publication marker, so successful acknowledgement
+    # can remove per-transaction staging files instead of leaking one forever.
+    outbox = STATE_DIR / "outbox"
+    (outbox / f"result-{filename}").unlink(missing_ok=True)
+    if outbox.exists():
+        for path in outbox.glob(f"snapshot-*-{txid}.json"):
+            path.unlink(missing_ok=True)
+
+
+def reconcile_local_acknowledged_artifacts() -> int:
+    """Retire crash-left transient state whose acknowledgement is durable.
+
+    A process can die after the remote request has already been deleted but
+    before `_cleanup_local_request_artifacts` finishes. With no inbox object
+    left, ordinary polling cannot rediscover that transaction. Derive cleanup
+    candidates from local transient state and trust only an existing valid local
+    publication marker. Outbox JSON is staging, never replay authority, and may
+    be removed unconditionally at watcher startup because durable local results
+    live under `results/`.
+    """
+    txids: set[str] = set()
+    inbox = STATE_DIR / "inbox"
+    if inbox.exists():
+        for path in inbox.glob("*.json"):
+            if TX_FILENAME_RE.fullmatch(path.name):
+                txids.add(path.stem)
+    for parent_name in ("transactions", "command-runs", "command-homes"):
+        parent = STATE_DIR / parent_name
+        if not parent.exists():
+            continue
+        try:
+            children = list(parent.iterdir())
+        except OSError:
+            continue
+        for path in children:
+            if path.is_dir() and TX_FILENAME_RE.fullmatch(path.name + ".json"):
+                txids.add(path.name)
+
+    cleaned = 0
+    for txid in sorted(txids):
+        filename = f"{txid}.json"
+        if _load_published_marker(filename) is None:
+            continue
+        _cleanup_local_request_artifacts(filename)
+        cleaned += 1
+
+    outbox = STATE_DIR / "outbox"
+    if outbox.exists():
+        try:
+            staging = list(outbox.iterdir())
+        except OSError:
+            staging = []
+        for path in staging:
+            if path.is_file() and (path.name.startswith("result-") or path.name.startswith("snapshot-")):
+                path.unlink(missing_ok=True)
+
+    if cleaned:
+        _append_metric({
+            "event": "startup-local-cleanup",
+            "cleaned_transactions": cleaned,
+            "recorded_at": utc_now(),
+        })
+    return cleaned
+
 
 def _prune_command_logs(limit: int = COMMAND_LOG_RETENTION) -> None:
     """Retain a small bounded set of local command logs for diagnosis."""
@@ -639,13 +792,36 @@ def _prune_local_results(limit: int = LOCAL_RESULT_RETENTION) -> None:
         candidates = [
             path
             for path in result_dir.glob("*.json")
-            if path.is_file() and _published_marker(path.name).exists()
+            if path.is_file() and _load_published_marker(path.name) is not None
         ]
         candidates.sort(key=lambda path: path.stat().st_mtime, reverse=True)
         for path in candidates[limit:]:
             path.unlink(missing_ok=True)
     except OSError:
         pass
+
+
+class _CorruptLocalResult(BridgeError):
+    """A durable local acknowledgement exists but cannot be trusted/read."""
+
+
+def _quarantine_corrupt_local_result(filename: str, local_result: Path) -> None:
+    quarantine_dir = STATE_DIR / "corrupt-results"
+    quarantine_dir.mkdir(parents=True, exist_ok=True, mode=0o700)
+    try:
+        os.chmod(quarantine_dir, 0o700)
+    except OSError:
+        pass
+    target = quarantine_dir / filename
+    try:
+        os.replace(local_result, target)
+    except OSError as exc:
+        raise BridgeError(f"cannot quarantine corrupt local result: {type(exc).__name__}") from exc
+    _append_metric({
+        "event": "local-result-quarantined",
+        "transaction_id": filename[:-5],
+        "recorded_at": utc_now(),
+    })
 
 
 def _publish_local_result(
@@ -656,13 +832,18 @@ def _publish_local_result(
     # A previous upload may have timed out after Drive accepted the write. Resolve
     # that ambiguous outcome by checking the result directory before attempting a
     # second mutating upload, which could otherwise create a duplicate Drive file.
-    result = load_json(local_result)
-
+    # Check the authenticated remote acknowledgement before parsing the local copy:
+    # a torn local file must not mask an acknowledgement that Drive already accepted.
     remote_results = transport.list_files(f"{REMOTE_ROOT}/results")
     if filename in remote_results:
-        if not _remote_result_is_authentic(transport, filename):
+        remote_result = _load_authentic_remote_result(transport, filename)
+        if remote_result is None:
             raise BridgeError("conflicting unauthenticated remote result")
-        _mark_published(filename, source="remote-result-existing")
+        _mark_published(
+            filename,
+            source="remote-result-existing",
+            request_bytes_sha256=remote_result.get("request_bytes_sha256"),
+        )
         cleanup_status, cleanup_s, cleanup_transport = _cleanup_remote_request(transport, filename)
         _cleanup_local_request_artifacts(filename)
         _prune_local_results()
@@ -679,6 +860,15 @@ def _publish_local_result(
         return 0.0
 
     try:
+        result = load_json(local_result)
+    except BridgeError as exc:
+        _quarantine_corrupt_local_result(filename, local_result)
+        raise _CorruptLocalResult("corrupt local durable result quarantined") from exc
+    if not _result_identity_is_valid(filename, result) or not _verify_result(filename, result):
+        _quarantine_corrupt_local_result(filename, local_result)
+        raise _CorruptLocalResult("local durable result authentication is invalid")
+
+    try:
         delta = time.time() - local_result.stat().st_mtime
         age = RESULT_RETRY_GRACE_S if delta < -RESULT_RETRY_GRACE_S else max(0.0, delta)
     except OSError:
@@ -687,13 +877,6 @@ def _publish_local_result(
         # Give an in-flight/timed-out provider write time to become visible.
         return None
 
-    if not _verify_result(filename, result):
-        # Legacy/trusted local durable results from an older bridge version can be
-        # upgraded in place immediately before a retry. Remote objects are never
-        # granted this trust.
-        result = _sign_result(filename, result)
-        save_json(local_result, result)
-
     started = time.monotonic()
     transport.upload_control_json(
         f"{REMOTE_ROOT}/results/{filename}",
@@ -701,7 +884,7 @@ def _publish_local_result(
         STATE_DIR / "outbox" / f"result-{filename}",
     )
     elapsed = round(time.monotonic() - started, 4)
-    _mark_published(filename, source="local-result")
+    _mark_published(filename, source="local-result", request_bytes_sha256=result.get("request_bytes_sha256"))
     cleanup_status, cleanup_s, cleanup_transport = _cleanup_remote_request(transport, filename)
     _cleanup_local_request_artifacts(filename)
     _prune_local_results()
@@ -733,7 +916,7 @@ def reconcile_remote_results(cfg: dict[str, Any]) -> int:
         if name.endswith(".json") and TX_FILENAME_RE.fullmatch(name)
     }
     unmarked_transactions = {
-        name for name in pending_transactions if not _published_marker(name).exists()
+        name for name in pending_transactions if _load_published_marker(name) is None
     }
     if not unmarked_transactions:
         _append_metric({
@@ -755,9 +938,14 @@ def reconcile_remote_results(cfg: dict[str, Any]) -> int:
     marked = 0
     candidates = sorted(remote_results & unmarked_transactions)
     for filename in candidates:
-        if not _remote_result_is_authentic(transport, filename):
+        remote_result = _load_authentic_remote_result(transport, filename)
+        if remote_result is None:
             continue
-        _mark_published(filename, source="startup-authenticated-remote-result")
+        _mark_published(
+            filename,
+            source="startup-authenticated-remote-result",
+            request_bytes_sha256=remote_result.get("request_bytes_sha256"),
+        )
         marked += 1
     _append_metric({
         "event": "startup-reconcile",
@@ -769,7 +957,7 @@ def reconcile_remote_results(cfg: dict[str, Any]) -> int:
     return marked
 
 
-def process_pending_once(cfg: dict[str, Any]) -> int:
+def process_pending_once(cfg: dict[str, Any], *, cancel_check: Callable[[], bool] | None = None) -> int:
     transport = transport_from_config(cfg)
     poll_started = time.monotonic()
     list_started = time.monotonic()
@@ -784,16 +972,54 @@ def process_pending_once(cfg: dict[str, Any]) -> int:
     transaction_list_transport = str(getattr(transport, "last_mode", "unknown"))
 
     # Normal polling lists only transactions. Replay recovery against the remote
-    # result directory is performed once at watcher startup instead of here.
-    candidates = [name for name in tx_files if not _published_marker(name).exists()]
+    # result directory is performed once at watcher startup instead of here. A
+    # malformed marker is not evidence of acknowledgement; recover it from an
+    # authenticated remote result if one exists, otherwise process the request.
+    candidates: list[str] = []
+    published: list[str] = []
+    invalid_marker_names: list[str] = []
+    for name in tx_files:
+        marker_path = _published_marker(name)
+        marker_existed = marker_path.exists()
+        if _load_published_marker(name) is not None:
+            published.append(name)
+        else:
+            candidates.append(name)
+            if marker_existed:
+                invalid_marker_names.append(name)
+
+    if invalid_marker_names:
+        remote_results = set(transport.list_files(f"{REMOTE_ROOT}/results"))
+        for name in list(invalid_marker_names):
+            if name not in remote_results:
+                continue
+            remote_result = _load_authentic_remote_result(transport, name)
+            if remote_result is None:
+                continue
+            _mark_published(
+                name,
+                source="invalid-marker-authenticated-remote-result",
+                request_bytes_sha256=remote_result.get("request_bytes_sha256"),
+            )
+            if name in candidates:
+                candidates.remove(name)
+            published.append(name)
+
     if not candidates:
         # The transaction directory is an inbox, not an audit log. Reap one old
         # acknowledged request per idle poll so listing cost remains bounded even
         # after long-lived use. RC-only cleanup avoids turning maintenance into a
         # subprocess latency penalty; failed cleanup is simply retried later.
-        published = [name for name in tx_files if _published_marker(name).exists()]
         if published:
-            _cleanup_remote_request(transport, published[0], allow_fallback=False)
+            acknowledged = published[0]
+            _cleanup_remote_request(transport, acknowledged, allow_fallback=False)
+            # A crash can occur after the authenticated publication marker is
+            # durable but before request/local cleanup. Once a marker is valid,
+            # local inbox/workspace/outbox staging is no longer replay authority;
+            # retire it on the next idle poll as well as on the original path.
+            _cleanup_local_request_artifacts(acknowledged)
+            _prune_local_results()
+            _prune_command_logs()
         return 0
 
     processed = 0
@@ -801,8 +1027,14 @@ def process_pending_once(cfg: dict[str, Any]) -> int:
     for filename in candidates:
         local_result = STATE_DIR / "results" / filename
         if local_result.exists():
-            if _publish_local_result(transport, filename, local_result) is not None:
-                processed += 1
+            try:
+                if _publish_local_result(transport, filename, local_result) is not None:
+                    processed += 1
+            except _CorruptLocalResult:
+                # The durable copy is unusable, but the remote request still exists.
+                # Re-enter the ordinary request state machine. Git transactions are
+                # protected against duplicate mutation by request-hash commit trailers.
+                still_pending.append(filename)
         else:
             still_pending.append(filename)
 
@@ -819,6 +1051,7 @@ def process_pending_once(cfg: dict[str, Any]) -> int:
         tx_local = STATE_DIR / "inbox" / filename
         local_result = STATE_DIR / "results" / filename
         result: dict[str, Any]
+        request_bytes_sha256: str | None = None
         transaction_download_s = 0.0
         transaction_download_transport = "none"
         try:
@@ -854,11 +1087,19 @@ def process_pending_once(cfg: dict[str, Any]) -> int:
                 continue
             transaction_download_s = round(time.monotonic() - download_started, 4)
             transaction_download_transport = str(getattr(transport, "last_mode", "unknown"))
+            request_bytes_sha256 = hashlib.sha256(raw.encode("utf-8")).hexdigest()
             obj = strict_json_loads(raw.lstrip("\ufeff"))
             if not isinstance(obj, dict):
                 raise BridgeError("request JSON must be an object")
             _validate_request_identity(obj, filename)
             kind = obj.get("kind")
+
+            # The local registry is written atomically but may be refreshed by a
+            # concurrent local `scan` while a poll is processing several queued
+            # requests.  Re-read it immediately before repo-dependent dispatch so
+            # later requests never act on a stale in-memory path/identity snapshot.
+            if kind in {"materialize", "transaction"}:
+                registry = load_registry()
 
             if kind == "materialize":
                 result = _process_materialize_request(cfg, registry, obj, filename)
@@ -879,6 +1120,7 @@ def process_pending_once(cfg: dict[str, Any]) -> int:
                     commands=commands,
                     allow_commit=bool(cfg.get("allow_commit", True)),
                     allow_push=repo_id in {str(x) for x in cfg.get("push_enabled_repos", [])},
+                    cancel_check=cancel_check,
                 )
                 result = outcome.result
                 if outcome.snapshot is not None and obj.get("publish_snapshot", False):
@@ -908,6 +1150,11 @@ def process_pending_once(cfg: dict[str, Any]) -> int:
                 "error": _public_error_message(exc),
             }
 
+        if request_bytes_sha256 is not None:
+            # Bind the signed acknowledgement to the exact downloaded request bytes.
+            # This lets clients distinguish an idempotent retry from transaction-ID reuse.
+            result["request_bytes_sha256"] = request_bytes_sha256
+
         # Include timings knowable before acknowledgement in the durable result.
         # The result-upload duration itself is recorded locally after upload completes.
         result["transport_timings"] = {
@@ -934,7 +1181,7 @@ def process_pending_once(cfg: dict[str, Any]) -> int:
         )
         result_upload_s = round(time.monotonic() - upload_started, 4)
         result_upload_transport = str(getattr(transport, "last_mode", "unknown"))
-        _mark_published(filename, source="processed")
+        _mark_published(filename, source="processed", request_bytes_sha256=result.get("request_bytes_sha256"))
         cleanup_status, cleanup_s, cleanup_transport = _cleanup_remote_request(transport, filename)
         _cleanup_local_request_artifacts(filename)
         _prune_local_results()
@@ -1100,6 +1347,7 @@ def cmd_watch(args: argparse.Namespace) -> int:
         rc_handle = _start_watch_rcd(cfg)
         if args.once:
             reconcile_remote_results(cfg)
+            reconcile_local_acknowledged_artifacts()
             count = process_pending_once(cfg)
             print(f"processed: {count}")
             return 0
@@ -1124,10 +1372,14 @@ def cmd_watch(args: argparse.Namespace) -> int:
                 rc_handle = _ensure_watch_rcd(current_cfg, rc_handle)
                 if not reconciled:
                     marked = reconcile_remote_results(current_cfg)
+                    cleaned = reconcile_local_acknowledged_artifacts()
                     reconciled = True
-                    if marked:
-                        print(f"startup reconciliation: {marked} marker(s)", flush=True)
-                count = process_pending_once(current_cfg)
+                    if marked or cleaned:
+                        print(
+                            f"startup reconciliation: {marked} marker(s), {cleaned} local cleanup(s)",
+                            flush=True,
+                        )
+                count = process_pending_once(current_cfg, cancel_check=lambda: stop)
                 if count:
                     print(f"processed: {count}", flush=True)
             except Exception as exc:
@@ -1205,8 +1457,17 @@ def cmd_daemon(args: argparse.Namespace) -> int:
     if args.action == "restart":
         if not PLIST_PATH.exists():
             raise BridgeError("daemon is not installed")
-        _launchctl("kickstart", "-k", f"{domain}/{LABEL}")
-        print("daemon restarted")
+        # Ask the running job to unwind cleanly. KeepAlive=true causes launchd to
+        # start a replacement after the SIGTERM handler exits. This avoids the
+        # force-kill-first semantics of `kickstart -k`, which can strand a
+        # configured-command process group if the daemon dies mid-command. If the
+        # job is already stopped, first try to kickstart a loaded service and then
+        # bootstrap the plist if it is no longer registered with launchd.
+        service = f"{domain}/{LABEL}"
+        if _launchctl("kill", "SIGTERM", service, check=False) != 0:
+            if _launchctl("kickstart", service, check=False) != 0:
+                _launchctl("bootstrap", domain, str(PLIST_PATH))
+        print("daemon restart requested")
         return 0
     raise BridgeError(f"unknown daemon action: {args.action}")
 

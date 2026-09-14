@@ -156,6 +156,36 @@ class CoreTests(unittest.TestCase):
         self.assertNotIn(".kube/config", paths)
         self.assertNotIn("terraform.tfstate", paths)
 
+    def test_internal_git_ignores_repository_routing_environment(self):
+        repo = self.make_repo()
+        poison = self.make_repo()
+        (poison / "poison.txt").write_text("poison\n", encoding="utf-8")
+        sh(poison, "git", "add", "poison.txt")
+        sh(poison, "git", "commit", "-qm", "poison")
+        expected_head = sh(repo, "git", "rev-parse", "HEAD")
+        with patch.dict(
+            os.environ,
+            {
+                "GIT_DIR": str(poison / ".git"),
+                "GIT_WORK_TREE": str(poison),
+                "GIT_INDEX_FILE": str(poison / ".git" / "index"),
+                "GIT_OBJECT_DIRECTORY": str(poison / ".git" / "objects"),
+                "GIT_COMMON_DIR": str(poison / ".git"),
+                "GIT_NAMESPACE": "poison",
+                "GIT_CONFIG_COUNT": "1",
+                "GIT_CONFIG_KEY_0": "core.bare",
+                "GIT_CONFIG_VALUE_0": "true",
+            },
+            clear=False,
+        ):
+            state = core_mod.repo_state(repo)
+            direct_head = core_mod.run(
+                ["git", "-C", str(repo), "rev-parse", "HEAD"], timeout=10
+            ).stdout.strip()
+        self.assertEqual(state["head"], expected_head)
+        self.assertEqual(direct_head, expected_head)
+        self.assertFalse(state["dirty"])
+
     def test_configured_command_environment_scrubs_common_credentials(self):
         repo = self.make_repo()
         with __import__("unittest.mock").mock.patch.dict(
@@ -167,6 +197,11 @@ class CoreTests(unittest.TestCase):
                 "SSH_AUTH_SOCK": "/tmp/agent.sock",
                 "RCLONE_CONFIG_PASS": "secret",
                 "KUBECONFIG": "/tmp/kubeconfig",
+                "GIT_DIR": "/tmp/poison.git",
+                "GIT_WORK_TREE": "/tmp/poison-worktree",
+                "GIT_CONFIG_COUNT": "1",
+                "GIT_CONFIG_KEY_0": "core.bare",
+                "GIT_CONFIG_VALUE_0": "true",
                 "LLMGB_SAFE_TEST_VAR": "visible",
             },
             clear=False,
@@ -178,6 +213,11 @@ class CoreTests(unittest.TestCase):
         self.assertNotIn("SSH_AUTH_SOCK", env)
         self.assertNotIn("RCLONE_CONFIG_PASS", env)
         self.assertNotIn("KUBECONFIG", env)
+        self.assertNotIn("GIT_DIR", env)
+        self.assertNotIn("GIT_WORK_TREE", env)
+        self.assertNotIn("GIT_CONFIG_COUNT", env)
+        self.assertNotIn("GIT_CONFIG_KEY_0", env)
+        self.assertNotIn("GIT_CONFIG_VALUE_0", env)
         self.assertEqual(env["LLMGB_SAFE_TEST_VAR"], "visible")
         self.assertEqual(env["HOME"], str(repo / ".private-home"))
         self.assertEqual(env["GIT_CONFIG_GLOBAL"], "/dev/null")
@@ -197,6 +237,20 @@ class CoreTests(unittest.TestCase):
         self.assertTrue(result.stdout.endswith("x" * 100))
         self.assertTrue(result.stderr.endswith("y" * 100))
 
+    def test_configured_command_cancellation_kills_process_group(self):
+        repo = self.make_repo()
+        started = time.monotonic()
+        result = run_configured_command(
+            [sys.executable, "-c", "import time; time.sleep(10)"],
+            cwd=repo,
+            env=os.environ.copy(),
+            timeout=10,
+            cancel_check=lambda: time.monotonic() - started >= 0.2,
+        )
+        self.assertTrue(result.cancelled)
+        self.assertFalse(result.timed_out)
+        self.assertLess(time.monotonic() - started, 3)
+
     def test_configured_command_timeout_kills_process_group(self):
         repo = self.make_repo()
         started = time.monotonic()
@@ -208,6 +262,49 @@ class CoreTests(unittest.TestCase):
         )
         self.assertTrue(result.timed_out)
         self.assertLess(time.monotonic() - started, 3)
+
+    def test_cancelled_configured_command_leaves_no_commit_or_worktree(self):
+        repo = self.make_repo()
+        head = sh(repo, "git", "rev-parse", "HEAD")
+        txid = "tx-command-cancel"
+        branch = "ai/command-cancel"
+        state = Path(tempfile.mkdtemp(prefix="llmgb-state-"))
+        tx = {
+            "protocol": 2,
+            "kind": "transaction",
+            "transaction_id": txid,
+            "repo": "demo",
+            "base_sha": head,
+            "branch": branch,
+            "patch": (
+                "diff --git a/README.md b/README.md\n"
+                "--- a/README.md\n"
+                "+++ b/README.md\n"
+                "@@ -1 +1,2 @@\n"
+                " hello\n"
+                "+cancelled\n"
+            ),
+            "run": ["slow"],
+        }
+        with self.assertRaisesRegex(BridgeError, "configured command cancelled"):
+            process_transaction(
+                repo,
+                "demo",
+                tx,
+                state_dir=state,
+                safe_branch_prefix="ai/",
+                commands={"slow": [sys.executable, "-c", "import time; time.sleep(10)"]},
+                cancel_check=lambda: True,
+            )
+        self.assertFalse((state / "worktrees" / txid).exists())
+        self.assertNotEqual(
+            subprocess.run(
+                ["git", "-C", str(repo), "show-ref", "--verify", f"refs/heads/{branch}"],
+                stdout=subprocess.PIPE, stderr=subprocess.PIPE,
+            ).returncode,
+            0,
+        )
+        self.assertEqual(sh(repo, "git", "rev-parse", "HEAD"), head)
 
     def test_transaction_validation_rejects_bad_branch(self):
         tx = {
@@ -288,8 +385,214 @@ class CoreTests(unittest.TestCase):
         self.assertEqual(sh(repo, "git", "rev-parse", "ai/test-change"), commit)
         self.assertFalse((state / "worktrees" / "tx-apply-1").exists())
         self.assertIsNotNone(outcome.snapshot)
+        assert outcome.snapshot is not None
+        self.assertEqual(outcome.snapshot["head"], commit)
+        self.assertEqual(outcome.snapshot["branch"], "ai/test-change")
+        self.assertFalse(outcome.snapshot["dirty"])
+        self.assertFalse(outcome.snapshot["tracked_dirty"])
         readme = next(x for x in outcome.snapshot["files"] if x["path"] == "README.md")
         self.assertEqual(readme["content"], "hello\nworld\n")
+
+    def test_transaction_rejects_tracked_dirty_authoritative_checkout_before_claim(self):
+        for staged in (False, True):
+            with self.subTest(staged=staged):
+                repo = self.make_repo()
+                head = sh(repo, "git", "rev-parse", "HEAD")
+                (repo / "README.md").write_text("dirty\n", encoding="utf-8")
+                if staged:
+                    sh(repo, "git", "add", "README.md")
+                txid = f"tx-dirty-{'staged' if staged else 'unstaged'}"
+                tx = {
+                    "protocol": 2,
+                    "kind": "transaction",
+                    "transaction_id": txid,
+                    "repo": "demo",
+                    "base_sha": head,
+                    "branch": f"ai/{txid}",
+                    "patch": (
+                        "diff --git a/README.md b/README.md\n"
+                        "--- a/README.md\n"
+                        "+++ b/README.md\n"
+                        "@@ -1 +1,2 @@\n"
+                        " hello\n"
+                        "+world\n"
+                    ),
+                    "run": [],
+                }
+                with self.assertRaisesRegex(BridgeError, "tracked working tree|index has staged"):
+                    process_transaction(
+                        repo,
+                        "demo",
+                        tx,
+                        state_dir=Path(tempfile.mkdtemp(prefix="llmgb-state-")),
+                        safe_branch_prefix="ai/",
+                        commands={},
+                    )
+                claim = subprocess.run(
+                    [
+                        "git", "-C", str(repo), "show-ref", "--verify",
+                        f"refs/llm-git-bridge/transactions/{txid}",
+                    ],
+                    stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True,
+                )
+                self.assertNotEqual(claim.returncode, 0)
+
+    def test_transaction_allows_and_preserves_untracked_authoritative_files(self):
+        repo = self.make_repo()
+        head = sh(repo, "git", "rev-parse", "HEAD")
+        untracked = repo / "local-only.txt"
+        untracked.write_text("local\n", encoding="utf-8")
+        tx = {
+            "protocol": 2,
+            "kind": "transaction",
+            "transaction_id": "tx-untracked-authoritative",
+            "repo": "demo",
+            "base_sha": head,
+            "branch": "ai/untracked-authoritative",
+            "patch": (
+                "diff --git a/README.md b/README.md\n"
+                "--- a/README.md\n"
+                "+++ b/README.md\n"
+                "@@ -1 +1,2 @@\n"
+                " hello\n"
+                "+bridge\n"
+            ),
+            "run": [],
+        }
+        outcome = process_transaction(
+            repo,
+            "demo",
+            tx,
+            state_dir=Path(tempfile.mkdtemp(prefix="llmgb-state-")),
+            safe_branch_prefix="ai/",
+            commands={},
+        )
+        self.assertEqual(outcome.result["status"], "success")
+        self.assertEqual(untracked.read_text(encoding="utf-8"), "local\n")
+        committed = sh(repo, "git", "ls-tree", "-r", "--name-only", outcome.result["commit"])
+        self.assertNotIn("local-only.txt", committed.splitlines())
+
+    def test_binary_patch_is_committed_but_omitted_from_snapshot(self):
+        repo = self.make_repo()
+        blob = repo / "blob.bin"
+        blob.write_bytes(b"\x00one\xff")
+        sh(repo, "git", "add", "blob.bin")
+        sh(repo, "git", "commit", "-qm", "add binary")
+        head = sh(repo, "git", "rev-parse", "HEAD")
+        blob.write_bytes(b"\x00two\xfe")
+        patch_proc = subprocess.run(
+            ["git", "-C", str(repo), "diff", "--binary", "HEAD", "--", "blob.bin"],
+            text=True, stdout=subprocess.PIPE, stderr=subprocess.PIPE, check=True,
+        )
+        patch_text = patch_proc.stdout
+        sh(repo, "git", "checkout", "--", "blob.bin")
+        tx = {
+            "protocol": 2,
+            "kind": "transaction",
+            "transaction_id": "tx-binary-patch",
+            "repo": "demo",
+            "base_sha": head,
+            "branch": "ai/binary-patch",
+            "patch": patch_text,
+            "run": [],
+            "publish_snapshot": True,
+        }
+        outcome = process_transaction(
+            repo,
+            "demo",
+            tx,
+            state_dir=Path(tempfile.mkdtemp(prefix="llmgb-state-")),
+            safe_branch_prefix="ai/",
+            commands={},
+        )
+        self.assertEqual(outcome.result["status"], "success")
+        self.assertIsNotNone(outcome.snapshot)
+        assert outcome.snapshot is not None
+        self.assertNotIn("blob.bin", {item["path"] for item in outcome.snapshot["files"]})
+        omitted = {item.get("path"): item.get("reason") for item in outcome.snapshot["omitted"]}
+        self.assertEqual(omitted.get("blob.bin"), "binary")
+
+    def test_patch_with_space_and_unicode_path_is_applied_exactly(self):
+        repo = self.make_repo()
+        weird = repo / "space cafe.txt"
+        weird.write_text("one\n", encoding="utf-8")
+        sh(repo, "git", "add", weird.name)
+        sh(repo, "git", "commit", "-qm", "add weird path")
+        head = sh(repo, "git", "rev-parse", "HEAD")
+        weird.write_text("one\ntwo\n", encoding="utf-8")
+        patch_proc = subprocess.run(
+            ["git", "-C", str(repo), "-c", "core.quotePath=true", "diff", "HEAD", "--", weird.name],
+            text=True, stdout=subprocess.PIPE, stderr=subprocess.PIPE, check=True,
+        )
+        patch_text = patch_proc.stdout
+        sh(repo, "git", "checkout", "--", weird.name)
+        tx = {
+            "protocol": 2,
+            "kind": "transaction",
+            "transaction_id": "tx-weird-path",
+            "repo": "demo",
+            "base_sha": head,
+            "branch": "ai/weird-path-file",
+            "patch": patch_text,
+            "run": [],
+        }
+        outcome = process_transaction(
+            repo,
+            "demo",
+            tx,
+            state_dir=Path(tempfile.mkdtemp(prefix="llmgb-state-")),
+            safe_branch_prefix="ai/",
+            commands={},
+        )
+        data = subprocess.run(
+            ["git", "-C", str(repo), "show", f"{outcome.result['commit']}:{weird.name}"],
+            text=True, stdout=subprocess.PIPE, stderr=subprocess.PIPE, check=True,
+        ).stdout
+        self.assertEqual(data, "one\ntwo\n")
+
+    def test_commit_object_is_verified_before_branch_publication(self):
+        repo = self.make_repo()
+        head = sh(repo, "git", "rev-parse", "HEAD")
+        tx = {
+            "protocol": 2,
+            "kind": "transaction",
+            "transaction_id": "tx-verify-commit-object",
+            "repo": "demo",
+            "base_sha": head,
+            "branch": "ai/verify-commit-object",
+            "patch": (
+                "diff --git a/README.md b/README.md\n"
+                "--- a/README.md\n"
+                "+++ b/README.md\n"
+                "@@ -1 +1,2 @@\n"
+                " hello\n"
+                "+verified\n"
+            ),
+            "run": [],
+        }
+        state = Path(tempfile.mkdtemp(prefix="llmgb-state-"))
+        original_run = core_mod.run
+
+        def corrupt_commit_tree(argv, **kwargs):
+            if argv and Path(argv[0]).name == "git" and "commit-tree" in argv:
+                return subprocess.CompletedProcess(argv, 0, stdout=head + "\n", stderr="")
+            return original_run(argv, **kwargs)
+
+        with patch.object(core_mod, "run", side_effect=corrupt_commit_tree):
+            with self.assertRaisesRegex(BridgeError, "commit object verification failed"):
+                process_transaction(
+                    repo,
+                    "demo",
+                    tx,
+                    state_dir=state,
+                    safe_branch_prefix="ai/",
+                    commands={},
+                )
+        branch = subprocess.run(
+            ["git", "-C", str(repo), "show-ref", "--verify", "refs/heads/ai/verify-commit-object"],
+            stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True,
+        )
+        self.assertNotEqual(branch.returncode, 0)
 
     def test_simple_no_command_transaction_has_bounded_git_process_budget(self):
         repo = self.make_repo()
@@ -330,7 +633,10 @@ class CoreTests(unittest.TestCase):
                 commands={},
             )
         self.assertEqual(outcome.result["status"], "success")
-        self.assertLessEqual(len(git_calls), 9, git_calls)
+        # One post-commit read verifies tree, parent, transaction trailer, and
+        # request hash before the target ref is published. Keep that correctness
+        # check in the explicit subprocess budget.
+        self.assertLessEqual(len(git_calls), 14, git_calls)
 
     def test_failed_patch_application_is_atomic_and_leaves_no_branch(self):
         repo = self.make_repo()
@@ -1369,6 +1675,315 @@ class CoreTests(unittest.TestCase):
         )
 
 
+    def test_retry_recovers_after_crash_leaves_new_branch_worktree_at_base(self):
+        repo = self.make_repo()
+        head = sh(repo, "git", "rev-parse", "HEAD")
+        txid = "tx-crash-after-worktree"
+        branch = "ai/crash-after-worktree"
+        state = Path(tempfile.mkdtemp(prefix="llmgb-state-"))
+        wt = state / "worktrees" / txid
+        wt.parent.mkdir(parents=True, exist_ok=True)
+        core_mod.add_disposable_worktree(repo, "-b", branch, str(wt), head)
+        self.assertEqual(sh(repo, "git", "rev-parse", branch), head)
+        self.assertTrue(wt.exists())
+
+        tx = {
+            "protocol": 2,
+            "kind": "transaction",
+            "transaction_id": txid,
+            "repo": "demo",
+            "base_sha": head,
+            "branch": branch,
+            "patch": (
+                "diff --git a/README.md b/README.md\n"
+                "--- a/README.md\n"
+                "+++ b/README.md\n"
+                "@@ -1 +1,2 @@\n"
+                " hello\n"
+                "+after-crash\n"
+            ),
+            "run": [],
+        }
+        outcome = process_transaction(
+            repo, "demo", tx, state_dir=state, safe_branch_prefix="ai/", commands={}
+        )
+        self.assertEqual(outcome.result["status"], "success")
+        self.assertEqual(sh(repo, "git", "rev-list", "--count", f"{head}..{branch}"), "1")
+        self.assertFalse(wt.exists())
+
+    def test_retry_discards_staged_state_left_by_crashed_worktree_before_reapplying(self):
+        repo = self.make_repo()
+        head = sh(repo, "git", "rev-parse", "HEAD")
+        txid = "tx-crash-after-patch"
+        branch = "ai/crash-after-patch"
+        state = Path(tempfile.mkdtemp(prefix="llmgb-state-"))
+        wt = state / "worktrees" / txid
+        wt.parent.mkdir(parents=True, exist_ok=True)
+        core_mod.add_disposable_worktree(repo, "-b", branch, str(wt), head)
+        (wt / "README.md").write_text("hello\nstale-staged\n", encoding="utf-8")
+        sh(wt, "git", "add", "README.md")
+        self.assertTrue(sh(wt, "git", "diff", "--cached", "--name-only"))
+
+        tx = {
+            "protocol": 2,
+            "kind": "transaction",
+            "transaction_id": txid,
+            "repo": "demo",
+            "base_sha": head,
+            "branch": branch,
+            "patch": (
+                "diff --git a/README.md b/README.md\n"
+                "--- a/README.md\n"
+                "+++ b/README.md\n"
+                "@@ -1 +1,2 @@\n"
+                " hello\n"
+                "+fresh-retry\n"
+            ),
+            "run": [],
+        }
+        outcome = process_transaction(
+            repo, "demo", tx, state_dir=state, safe_branch_prefix="ai/", commands={}
+        )
+        committed = sh(repo, "git", "show", f"{outcome.result['commit']}:README.md")
+        self.assertEqual(committed, "hello\nfresh-retry")
+        self.assertEqual(sh(repo, "git", "rev-list", "--count", f"{head}..{branch}"), "1")
+        self.assertFalse(wt.exists())
+
+    def test_external_branch_move_before_commit_cannot_be_overwritten(self):
+        repo = self.make_repo()
+        head = sh(repo, "git", "rev-parse", "HEAD")
+        branch = "ai/stale-branch-race"
+        sh(repo, "git", "branch", branch, head)
+        tree = sh(repo, "git", "write-tree")
+        external_commit = sh(
+            repo, "git", "commit-tree", tree, "-p", head, "-m", "external branch movement"
+        )
+        tx = {
+            "protocol": 2,
+            "kind": "transaction",
+            "transaction_id": "tx-stale-branch-race",
+            "repo": "demo",
+            "base_sha": head,
+            "branch": branch,
+            "patch": (
+                "diff --git a/README.md b/README.md\n"
+                "--- a/README.md\n"
+                "+++ b/README.md\n"
+                "@@ -1 +1,2 @@\n"
+                " hello\n"
+                "+bridge-change\n"
+            ),
+            "run": [],
+        }
+        state = Path(tempfile.mkdtemp(prefix="llmgb-state-"))
+        original_run = core_mod.run
+        moved = False
+
+        def run_with_branch_race(argv, **kwargs):
+            nonlocal moved
+            if not moved and argv and argv[0] == "git" and "commit-tree" in argv:
+                moved = True
+                original_run(
+                    [
+                        "git", "-C", str(repo), "update-ref",
+                        f"refs/heads/{branch}", external_commit, head,
+                    ]
+                )
+            return original_run(argv, **kwargs)
+
+        with patch.object(core_mod, "run", side_effect=run_with_branch_race):
+            with self.assertRaises(BridgeError):
+                process_transaction(
+                    repo, "demo", tx, state_dir=state, safe_branch_prefix="ai/", commands={}
+                )
+
+        self.assertTrue(moved)
+        self.assertEqual(sh(repo, "git", "rev-parse", branch), external_commit)
+        log = sh(repo, "git", "log", "-1", "--format=%B", branch)
+        self.assertNotIn("LLM-Git-Bridge-Transaction", log)
+
+    def test_symbolic_safe_branch_cannot_redirect_publication_to_protected_branch(self):
+        repo = self.make_repo()
+        protected_branch = sh(repo, "git", "branch", "--show-current")
+        base = sh(repo, "git", "rev-parse", "HEAD")
+        sh(repo, "git", "switch", "--detach", "-q", base)
+        target_branch = "ai/symbolic-alias"
+        sh(
+            repo,
+            "git",
+            "symbolic-ref",
+            f"refs/heads/{target_branch}",
+            f"refs/heads/{protected_branch}",
+        )
+        tx = {
+            "protocol": 2,
+            "kind": "transaction",
+            "transaction_id": "tx-symbolic-safe-branch",
+            "repo": "demo",
+            "base_sha": base,
+            "branch": target_branch,
+            "patch": (
+                "diff --git a/README.md b/README.md\n"
+                "--- a/README.md\n"
+                "+++ b/README.md\n"
+                "@@ -1 +1,2 @@\n"
+                " hello\n"
+                "+must-not-reach-protected\n"
+            ),
+            "run": [],
+        }
+        state = Path(tempfile.mkdtemp(prefix="llmgb-state-"))
+        with self.assertRaisesRegex(BridgeError, "symbolic local branch ref is not allowed"):
+            process_transaction(
+                repo, "demo", tx, state_dir=state,
+                safe_branch_prefix="ai/", commands={},
+            )
+        self.assertEqual(sh(repo, "git", "rev-parse", f"refs/heads/{protected_branch}"), base)
+        self.assertEqual(
+            sh(repo, "git", "symbolic-ref", f"refs/heads/{target_branch}"),
+            f"refs/heads/{protected_branch}",
+        )
+
+    def test_symbolic_ref_race_cannot_redirect_publication_to_protected_branch(self):
+        repo = self.make_repo()
+        protected_branch = sh(repo, "git", "branch", "--show-current")
+        base = sh(repo, "git", "rev-parse", "HEAD")
+        target_branch = "ai/symbolic-race"
+        sh(repo, "git", "branch", target_branch, base)
+        tx = {
+            "protocol": 2,
+            "kind": "transaction",
+            "transaction_id": "tx-symbolic-ref-race",
+            "repo": "demo",
+            "base_sha": base,
+            "branch": target_branch,
+            "patch": (
+                "diff --git a/README.md b/README.md\n"
+                "--- a/README.md\n"
+                "+++ b/README.md\n"
+                "@@ -1 +1,2 @@\n"
+                " hello\n"
+                "+bridge-change\n"
+            ),
+            "run": [],
+        }
+        state = Path(tempfile.mkdtemp(prefix="llmgb-state-"))
+        original_run = core_mod.run
+        raced = False
+        target_ref = f"refs/heads/{target_branch}"
+
+        def run_with_symbolic_race(argv, **kwargs):
+            nonlocal raced
+            if (
+                not raced
+                and argv
+                and argv[0] == "git"
+                and "update-ref" in argv
+                and target_ref in argv
+                and "commit-tree" not in argv
+            ):
+                raced = True
+                original_run(
+                    [
+                        "git", "-C", str(repo), "symbolic-ref",
+                        target_ref, f"refs/heads/{protected_branch}",
+                    ]
+                )
+            return original_run(argv, **kwargs)
+
+        with patch.object(core_mod, "run", side_effect=run_with_symbolic_race):
+            outcome = process_transaction(
+                repo, "demo", tx, state_dir=state,
+                safe_branch_prefix="ai/", commands={},
+            )
+
+        self.assertTrue(raced)
+        self.assertEqual(sh(repo, "git", "rev-parse", f"refs/heads/{protected_branch}"), base)
+        self.assertEqual(sh(repo, "git", "rev-parse", target_ref), outcome.result["commit"])
+        symbolic = subprocess.run(
+            ["git", "-C", str(repo), "symbolic-ref", "-q", target_ref],
+            text=True, stdout=subprocess.PIPE, stderr=subprocess.PIPE,
+        )
+        self.assertNotEqual(symbolic.returncode, 0)
+
+    def test_symbolic_transaction_claim_ref_is_rejected(self):
+        repo = self.make_repo()
+        base = sh(repo, "git", "rev-parse", "HEAD")
+        tx = {
+            "protocol": 2,
+            "kind": "transaction",
+            "transaction_id": "tx-symbolic-claim",
+            "repo": "demo",
+            "base_sha": base,
+            "branch": "ai/symbolic-claim",
+            "patch": (
+                "diff --git a/README.md b/README.md\n"
+                "--- a/README.md\n"
+                "+++ b/README.md\n"
+                "@@ -1 +1,2 @@\n"
+                " hello\n"
+                "+bridge-change\n"
+            ),
+            "run": [],
+        }
+        request_hash = core_mod.transaction_request_sha256(tx)
+        payload = Path(tempfile.mkdtemp(prefix="llmgb-claim-")) / "claim"
+        self.addCleanup(shutil.rmtree, payload.parent, ignore_errors=True)
+        payload.write_text(request_hash + "\n", encoding="utf-8")
+        oid = sh(repo, "git", "hash-object", "-w", str(payload))
+        backing_ref = "refs/llm-git-bridge/test-claim-backing"
+        claim_ref = core_mod._transaction_claim_ref(tx["transaction_id"])
+        sh(repo, "git", "update-ref", backing_ref, oid)
+        sh(repo, "git", "symbolic-ref", claim_ref, backing_ref)
+
+        with self.assertRaisesRegex(
+            BridgeError, "symbolic transaction identity claim ref is not allowed"
+        ):
+            process_transaction(
+                repo, "demo", tx,
+                state_dir=Path(tempfile.mkdtemp(prefix="llmgb-state-")),
+                safe_branch_prefix="ai/", commands={},
+            )
+        self.assertEqual(sh(repo, "git", "rev-parse", "HEAD"), base)
+        missing = subprocess.run(
+            ["git", "-C", str(repo), "show-ref", "--verify", "refs/heads/ai/symbolic-claim"],
+            stdout=subprocess.PIPE, stderr=subprocess.PIPE,
+        )
+        self.assertNotEqual(missing.returncode, 0)
+
+    def test_existing_target_branch_checked_out_elsewhere_is_not_moved(self):
+        repo = self.make_repo()
+        head = sh(repo, "git", "rev-parse", "HEAD")
+        branch = "ai/checked-out-target"
+        sh(repo, "git", "branch", branch, head)
+        sh(repo, "git", "switch", branch)
+        tx = {
+            "protocol": 2,
+            "kind": "transaction",
+            "transaction_id": "tx-checked-out-target",
+            "repo": "demo",
+            "base_sha": head,
+            "branch": branch,
+            "patch": (
+                "diff --git a/README.md b/README.md\n"
+                "--- a/README.md\n"
+                "+++ b/README.md\n"
+                "@@ -1 +1,2 @@\n"
+                " hello\n"
+                "+bridge-change\n"
+            ),
+            "run": [],
+        }
+        state = Path(tempfile.mkdtemp(prefix="llmgb-state-"))
+        with self.assertRaises(BridgeError):
+            process_transaction(
+                repo, "demo", tx, state_dir=state,
+                safe_branch_prefix="ai/", commands={},
+            )
+        self.assertEqual(sh(repo, "git", "rev-parse", branch), head)
+        self.assertEqual((repo / "README.md").read_text(encoding="utf-8"), "hello\n")
+        self.assertEqual(sh(repo, "git", "status", "--porcelain"), "")
+
     def test_identical_retry_recovers_committed_transaction_without_second_commit(self):
         repo = self.make_repo()
         head = sh(repo, "git", "rev-parse", "HEAD")
@@ -1389,6 +2004,7 @@ class CoreTests(unittest.TestCase):
             ),
             "run": [],
             "commit_message": "crash recovery test",
+            "publish_snapshot": True,
         }
         state = Path(tempfile.mkdtemp(prefix="llmgb-state-"))
         first = process_transaction(
@@ -1411,7 +2027,93 @@ class CoreTests(unittest.TestCase):
         )
         self.assertEqual(second.result["commit"], commit)
         self.assertTrue(second.result["recovered_after_crash"])
+        self.assertIsNotNone(second.snapshot)
+        assert second.snapshot is not None
+        self.assertEqual(second.snapshot["head"], commit)
+        self.assertEqual(second.snapshot["branch"], "ai/crash-recovery")
+        self.assertFalse(second.snapshot["dirty"])
         self.assertEqual(sh(repo, "git", "rev-list", "--count", f"{head}..ai/crash-recovery"), "1")
+
+    def test_recovery_ignores_git_replace_refs_when_verifying_bridge_commit(self):
+        repo = self.make_repo()
+        head = sh(repo, "git", "rev-parse", "HEAD")
+        tx = {
+            "protocol": 2,
+            "kind": "transaction",
+            "transaction_id": "tx-replace-ref-recovery",
+            "repo": "demo",
+            "base_sha": head,
+            "branch": "ai/replace-ref-recovery",
+            "patch": (
+                "diff --git a/README.md b/README.md\n"
+                "--- a/README.md\n"
+                "+++ b/README.md\n"
+                "@@ -1 +1,2 @@\n"
+                " hello\n"
+                "+durable\n"
+            ),
+            "run": [],
+        }
+        state = Path(tempfile.mkdtemp(prefix="llmgb-state-"))
+        first = process_transaction(
+            repo, "demo", tx, state_dir=state, safe_branch_prefix="ai/", commands={}
+        )
+        commit = first.result["commit"]
+        tree = sh(repo, "git", "show", "-s", "--format=%T", head)
+        replacement = sh(repo, "git", "commit-tree", tree, "-p", head, "-m", "replacement")
+        sh(repo, "git", "replace", commit, replacement)
+
+        recovered = process_transaction(
+            repo,
+            "demo",
+            tx,
+            state_dir=state,
+            safe_branch_prefix="ai/",
+            commands={},
+            allow_commit=False,
+        )
+        self.assertEqual(recovered.result["commit"], commit)
+        self.assertTrue(recovered.result["recovered_after_crash"])
+
+    def test_recovery_ignores_legacy_git_grafts_when_verifying_bridge_commit(self):
+        repo = self.make_repo()
+        head = sh(repo, "git", "rev-parse", "HEAD")
+        tx = {
+            "protocol": 2,
+            "kind": "transaction",
+            "transaction_id": "tx-graft-recovery",
+            "repo": "demo",
+            "base_sha": head,
+            "branch": "ai/graft-recovery",
+            "patch": (
+                "diff --git a/README.md b/README.md\n"
+                "--- a/README.md\n"
+                "+++ b/README.md\n"
+                "@@ -1 +1,2 @@\n"
+                " hello\n"
+                "+durable\n"
+            ),
+            "run": [],
+        }
+        state = Path(tempfile.mkdtemp(prefix="llmgb-state-"))
+        first = process_transaction(
+            repo, "demo", tx, state_dir=state, safe_branch_prefix="ai/", commands={}
+        )
+        commit = first.result["commit"]
+        grafts = repo / ".git" / "info" / "grafts"
+        grafts.write_text(commit + "\n", encoding="ascii")
+
+        recovered = process_transaction(
+            repo,
+            "demo",
+            tx,
+            state_dir=state,
+            safe_branch_prefix="ai/",
+            commands={},
+            allow_commit=False,
+        )
+        self.assertEqual(recovered.result["commit"], commit)
+        self.assertTrue(recovered.result["recovered_after_crash"])
 
     def test_recovered_commit_stays_successful_if_push_is_later_disabled(self):
         repo = self.make_repo()
@@ -1460,6 +2162,54 @@ class CoreTests(unittest.TestCase):
         self.assertEqual(recovered.result["push"]["status"], "error")
         self.assertIn("no longer enabled", recovered.result["push"]["error"])
 
+    def test_changed_request_cannot_reuse_committed_transaction_id_on_different_branch(self):
+        repo = self.make_repo()
+        head = sh(repo, "git", "rev-parse", "HEAD")
+        txid = "tx-global-hash-binding"
+        state = Path(tempfile.mkdtemp(prefix="llmgb-state-"))
+        first = {
+            "protocol": 2,
+            "kind": "transaction",
+            "transaction_id": txid,
+            "repo": "demo",
+            "base_sha": head,
+            "branch": "ai/hash-binding-original",
+            "patch": (
+                "diff --git a/README.md b/README.md\n"
+                "--- a/README.md\n"
+                "+++ b/README.md\n"
+                "@@ -1 +1,2 @@\n"
+                " hello\n"
+                "+one\n"
+            ),
+            "run": [],
+        }
+        process_transaction(
+            repo, "demo", first, state_dir=state, safe_branch_prefix="ai/", commands={}
+        )
+        changed = dict(first)
+        changed["branch"] = "ai/hash-binding-different"
+        changed["patch"] = (
+            "diff --git a/README.md b/README.md\n"
+            "--- a/README.md\n"
+            "+++ b/README.md\n"
+            "@@ -1 +1,2 @@\n"
+            " hello\n"
+            "+two\n"
+        )
+        with self.assertRaisesRegex(BridgeError, "transaction_id.*different request"):
+            process_transaction(
+                repo, "demo", changed, state_dir=Path(tempfile.mkdtemp(prefix="llmgb-state-lost-")),
+                safe_branch_prefix="ai/", commands={},
+            )
+        self.assertNotEqual(
+            subprocess.run(
+                ["git", "-C", str(repo), "show-ref", "--verify", "refs/heads/ai/hash-binding-different"],
+                stdout=subprocess.PIPE, stderr=subprocess.PIPE,
+            ).returncode,
+            0,
+        )
+
     def test_retry_with_same_transaction_id_but_changed_request_is_rejected(self):
         repo = self.make_repo()
         head = sh(repo, "git", "rev-parse", "HEAD")
@@ -1491,7 +2241,7 @@ class CoreTests(unittest.TestCase):
         )
         changed = dict(tx)
         changed["commit_message"] = "different request bytes"
-        with self.assertRaisesRegex(BridgeError, "already committed with a different request"):
+        with self.assertRaisesRegex(BridgeError, "already (?:committed|claimed).*different request"):
             process_transaction(
                 repo,
                 "demo",
@@ -1567,6 +2317,201 @@ class CoreTests(unittest.TestCase):
             self.assertTrue((worktree / "README.md").exists())
         finally:
             core.retire_worktree(repo, worktree)
+
+
+    def test_push_pins_exact_transaction_commit_if_local_branch_moves_before_push(self):
+        repo = self.make_repo()
+        remote = Path(tempfile.mkdtemp(prefix="llmgb-remote-")) / "remote.git"
+        subprocess.run(["git", "init", "--bare", "-q", str(remote)], check=True)
+        sh(repo, "git", "remote", "add", "origin", str(remote))
+        base = sh(repo, "git", "rev-parse", "HEAD")
+
+        # Create an unrelated commit object that an external actor will move the
+        # local target branch to after bridge publication but before push.
+        (repo / "external.txt").write_text("external\n", encoding="utf-8")
+        sh(repo, "git", "add", "external.txt")
+        tree = sh(repo, "git", "write-tree")
+        external = sh(repo, "git", "commit-tree", tree, "-p", base, "-m", "external")
+        sh(repo, "git", "reset", "--hard", base)
+
+        tx = {
+            "protocol": 2,
+            "kind": "transaction",
+            "transaction_id": "tx-push-race",
+            "repo": "demo",
+            "base_sha": base,
+            "branch": "ai/push-race",
+            "patch": (
+                "diff --git a/README.md b/README.md\n"
+                "--- a/README.md\n"
+                "+++ b/README.md\n"
+                "@@ -1 +1,2 @@\n"
+                " hello\n"
+                "+bridge\n"
+            ),
+            "run": [],
+            "push": True,
+        }
+
+        original_run = core_mod.run
+        moved = False
+
+        def racing_run(argv, **kwargs):
+            nonlocal moved
+            if not moved and "push" in argv:
+                moved = True
+                subprocess.run(
+                    ["git", "-C", str(repo), "update-ref", "refs/heads/ai/push-race", external],
+                    check=True,
+                )
+            return original_run(argv, **kwargs)
+
+        with patch("llm_git_bridge.core.run", side_effect=racing_run):
+            outcome = process_transaction(
+                repo,
+                "demo",
+                tx,
+                state_dir=Path(tempfile.mkdtemp(prefix="llmgb-state-")),
+                safe_branch_prefix="ai/",
+                commands={},
+                allow_push=True,
+            )
+
+        self.assertTrue(moved)
+        self.assertEqual(outcome.result["push"]["status"], "success")
+        self.assertEqual(sh(repo, "git", "rev-parse", "ai/push-race"), external)
+        remote_sha = subprocess.run(
+            ["git", "--git-dir", str(remote), "rev-parse", "refs/heads/ai/push-race"],
+            text=True, stdout=subprocess.PIPE, stderr=subprocess.PIPE, check=True,
+        ).stdout.strip()
+        self.assertEqual(remote_sha, outcome.result["commit"])
+        self.assertNotEqual(remote_sha, external)
+
+    def test_transaction_from_detached_authoritative_head_can_create_safe_branch(self):
+        repo = self.make_repo()
+        base = sh(repo, "git", "rev-parse", "HEAD")
+        sh(repo, "git", "checkout", "--detach", "-q", base)
+        tx = {
+            "protocol": 2,
+            "kind": "transaction",
+            "transaction_id": "tx-detached-head",
+            "repo": "demo",
+            "base_sha": base,
+            "branch": "ai/from-detached",
+            "patch": (
+                "diff --git a/README.md b/README.md\n"
+                "--- a/README.md\n"
+                "+++ b/README.md\n"
+                "@@ -1 +1,2 @@\n"
+                " hello\n"
+                "+detached\n"
+            ),
+            "run": [],
+        }
+        outcome = process_transaction(
+            repo,
+            "demo",
+            tx,
+            state_dir=Path(tempfile.mkdtemp(prefix="llmgb-state-")),
+            safe_branch_prefix="ai/",
+            commands={},
+        )
+        self.assertEqual(outcome.result["status"], "success")
+        self.assertEqual(sh(repo, "git", "rev-parse", "ai/from-detached"), outcome.result["commit"])
+        self.assertEqual(sh(repo, "git", "rev-parse", "HEAD"), base)
+
+    def test_push_without_origin_is_secondary_to_durable_local_commit(self):
+        repo = self.make_repo()
+        base = sh(repo, "git", "rev-parse", "HEAD")
+        tx = {
+            "protocol": 2,
+            "kind": "transaction",
+            "transaction_id": "tx-no-origin",
+            "repo": "demo",
+            "base_sha": base,
+            "branch": "ai/no-origin",
+            "patch": (
+                "diff --git a/README.md b/README.md\n"
+                "--- a/README.md\n"
+                "+++ b/README.md\n"
+                "@@ -1 +1,2 @@\n"
+                " hello\n"
+                "+local\n"
+            ),
+            "run": [],
+            "push": True,
+        }
+        outcome = process_transaction(
+            repo,
+            "demo",
+            tx,
+            state_dir=Path(tempfile.mkdtemp(prefix="llmgb-state-")),
+            safe_branch_prefix="ai/",
+            commands={},
+            allow_push=True,
+        )
+        self.assertEqual(outcome.result["status"], "success")
+        self.assertEqual(outcome.result["push"]["status"], "error")
+        self.assertEqual(sh(repo, "git", "rev-parse", "ai/no-origin"), outcome.result["commit"])
+
+
+    def test_retry_after_crash_immediately_after_transaction_claim_succeeds_once(self):
+        repo = self.make_repo()
+        base = sh(repo, "git", "rev-parse", "HEAD")
+        state = Path(tempfile.mkdtemp(prefix="llmgb-state-"))
+        tx = {
+            "protocol": 2,
+            "kind": "transaction",
+            "transaction_id": "tx-crash-after-claim",
+            "repo": "demo",
+            "base_sha": base,
+            "branch": "ai/crash-after-claim",
+            "patch": (
+                "diff --git a/README.md b/README.md\n"
+                "--- a/README.md\n"
+                "+++ b/README.md\n"
+                "@@ -1 +1,2 @@\n"
+                " hello\n"
+                "+claimed\n"
+            ),
+            "run": [],
+        }
+        request_hash = core_mod.transaction_request_sha256(tx)
+        core_mod._create_transaction_claim(
+            repo, tx["transaction_id"], request_hash, state_dir=state
+        )
+        self.assertEqual(
+            core_mod._read_transaction_claim(repo, tx["transaction_id"]), request_hash
+        )
+        self.assertIsNone(core_mod.branch_tip(repo, tx["branch"]))
+
+        outcome = process_transaction(
+            repo, "demo", tx, state_dir=state, safe_branch_prefix="ai/", commands={}
+        )
+        self.assertEqual(outcome.result["status"], "success")
+        self.assertEqual(sh(repo, "git", "rev-list", "--count", f"{base}..{tx['branch']}"), "1")
+
+    def test_configured_command_timeout_kills_same_group_descendant(self):
+        repo = self.make_repo()
+        marker_path = repo / "descendant-survived"
+        child_code = (
+            "import pathlib,time; time.sleep(0.8); "
+            f"pathlib.Path({str(marker_path)!r}).write_text('survived')"
+        )
+        parent_code = (
+            "import subprocess,sys,time; "
+            f"subprocess.Popen([sys.executable,'-c',{child_code!r}]); "
+            "time.sleep(10)"
+        )
+        result = run_configured_command(
+            [sys.executable, "-c", parent_code],
+            cwd=repo,
+            env=os.environ.copy(),
+            timeout=0.2,
+        )
+        self.assertTrue(result.timed_out)
+        time.sleep(1.0)
+        self.assertFalse(marker_path.exists())
 
 
 if __name__ == "__main__":
