@@ -1827,18 +1827,40 @@ def _process_pending_concurrent(
             transaction_id=filename[:-5],
             execution_s=execution_s,
         )
-        _finalize_request_result(
-            transport,
+
+        # The local mutation is already complete. Make its signed acknowledgement
+        # durable before attempting any remote publication. A transient mailbox
+        # publication failure after this boundary must not clear validated pending
+        # work or synchronously drain unrelated workers: the durable local result is
+        # authoritative and the normal recovery path can republish it without
+        # re-executing the mutation. Failures before durable persistence still
+        # propagate to the outer fail-closed reaper.
+        signed = _build_signed_result(
             filename,
             result,
             downloaded=request.downloaded,
             poll=item.poll,
-            poll_started=item.poll_started,
             request_started=item.request_started,
-            protected_command_log_txids=scheduler.active_transaction_ids(),
         )
+        _persist_signed_result(filename, signed)
+        try:
+            _publish_and_cleanup_result(
+                transport,
+                filename,
+                signed,
+                poll=item.poll,
+                poll_started=item.poll_started,
+                request_started=item.request_started,
+                protected_command_log_txids=scheduler.active_transaction_ids(),
+            )
+        except BridgeError:
+            scheduler_metric(
+                "scheduler-publication-error",
+                transaction_id=filename[:-5],
+            )
+        else:
+            processed += 1
         registry = load_registry()
-        processed += 1
 
     def reap_item(item: _InFlightTransaction, *, block: bool) -> bool:
         worker_outcome: _TransactionWorkerOutcome | None = None

@@ -1137,6 +1137,143 @@ class AppTests(unittest.TestCase):
         self.assertTrue(tx_events)
         self.assertTrue(all(item.get("transaction_id") for item in tx_events))
 
+    def test_c2_result_publication_failure_preserves_pending_and_does_not_drain_workers(self):
+        """A durable result publication failure must not discard queued repo work."""
+        repo_b = self.tmp / "repo-b-publication-retry"
+        shutil.copytree(self._seed_repo, repo_b, symlinks=True)
+        registry = json.loads(app.REGISTRY_FILE.read_text(encoding="utf-8"))
+        registry["repos"]["repo-b"] = {
+            **registry["repos"]["repo"],
+            "id": "repo-b",
+            "name": "repo-b",
+            "path": str(repo_b),
+        }
+        save_json(app.REGISTRY_FILE, registry)
+
+        def request(txid: str, repo_id: str) -> str:
+            return json.dumps({
+                "protocol": 2,
+                "kind": "transaction",
+                "transaction_id": txid,
+                "repo": repo_id,
+                "base_sha": self._seed_head,
+                "branch": f"ai/{txid}",
+                "patch": "",
+                "run": [],
+            }) + "\n"
+
+        self.fake.files["v2/transactions/tx-publish-a1.json"] = request(
+            "tx-publish-a1", "repo"
+        )
+        a1_started = threading.Event()
+        a1_finished = threading.Event()
+        b1_started = threading.Event()
+        publication_failed = threading.Event()
+        a2_started_early = threading.Event()
+        observed: list[str] = []
+        lock = threading.Lock()
+
+        def fake_process(_repo_path, repo_id, obj, **_kwargs):
+            txid = obj["transaction_id"]
+            with lock:
+                observed.append(txid)
+            if txid == "tx-publish-a1":
+                a1_started.set()
+                self.assertTrue(
+                    publication_failed.wait(5.0),
+                    "independent B1 did not reach its publication failure while A1 was active",
+                )
+                a1_finished.set()
+            elif txid == "tx-publish-a2":
+                if not a1_finished.is_set():
+                    a2_started_early.set()
+            elif txid == "tx-publish-b1":
+                b1_started.set()
+            return Mock(
+                result={
+                    "protocol": 2,
+                    "kind": "result",
+                    "transaction_id": txid,
+                    "repo": repo_id,
+                    "branch": obj["branch"],
+                    "status": "success",
+                    "processed_at": "test",
+                },
+                snapshot=None,
+            )
+
+        def inject_live_arrivals():
+            self.assertTrue(a1_started.wait(2.0))
+            self.fake.files["v2/transactions/tx-publish-a2.json"] = request(
+                "tx-publish-a2", "repo"
+            )
+            self.fake.files["v2/transactions/tx-publish-b1.json"] = request(
+                "tx-publish-b1", "repo-b"
+            )
+
+        real_publish = app._publish_and_cleanup_result
+        failed_once = False
+
+        def fail_b1_publication(transport, filename, result, **kwargs):
+            nonlocal failed_once
+            if filename == "tx-publish-b1.json" and not failed_once:
+                failed_once = True
+                publication_failed.set()
+                raise BridgeError("simulated durable result publication failure")
+            return real_publish(transport, filename, result, **kwargs)
+
+        cfg = dict(self.cfg)
+        cfg["max_workers"] = 2
+        cfg["max_pending_jobs"] = 8
+        cfg["poll_interval"] = 0.5
+        injector = threading.Thread(target=inject_live_arrivals)
+        injector.start()
+        scheduler = app._LocalWorkerScheduler(max_workers=2, queue_capacity=2)
+        scheduler.start()
+        try:
+            with patch("llm_git_bridge.app.process_transaction", side_effect=fake_process), patch(
+                "llm_git_bridge.app._publish_and_cleanup_result",
+                side_effect=fail_b1_publication,
+            ):
+                # A1 and A2 publish normally; B1 remains a durable local result for retry.
+                self.assertEqual(app.process_pending_once(cfg, scheduler=scheduler), 2)
+        finally:
+            injector.join(2.0)
+            scheduler.shutdown(cancel_running=True)
+
+        self.assertTrue(failed_once)
+        self.assertTrue(b1_started.is_set())
+        self.assertFalse(a2_started_early.is_set())
+        self.assertLess(observed.index("tx-publish-b1"), observed.index("tx-publish-a2"))
+        local_b1 = app.STATE_DIR / "results" / "tx-publish-b1.json"
+        self.assertTrue(local_b1.exists())
+        self.assertIn("v2/transactions/tx-publish-b1.json", self.fake.files)
+        scheduler_events = [
+            item for item in app._recent_metrics(100)
+            if item.get("event", "").startswith("scheduler-")
+        ]
+        self.assertTrue(any(
+            item.get("event") == "scheduler-publication-error"
+            and item.get("transaction_id") == "tx-publish-b1"
+            for item in scheduler_events
+        ))
+
+        # Recovery must publish the durable result without re-executing B1.
+        old = time.time() - app.RESULT_RETRY_GRACE_S - 1.0
+        os.utime(local_b1, (old, old))
+
+        def must_not_execute(_task, _cancel):
+            raise AssertionError("durable publication recovery re-executed a mutation")
+
+        retry = app._LocalWorkerScheduler(max_workers=2, queue_capacity=2, worker_fn=must_not_execute)
+        retry.start()
+        try:
+            self.assertEqual(app.process_pending_once(cfg, scheduler=retry), 1)
+        finally:
+            retry.shutdown(cancel_running=True)
+        self.assertIn("v2/results/tx-publish-b1.json", self.fake.files)
+        self.assertNotIn("v2/transactions/tx-publish-b1.json", self.fake.files)
+
     def test_g_scheduler_metrics_expose_bounded_public_operational_fields(self):
         self.cfg["max_workers"] = 2
         txid = "tx-g-metrics"
@@ -1237,11 +1374,18 @@ class AppTests(unittest.TestCase):
         first.start()
         try:
             with patch("llm_git_bridge.app._publish_and_cleanup_result", side_effect=BridgeError("transport down")):
-                with self.assertRaisesRegex(BridgeError, "transport down"):
-                    app.process_pending_once(self.cfg, scheduler=first)
+                self.assertEqual(app.process_pending_once(self.cfg, scheduler=first), 0)
         finally:
             first.shutdown(cancel_running=True)
         self.assertCountEqual(executed, list(txids))
+        publication_errors = [
+            item for item in app._recent_metrics(50)
+            if item.get("event") == "scheduler-publication-error"
+        ]
+        self.assertCountEqual(
+            [item.get("transaction_id") for item in publication_errors],
+            list(txids),
+        )
         for txid in txids:
             local_result = app.STATE_DIR / "results" / f"{txid}.json"
             self.assertTrue(local_result.exists())
@@ -1366,8 +1510,9 @@ class AppTests(unittest.TestCase):
 
         self.assertLess(concurrent_s, serial_s * 0.80, (serial_s, concurrent_s))
 
-    def test_c1_publication_failure_reaps_all_inflight_workers(self):
-        repo_b = self.tmp / "repo-b-publication-failure"
+    def test_c1_durable_result_persistence_failure_reaps_all_inflight_workers(self):
+        """Failure before the durable-result boundary must still unwind fail-closed."""
+        repo_b = self.tmp / "repo-b-persistence-failure"
         shutil.copytree(self._seed_repo, repo_b, symlinks=True)
         registry = json.loads(app.REGISTRY_FILE.read_text(encoding="utf-8"))
         registry["repos"]["repo-b"] = {
@@ -1378,15 +1523,15 @@ class AppTests(unittest.TestCase):
         }
         save_json(app.REGISTRY_FILE, registry)
 
-        for suffix, repo_id in (("a", "repo"), ("b", "repo-b")):
-            txid = f"tx-c1-publish-fail-{suffix}"
+        txids = ("tx-c1-persist-fail-a", "tx-c1-persist-fail-b")
+        for txid, repo_id in zip(txids, ("repo", "repo-b")):
             self.fake.files[f"v2/transactions/{txid}.json"] = json.dumps({
                 "protocol": 2,
                 "kind": "transaction",
                 "transaction_id": txid,
                 "repo": repo_id,
                 "base_sha": self._seed_head,
-                "branch": f"ai/c1-publish-fail-{suffix}",
+                "branch": f"ai/{txid}",
                 "patch": "",
                 "run": [],
             }) + "\n"
@@ -1395,38 +1540,36 @@ class AppTests(unittest.TestCase):
 
         def worker(task, _cancel):
             barrier.wait(2.0)
-            return self._b2_dummy_worker_outcome(
-                task.filename[:-5], repo_id=task.repo_id
-            )
+            return self._b2_dummy_worker_outcome(task.filename[:-5], repo_id=task.repo_id)
 
-        publish_calls = 0
+        real_persist = app._persist_signed_result
+        persist_calls = 0
 
-        def fail_first_publication(*_args, **_kwargs):
-            nonlocal publish_calls
-            publish_calls += 1
-            if publish_calls == 1:
-                raise BridgeError("simulated publication failure")
+        def fail_first_persistence(filename, result):
+            nonlocal persist_calls
+            persist_calls += 1
+            if persist_calls == 1:
+                raise BridgeError("simulated durable result persistence failure")
+            return real_persist(filename, result)
 
-        scheduler = app._LocalWorkerScheduler(
-            max_workers=2, queue_capacity=2, worker_fn=worker
-        )
+        scheduler = app._LocalWorkerScheduler(max_workers=2, queue_capacity=2, worker_fn=worker)
         scheduler.start()
         try:
             with patch(
-                "llm_git_bridge.app._publish_and_cleanup_result",
-                side_effect=fail_first_publication,
+                "llm_git_bridge.app._persist_signed_result",
+                side_effect=fail_first_persistence,
             ):
-                with self.assertRaisesRegex(BridgeError, "simulated publication failure"):
+                with self.assertRaisesRegex(BridgeError, "simulated durable result persistence failure"):
                     app.process_pending_once(self.cfg, scheduler=scheduler)
-
-            self.assertEqual(publish_calls, 2)
+            self.assertEqual(persist_calls, 2)
             self.assertEqual(scheduler.active_count(), 0)
             self.assertEqual(scheduler.active_repo_keys(), frozenset())
             self.assertEqual(scheduler.active_transaction_ids(), frozenset())
-            for suffix in ("a", "b"):
-                self.assertTrue(
-                    (app.STATE_DIR / "results" / f"tx-c1-publish-fail-{suffix}.json").exists()
-                )
+            durable = [
+                (app.STATE_DIR / "results" / f"{txid}.json").exists()
+                for txid in txids
+            ]
+            self.assertEqual(sum(durable), 1)
         finally:
             scheduler.shutdown(cancel_running=True)
 

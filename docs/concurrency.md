@@ -1,6 +1,6 @@
 # Concurrency and multiple clients
 
-`llm-git-bridge` `1.0.0rc3` keeps the frozen `0.3.0` release as its semantic oracle and adds **bounded local concurrency across different canonical repositories** while retaining one mailbox owner. `max_workers` still defaults to `1` as a conservative migration policy; operators can explicitly enable the recommended initial setting of two workers after qualification on their host.
+`llm-git-bridge` `1.0.0rc4` keeps the frozen `0.3.0` release as its semantic oracle and adds **bounded local concurrency across different canonical repositories** while retaining one mailbox owner. `max_workers` still defaults to `1` as a conservative migration policy; operators can explicitly enable the recommended initial setting of two workers after qualification on their host.
 
 ## What is concurrent
 

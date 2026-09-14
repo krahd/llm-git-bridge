@@ -174,3 +174,8 @@ The public candidate remains conservative on activation: `max_workers=1` is the 
 ### RC2 live-arrival correction (2026-09-13)
 
 The first post-promotion two-worker canary exposed a gap not covered by the same-batch scheduler tests: while one long transaction was executing, requests uploaded afterwards were not discovered until the initial batch drained. The worker scheduler itself was correct, but the outer watcher polling boundary prevented real-time use of idle worker capacity. RC2 fixes this by polling for newly arriving mailbox work while workers execute, without changing the single-owner transport model. A dedicated regression reproduces the production arrival sequence and requires cross-repository overlap plus same-repository exclusion. RC1 was not tagged after this finding; RC2 supersedes it.
+
+
+### RC4 durable-result publication boundary (2026-09-14)
+
+The RC3 production canary verified later-arrival concurrency and transient live-list recovery, then exposed a distinct result-publication head-of-line path: after an independent worker completed and its signed result was durably saved, a transient remote publication failure still unwound the concurrent scheduler frame, cleared validated pending work, and drained active workers. RC4 contains only post-durable `BridgeError` publication failures, records `scheduler-publication-error`, preserves pending/active scheduler state, and relies on the existing authenticated durable-result replay path. Pre-durable persistence failures remain fail-closed. RC3 remains deployed as the recovery baseline until RC4 completes the same local, production-Mac, materialisation, promotion, and live-canary gates; RC3 must not be tagged.

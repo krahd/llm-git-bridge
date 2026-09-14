@@ -4,7 +4,7 @@
 
 It exposes a deliberately small mailbox protocol for repository discovery, filtered snapshots, patch transactions, local validation commands, commits, and optional safe-branch pushes. Google Drive through `rclone` is the first transport, but the core protocol is provider-neutral: the remote client does not need direct filesystem access, a GitHub token, or arbitrary shell access on the host.
 
-> **Status:** `1.0.0rc3` protocol-v2 release candidate. The frozen `0.3.0` single-thread release remains the semantic oracle. Local transaction execution is bounded and may overlap across different canonical repositories; same-repository mutation remains serial. Existing and new configurations default to `max_workers=1` unless the operator explicitly enables concurrency.
+> **Status:** `1.0.0rc4` protocol-v2 release candidate. The frozen `0.3.0` single-thread release remains the semantic oracle. Local transaction execution is bounded and may overlap across different canonical repositories; same-repository mutation remains serial. Existing and new configurations default to `max_workers=1` unless the operator explicitly enables concurrency.
 
 ## Why use it?
 

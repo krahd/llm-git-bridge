@@ -1,4 +1,4 @@
-# v1.0.0rc3 concurrent-architecture audit
+# v1.0.0rc4 concurrent-architecture audit
 
 Date: 2026-09-13
 
@@ -135,7 +135,7 @@ best-effort; transaction correctness never depends on them.
 
 ## Release gates
 
-Before the candidate may be called `1.0.0rc3`:
+Before the candidate may be called `1.0.0rc4`:
 
 1. complete suite passes under bounded default sharding;
 2. complete suite passes under an independent hash seed and an alternate bounded shard count;
@@ -159,3 +159,12 @@ The RC2 production canary exposed a second watcher-level failure mode after the 
 RC3 changes the live-repoll failure boundary: `BridgeError` during active live discovery is recorded as `scheduler-live-poll-error`, already validated pending work and active workers are preserved, and discovery is retried on the next live-poll interval. Persistent transport failure is still surfaced by the ordinary outer poll after the active batch drains, so the change does not convert a broken mailbox into silent success. Scheduler enqueue/dispatch/finish metrics now include the bounded public `transaction_id`, allowing production canaries to prove ordering directly rather than inferring job identity from execution duration.
 
 A dedicated regression injects A1, later A2 on the same repository, then a transient live-list failure before later B1 on an independent repository. RC3 must retain A2, retry discovery, dispatch B1 before A2, prevent A2 from starting before A1 releases, emit the live-poll-error metric, and attach transaction identity to scheduler lifecycle metrics.
+
+
+## RC3 production result-publication finding and RC4 hardening
+
+The post-promotion RC3 canary proved the live-repoll repair under real transient list failures, but its transaction-ID chronology exposed a separate watcher-owned transport boundary. Independent B1 finished while long-running A1 was active, yet B1's first remote result-publication attempt failed. The signed local result had already been persisted, but the publication `BridgeError` escaped the concurrent processing frame. The outer fail-closed reaper then cleared queued same-repository A2 and synchronously waited for A1. A2 was rediscovered only after A1 completed. This preserved correctness and idempotency, but recreated avoidable head-of-line blocking under a result-publication hiccup. RC3 is therefore not tagged.
+
+RC4 makes the durable-result boundary explicit in the concurrent completion path. The watcher builds and persists the signed local acknowledgement first. Only a `BridgeError` from the subsequent remote publication/cleanup phase is contained as `scheduler-publication-error`; the repository worker is released, validated pending work is preserved, unrelated workers continue, and the existing durable-result recovery path republishes without re-executing the mutation. Failures before the signed result is durably persisted still propagate to the outer fail-closed reaper.
+
+Dedicated regressions prove both sides of the boundary: a B1 publication failure while A1 is active must not discard queued A2 or drain A1, and later recovery must publish B1 without mutation re-execution; conversely, a durable-local-result persistence failure must still unwind and reap all in-flight workers.
