@@ -13,6 +13,14 @@ The production measurements below were taken on one macOS host. The post-promoti
 
 Treat these numbers as reference measurements, not an SLA or cross-platform benchmark.
 
+## Single-thread gold qualification
+
+Version `0.3.0` is the frozen single-thread semantic baseline for later scheduler/concurrency work. The final pre-qualification A3 candidate runs **193 tests**. Its first production-Mac acceptance completed the configured validation command in **50.426 s** and the entire local edit transaction in **55.687 s**, at commit `33ffcdd091fcae1be80915d4f8a18389ff31be0e`. Independent materialisation matched 33/33 tracked files with no SHA-256 mismatch.
+
+That single measurement is not treated as the gold performance claim. A4 records multiple production-Mac full-suite runs plus live control/edit/materialise/restart samples; the durable qualification report in the project Drive is the authoritative variance corpus. Later concurrent versions must compare both against their own `max_workers=1` mode and against this `0.3.0` baseline.
+
+The A3 pass also reduced the sequential test suite's Git subprocess count from 1,022 to 925 and introduced a bounded, test-only four-process sharded runner. The daemon itself remains strictly single-threaded in `0.3.0`. On the production Mac this reduced the A2 192-test configured gate from 238.934 s to 50.426 s for 193 tests.
+
 ## Validation-suite improvement
 
 A strict audit found that the same test suite that took roughly nine seconds in an isolated Linux audit environment took several minutes on the production Mac. Controlled probes showed unusually high per-process cost on that host, while the test suite launched more than a thousand Git subprocesses.
