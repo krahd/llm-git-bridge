@@ -940,6 +940,94 @@ class AppTests(unittest.TestCase):
         for txid, _repo_id in specs:
             self.assertEqual(json.loads(self.fake.files[f"v2/results/{txid}.json"])["status"], "success")
 
+    def test_c2_live_arrival_during_active_job_uses_idle_worker_without_same_repo_overlap(self):
+        """A later mailbox poll must admit repo B while repo A1 is still running."""
+        repo_b = self.tmp / "repo-b-live-arrival"
+        shutil.copytree(self._seed_repo, repo_b, symlinks=True)
+        registry = json.loads(app.REGISTRY_FILE.read_text(encoding="utf-8"))
+        registry["repos"]["repo-b"] = {
+            **registry["repos"]["repo"],
+            "id": "repo-b",
+            "name": "repo-b",
+            "path": str(repo_b),
+        }
+        save_json(app.REGISTRY_FILE, registry)
+
+        def request(txid: str, repo_id: str) -> str:
+            return json.dumps({
+                "protocol": 2,
+                "kind": "transaction",
+                "transaction_id": txid,
+                "repo": repo_id,
+                "base_sha": self._seed_head,
+                "branch": f"ai/{txid}",
+                "patch": "",
+                "run": [],
+            }) + "\n"
+
+        # Only A1 exists in the initial mailbox snapshot. A2/B1 appear after A1
+        # starts, matching the production defect found by the post-RC canary.
+        self.fake.files["v2/transactions/tx-live-a1.json"] = request("tx-live-a1", "repo")
+        a1_started = threading.Event()
+        b1_started = threading.Event()
+        release_a1 = threading.Event()
+        a2_started_early = threading.Event()
+        observed: list[str] = []
+        lock = threading.Lock()
+
+        def fake_process(_repo_path, repo_id, obj, **_kwargs):
+            txid = obj["transaction_id"]
+            with lock:
+                observed.append(txid)
+            if txid == "tx-live-a1":
+                a1_started.set()
+                self.assertTrue(b1_started.wait(2.0), "watcher did not discover live repo-B arrival")
+                release_a1.wait(2.0)
+            elif txid == "tx-live-a2":
+                if not release_a1.is_set():
+                    a2_started_early.set()
+            elif txid == "tx-live-b1":
+                b1_started.set()
+                release_a1.set()
+            return Mock(
+                result={
+                    "protocol": 2,
+                    "kind": "result",
+                    "transaction_id": txid,
+                    "repo": repo_id,
+                    "branch": obj["branch"],
+                    "status": "success",
+                    "processed_at": "test",
+                },
+                snapshot=None,
+            )
+
+        def inject_live_arrivals():
+            self.assertTrue(a1_started.wait(2.0))
+            self.fake.files["v2/transactions/tx-live-a2.json"] = request("tx-live-a2", "repo")
+            self.fake.files["v2/transactions/tx-live-b1.json"] = request("tx-live-b1", "repo-b")
+
+        cfg = dict(self.cfg)
+        cfg["max_workers"] = 2
+        cfg["max_pending_jobs"] = 8
+        cfg["poll_interval"] = 0.5
+        injector = threading.Thread(target=inject_live_arrivals)
+        injector.start()
+        scheduler = app._LocalWorkerScheduler(max_workers=2, queue_capacity=2)
+        scheduler.start()
+        try:
+            with patch("llm_git_bridge.app.process_transaction", side_effect=fake_process):
+                self.assertEqual(app.process_pending_once(cfg, scheduler=scheduler), 3)
+        finally:
+            release_a1.set()
+            injector.join(2.0)
+            scheduler.shutdown(cancel_running=True)
+
+        self.assertFalse(a2_started_early.is_set())
+        self.assertLess(observed.index("tx-live-b1"), observed.index("tx-live-a2"))
+        for txid in ("tx-live-a1", "tx-live-a2", "tx-live-b1"):
+            self.assertEqual(json.loads(self.fake.files[f"v2/results/{txid}.json"])["status"], "success")
+
     def test_g_scheduler_metrics_expose_bounded_public_operational_fields(self):
         self.cfg["max_workers"] = 2
         txid = "tx-g-metrics"

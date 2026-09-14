@@ -170,3 +170,7 @@ The resulting contract is: fixed 1–8 workers; 1–32 pending validated jobs wi
 Concurrent fault tests prove repository-isolated worker failure, publication-outage recovery without mutation re-execution, cancellation/shutdown ownership cleanup, and exact result mapping despite out-of-order completion. Scale tests exercise ten repositories with four workers and enforce zero same-repository overlap and queue bounds. Transport concurrency and adaptive worker selection were deliberately rejected: neither supplied enough measured benefit to justify the larger correctness surface.
 
 The public candidate remains conservative on activation: `max_workers=1` is the migration default, while `configure-concurrency --workers 2 --max-pending-jobs 8` is the recommended first concurrent configuration after host qualification.
+
+### RC2 live-arrival correction (2026-09-13)
+
+The first post-promotion two-worker canary exposed a gap not covered by the same-batch scheduler tests: while one long transaction was executing, requests uploaded afterwards were not discovered until the initial batch drained. The worker scheduler itself was correct, but the outer watcher polling boundary prevented real-time use of idle worker capacity. RC2 fixes this by polling for newly arriving mailbox work while workers execute, without changing the single-owner transport model. A dedicated regression reproduces the production arrival sequence and requires cross-repository overlap plus same-repository exclusion. RC1 was not tagged after this finding; RC2 supersedes it.

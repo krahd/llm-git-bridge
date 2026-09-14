@@ -1,6 +1,6 @@
 # Concurrency and multiple clients
 
-`llm-git-bridge` `1.0.0rc1` keeps the frozen `0.3.0` release as its semantic oracle and adds **bounded local concurrency across different canonical repositories** while retaining one mailbox owner. `max_workers` still defaults to `1` as a conservative migration policy; operators can explicitly enable the recommended initial setting of two workers after qualification on their host.
+`llm-git-bridge` `1.0.0rc2` keeps the frozen `0.3.0` release as its semantic oracle and adds **bounded local concurrency across different canonical repositories** while retaining one mailbox owner. `max_workers` still defaults to `1` as a conservative migration policy; operators can explicitly enable the recommended initial setting of two workers after qualification on their host.
 
 ## What is concurrent
 
@@ -55,11 +55,11 @@ For a brand-new branch, the requested base must still equal the authoritative re
 
 ## Head-of-line blocking
 
-With the default `max_workers=1`, one slow transaction still delays later edit transactions. With `max_workers=2`, a slow transaction for repository A can overlap local execution for repository B, while same-repository work remains serialised. Mailbox transport and result publication remain serial. A bounded watcher-owned backlog (`max_pending_jobs`, default 8, valid 1–32 and never lower than `max_workers`) allows the watcher to look past blocked same-repository work without accepting an unbounded amount of untrusted request data. Repository admission is round-robin across runnable repositories while preserving per-repository discovery order.
+With the default `max_workers=1`, one slow transaction still delays later edit transactions. With `max_workers=2`, a slow transaction for repository A can overlap local execution for repository B, while same-repository work remains serialised. The watcher continues polling the mailbox while workers run, so repository B does not have to be present in the same initial list call as repository A. Mailbox transport and result publication remain serial and watcher-owned. A bounded watcher-owned backlog (`max_pending_jobs`, default 8, valid 1–32 and never lower than `max_workers`) allows the watcher to look past blocked same-repository work without accepting an unbounded amount of untrusted request data. Repository admission is round-robin across runnable repositories while preserving per-repository discovery order.
 
 The A3 precursor once completed the configured validation gate in 50.4 seconds, but A4 deliberately established a repeated-run gold baseline instead: the hardened 196-test tree completed three production-Mac runs in 67.3–71.2 seconds (median 68.0 s). A transaction running that suite therefore still occupies the single execution stream for roughly a minute before the next edit transaction can start.
 
-Lightweight `doctor`/diagnostics requests are much faster but still wait behind an already-running edit transaction.
+Lightweight `doctor`/diagnostics requests are discovered on watcher re-polls and remain watcher-owned fast-path operations; they are not forced to wait for an already-running repository worker to finish.
 
 ## Recommended multi-session workflow
 

@@ -973,6 +973,8 @@ class _PendingTransaction:
     request_started: float
     enqueued_at: float
     fair_key: str
+    poll: _TransactionPoll
+    poll_started: float
 
 
 @dataclass(frozen=True)
@@ -985,6 +987,8 @@ class _InFlightTransaction:
     scheduling_key: str
     enqueued_at: float
     dispatched_at: float
+    poll: _TransactionPoll
+    poll_started: float
 
 
 _WORKER_STOP = object()
@@ -1110,6 +1114,29 @@ class _LocalWorkerScheduler:
             raise BridgeError("scheduler handle is not active")
         try:
             completion = handle.completion.get()
+            if not isinstance(completion, _WorkerCompletion) or completion.task_id != handle.task_id:
+                raise BridgeError("scheduler returned an invalid completion")
+            if completion.error is not None:
+                raise completion.error
+            if completion.outcome is None:
+                raise BridgeError("scheduler returned no outcome")
+            return completion.outcome
+        finally:
+            self._active_tasks.pop(handle.task_id, None)
+            self._inflight_repo_keys.discard(task.scheduling_key)
+            self._inflight_txids.discard(self._task_txid(task))
+
+    def try_wait(self, handle: _WorkerHandle) -> _TransactionWorkerOutcome | None:
+        """Return a completed worker outcome without blocking, else ``None``."""
+        self._assert_owner()
+        task = self._active_tasks.get(handle.task_id)
+        if task is None:
+            raise BridgeError("scheduler handle is not active")
+        try:
+            completion = handle.completion.get_nowait()
+        except queue.Empty:
+            return None
+        try:
             if not isinstance(completion, _WorkerCompletion) or completion.task_id != handle.task_id:
                 raise BridgeError("scheduler returned an invalid completion")
             if completion.error is not None:
@@ -1731,10 +1758,11 @@ def _process_pending_concurrent(
     """Execute independent repository transactions concurrently.
 
     The watcher owns discovery, validation, admission, transport and publication.
-    Validated transactions may wait in a bounded watcher-owned queue so a burst for
-    repository A cannot force the watcher to block before discovering runnable work
-    for repository B. Worker admission is re-resolved immediately before dispatch,
-    preserving the registry-change fail-closed invariant.
+    While workers execute, the watcher continues polling the mailbox so requests
+    arriving after the initial batch can use idle worker capacity. Validated
+    transactions may wait in a bounded watcher-owned queue, preserving same-repo
+    serialization and fair admission without turning worker threads into transport
+    owners.
     """
     active: list[_InFlightTransaction] = []
     pending: list[_PendingTransaction] = []
@@ -1742,6 +1770,8 @@ def _process_pending_concurrent(
     fair_cursor = 0
     processed = 0
     max_pending_jobs = int(cfg.get("max_pending_jobs", 8))
+    live_poll_interval = _validate_poll_interval(cfg.get("poll_interval", 1.0))
+    next_live_poll_at = time.monotonic() + live_poll_interval
 
     def scheduler_metric(event: str, *, queue_wait_s: float | None = None, execution_s: float | None = None) -> None:
         active_workers = scheduler.active_count()
@@ -1759,12 +1789,20 @@ def _process_pending_concurrent(
             metric["execution_s"] = round(execution_s, 4)
         _append_metric(metric)
 
-    def finish_inflight(item: _InFlightTransaction) -> None:
-        nonlocal registry
+    def finish_completed_item(
+        item: _InFlightTransaction,
+        worker_outcome: _TransactionWorkerOutcome | None,
+        worker_error: BaseException | None,
+    ) -> None:
+        nonlocal registry, processed
         request = item.request
         filename = request.downloaded.filename
+        active.remove(item)
         try:
-            worker_outcome = scheduler.wait(item.handle)
+            if worker_error is not None:
+                raise worker_error
+            if worker_outcome is None:
+                raise BridgeError("scheduler returned no outcome")
             result = _publish_transaction_snapshot(transport, request, worker_outcome)
         except Exception as exc:
             result = {
@@ -1782,18 +1820,28 @@ def _process_pending_concurrent(
             filename,
             result,
             downloaded=request.downloaded,
-            poll=poll,
-            poll_started=poll_started,
+            poll=item.poll,
+            poll_started=item.poll_started,
             request_started=item.request_started,
             protected_command_log_txids=scheduler.active_transaction_ids(),
         )
         registry = load_registry()
-
-    def drain_item(item: _InFlightTransaction) -> None:
-        nonlocal processed
-        active.remove(item)
-        finish_inflight(item)
         processed += 1
+
+    def reap_item(item: _InFlightTransaction, *, block: bool) -> bool:
+        worker_outcome: _TransactionWorkerOutcome | None = None
+        worker_error: BaseException | None = None
+        try:
+            if block:
+                worker_outcome = scheduler.wait(item.handle)
+            else:
+                worker_outcome = scheduler.try_wait(item.handle)
+                if worker_outcome is None:
+                    return False
+        except BaseException as exc:
+            worker_error = exc
+        finish_completed_item(item, worker_outcome, worker_error)
+        return True
 
     def dispatch_pending() -> int:
         """Dispatch runnable queued jobs using round-robin repository fairness."""
@@ -1856,8 +1904,8 @@ def _process_pending_concurrent(
                     filename,
                     result,
                     downloaded=item.request.downloaded,
-                    poll=poll,
-                    poll_started=poll_started,
+                    poll=item.poll,
+                    poll_started=item.poll_started,
                     request_started=item.request_started,
                     protected_command_log_txids=scheduler.active_transaction_ids(),
                 )
@@ -1873,6 +1921,8 @@ def _process_pending_concurrent(
                 scheduling_key=chosen_task.scheduling_key,
                 enqueued_at=item.enqueued_at,
                 dispatched_at=dispatched_at,
+                poll=item.poll,
+                poll_started=item.poll_started,
             ))
             scheduler_metric("scheduler-dispatch", queue_wait_s=dispatched_at - item.enqueued_at)
             dispatched += 1
@@ -1881,7 +1931,7 @@ def _process_pending_concurrent(
     def drain_one() -> None:
         if not active:
             raise BridgeError("scheduler admission state is inconsistent")
-        drain_item(active[0])
+        reap_item(active[0], block=True)
         dispatch_pending()
 
     def drain_all() -> None:
@@ -1892,8 +1942,19 @@ def _process_pending_concurrent(
             if active:
                 drain_one()
 
-    try:
-        for filename in still_pending:
+    def owned_filenames() -> set[str]:
+        return {
+            *(item.request.downloaded.filename for item in pending),
+            *(item.request.downloaded.filename for item in active),
+        }
+
+    def ingest_requests(
+        current_poll: _TransactionPoll,
+        current_poll_started: float,
+        filenames: tuple[str, ...],
+    ) -> None:
+        nonlocal registry, processed
+        for filename in filenames:
             # Bound validated-but-not-finished work before downloading another
             # untrusted request. This bounds memory even under mailbox floods.
             while len(pending) + len(active) >= max_pending_jobs:
@@ -1908,9 +1969,9 @@ def _process_pending_concurrent(
                 downloaded = _download_remote_request(
                     transport,
                     filename,
-                    reported_size=poll.size_for(filename),
-                    poll=poll,
-                    poll_started=poll_started,
+                    reported_size=current_poll.size_for(filename),
+                    poll=current_poll,
+                    poll_started=current_poll_started,
                 )
                 if downloaded is None:
                     continue
@@ -1922,7 +1983,14 @@ def _process_pending_concurrent(
                     fair_key = job.scheduling_key or request.downloaded.filename
                     if fair_key not in fair_order:
                         fair_order.append(fair_key)
-                    pending.append(_PendingTransaction(request, request_started, enqueued_at, fair_key))
+                    pending.append(_PendingTransaction(
+                        request,
+                        request_started,
+                        enqueued_at,
+                        fair_key,
+                        current_poll,
+                        current_poll_started,
+                    ))
                     scheduler_metric("scheduler-enqueue")
                     dispatch_pending()
                     continue
@@ -1968,14 +2036,60 @@ def _process_pending_concurrent(
                 filename,
                 result,
                 downloaded=downloaded,
-                poll=poll,
-                poll_started=poll_started,
+                poll=current_poll,
+                poll_started=current_poll_started,
                 request_started=request_started,
                 protected_command_log_txids=scheduler.active_transaction_ids(),
             )
             processed += 1
 
-        drain_all()
+    try:
+        ingest_requests(poll, poll_started, still_pending)
+
+        # Keep the watcher responsive to newly arriving work while workers execute.
+        # A previous implementation drained the initial batch before returning to
+        # the outer watch loop, which silently reduced real-world concurrency to
+        # "requests visible in the same list call". Repolling here preserves the
+        # single transport owner while allowing idle workers to accept later arrivals.
+        while pending or active:
+            dispatch_pending()
+
+            reaped_any = False
+            for item in list(active):
+                if reap_item(item, block=False):
+                    reaped_any = True
+            if reaped_any:
+                dispatch_pending()
+                continue
+
+            if pending and not active:
+                raise BridgeError("scheduler pending queue cannot make progress")
+            if not active:
+                break
+
+            now = time.monotonic()
+            if now >= next_live_poll_at and not (cancel_check is not None and cancel_check()):
+                live_poll_started = time.monotonic()
+                live_poll = _poll_transaction_mailbox(transport)
+                classified = _classify_transaction_mailbox(transport, live_poll)
+                owned = owned_filenames()
+                fresh_candidates = tuple(
+                    filename for filename in classified.candidates if filename not in owned
+                )
+                recovered, fresh_pending = _recover_durable_local_results(
+                    transport,
+                    fresh_candidates,
+                )
+                processed += recovered
+                if fresh_pending:
+                    ingest_requests(live_poll, live_poll_started, fresh_pending)
+                next_live_poll_at = time.monotonic() + live_poll_interval
+                continue
+
+            sleep_for = min(0.05, max(0.0, next_live_poll_at - now))
+            if sleep_for:
+                time.sleep(sleep_for)
+
         return processed
     except BaseException:
         # Reap every submitted worker before unwinding. Pending requests were never
@@ -1984,11 +2098,13 @@ def _process_pending_concurrent(
         while active:
             item = active[0]
             try:
-                drain_item(item)
+                reap_item(item, block=True)
             except BaseException:
+                # If result publication itself fails, continue reaping other workers.
+                if item in active:
+                    active.remove(item)
                 continue
         raise
-
 
 def process_pending_once(
     cfg: dict[str, Any],

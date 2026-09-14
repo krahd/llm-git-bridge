@@ -1,4 +1,4 @@
-# v1.0.0rc1 concurrent-architecture audit
+# v1.0.0rc2 concurrent-architecture audit
 
 Date: 2026-09-13
 
@@ -40,6 +40,30 @@ A deterministic regression test forces the adverse `A1, A2, B1` ordering and
 requires `B1` to start before `A2`, while independently asserting that `A2` cannot
 start before `A1` releases repository ownership.
 
+## Post-RC1 production-canary finding fixed in RC2
+
+The first live post-promotion canary found a second, distinct watcher-level defect
+that same-batch tests could not expose. The concurrent path accepted all requests
+visible in one mailbox list, dispatched them correctly, and then synchronously
+drained that batch before returning to the outer watcher loop. A request uploaded
+while a long worker was already executing therefore remained remote and undiscovered
+until that worker finished, leaving otherwise idle worker capacity unused. In
+practice, concurrency depended on requests being visible in the same list call.
+
+RC2 keeps transport ownership on the watcher but re-polls the transaction mailbox
+while repository workers execute. Newly arrived requests are validated and admitted
+against the same bounded pending set; active and pending filenames are excluded from
+rediscovery; durable-result recovery still precedes any re-execution; and canonical
+repository exclusion is rechecked immediately before handoff. A non-blocking worker
+completion API lets the watcher alternate completion reaping with mailbox polling
+without transferring Drive/rclone ownership to worker threads.
+
+The new regression starts with only repository A1 visible. After A1 has begun, A2
+and independent B1 are inserted into a later mailbox poll. The test requires B1 to
+start on the idle second worker while A1 is still active, and simultaneously proves
+that A2 cannot start until A1 releases the repository. This is the exact arrival
+pattern that failed in the production canary.
+
 ## Concurrency / recovery attack matrix
 
 | Scenario | Release-candidate result |
@@ -48,6 +72,7 @@ start before `A1` releases repository ownership.
 | same repository overlaps | rejected by canonical-path in-flight ownership |
 | two registry IDs point to same path | alias test serialises them by resolved path |
 | same-repository burst hides independent work | fixed; adverse ordering regression passes |
+| independent request arrives after a long job starts | fixed in RC2; live-arrival later-poll regression passes |
 | worker A raises while worker B succeeds | B result remains correctly mapped/successful |
 | completions arrive out of submission order | per-handle result mapping remains exact |
 | publication fails with multiple workers complete | all workers are reaped and signed local results remain durable |
@@ -110,7 +135,7 @@ best-effort; transaction correctness never depends on them.
 
 ## Release gates
 
-Before the candidate may be called `1.0.0rc1`:
+Before the candidate may be called `1.0.0rc2`:
 
 1. complete suite passes under bounded default sharding;
 2. complete suite passes under an independent hash seed and an alternate bounded shard count;
