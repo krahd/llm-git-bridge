@@ -4,7 +4,7 @@
 
 It exposes a deliberately small mailbox protocol for repository discovery, filtered snapshots, patch transactions, local validation commands, commits, and optional safe-branch pushes. Google Drive through `rclone` is the first transport, but the core protocol is provider-neutral: the remote client does not need direct filesystem access, a GitHub token, or arbitrary shell access on the host.
 
-> **Status:** alpha (`0.2.0a1`, protocol v2). The project is usable and tested, but its protocol and operational model may still change before a stable release.
+> **Status:** `0.3.1` protocol-v2 scheduler line with C1 bounded cross-repository concurrency under qualification. The frozen `0.3.0` single-thread release remains the semantic oracle. `max_workers` defaults to `1`; two-worker local execution is feature-gated until the concurrency canary and post-canary audit pass.
 
 ## Why use it?
 
@@ -116,7 +116,7 @@ The bridge checks the repository and base SHA, creates an isolated worktree, app
 
 ## Multiple clients and ChatGPT sessions
 
-Multiple remote clients can submit requests to the same mailbox. One local watcher owns the mailbox and processes requests **serially**, so local Git mutation is not concurrent.
+Multiple remote clients can submit requests to the same mailbox. One local watcher always owns mailbox transport and result publication. On the C1 development branch, setting `max_workers` above 1 permits bounded local transaction overlap only across different canonical repository paths; the default remains serial (`max_workers=1`).
 
 Important consequences:
 
@@ -131,7 +131,7 @@ A five-request live probe on the reference host completed all five successfully 
 
 ## Performance
 
-The September 2026 performance audit reduced the full live validation suite from **373.2 s to 55.8 s** while increasing coverage from 139 to 147 tests: about **6.7x faster** and **85% less wall-clock time** on the reference macOS host.
+The September 2026 performance programme reduced the original **373.2 s / 139-test** live validation baseline to a defensible `0.3.0` gold qualification median of **68.0 s / 196 tests** across three identical-tree production runs (**67.3–71.2 s**). The earlier A3 acceptance reached 50.4 s once, but A4 deliberately does not treat that fast tail as an SLA. The gold median is about **5.5x faster** and **81.8% less wall-clock time** than the original baseline while materially expanding correctness, replay, crash-recovery, transport, and adversarial coverage.
 
 After the final daemon restart, lightweight control-plane requests used the persistent `rclone rcd` path with transaction-directory listing around **0.23 s** and small request download around **0.44 s** in the post-promotion doctor/materialisation checks. Real edit latency is then dominated by the repository's configured validation commands, not the mailbox itself.
 
@@ -165,6 +165,8 @@ Read [docs/security.md](docs/security.md) before enabling push or running valida
 - [Concurrency and multiple clients](docs/concurrency.md)
 - [Performance](docs/performance.md)
 - [Architecture](docs/architecture.md)
+- [Scheduler architecture](docs/scheduler-architecture.md)
+- [Transaction state machine](docs/transaction-state-machine.md)
 - [Protocol v2](docs/protocol.md)
 - [Security model](docs/security.md)
 - [Google Drive OAuth migration](docs/google-drive-oauth.md)

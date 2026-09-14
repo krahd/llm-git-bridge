@@ -1,6 +1,6 @@
 # Concurrency and multiple clients
 
-`llm-git-bridge` supports multiple remote writers, including several ChatGPT sessions, but it is deliberately a **single-consumer** local execution system.
+`llm-git-bridge` `0.3.1` keeps the frozen `0.3.0` release as its semantic oracle. The current C1 development branch adds **feature-gated bounded local concurrency across different canonical repositories** while retaining one mailbox owner. `max_workers` still defaults to `1`; the two-worker mode remains experimental until the production canary and post-canary audit pass.
 
 ## What is concurrent
 
@@ -15,9 +15,7 @@ This is suitable for:
 
 ## What is serialised
 
-Only one local watcher may hold the mailbox lock. The watcher processes pending requests serially. There is no concurrent patch application, test execution, commit creation, or push from separate bridge workers.
-
-This design prevents two local consumers from racing the same mailbox request and keeps Git mutation easy to reason about.
+Only one local watcher may hold the mailbox lock. Drive/rclone request download, signed-result publication, request deletion, metrics, and reconciliation stay serial and watcher-owned. With `max_workers > 1` on the C1 development branch, local transaction execution may overlap only when the resolved repository paths differ. The scheduler permits at most one in-flight transaction per canonical repository; materialisation remains a watcher-side quiescent barrier.
 
 ## Queue ordering is not FIFO
 
@@ -57,9 +55,9 @@ For a brand-new branch, the requested base must still equal the authoritative re
 
 ## Head-of-line blocking
 
-Because configured commands run serially, one slow transaction delays all later mailbox requests. This is the main scaling limitation for many active sessions.
+With the default `max_workers=1`, one slow transaction still delays later edit transactions. In the C1 development mode with `max_workers=2`, a slow transaction for repository A can overlap local execution for repository B, while same-repository work remains serialized. Mailbox transport and result publication are still serial.
 
-On the reference host, the bridge's own full validation suite currently takes about 56 seconds. A transaction running that suite therefore occupies the single worker for roughly a minute before the next edit transaction can start.
+The A3 precursor once completed the configured validation gate in 50.4 seconds, but A4 deliberately established a repeated-run gold baseline instead: the hardened 196-test tree completed three production-Mac runs in 67.3–71.2 seconds (median 68.0 s). A transaction running that suite therefore still occupies the single execution stream for roughly a minute before the next edit transaction can start.
 
 Lightweight `doctor`/diagnostics requests are much faster but still wait behind an already-running edit transaction.
 
@@ -74,4 +72,4 @@ Lightweight `doctor`/diagnostics requests are much faster but still wait behind 
 
 ## Future scaling
 
-Parallel workers would require explicit scheduling and locking by repository/branch, ordering semantics, and careful result/recovery rules. The current implementation intentionally chooses deterministic serial local execution over maximum throughput.
+C1 now implements the first bounded two-worker step using scheduler-owned canonical-repository exclusion and watcher-owned transport. It remains feature-gated until deterministic C2 tests and the C3 production canary establish correctness and host-level throughput.

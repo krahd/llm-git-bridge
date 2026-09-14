@@ -8,7 +8,15 @@
 
 ## Execution and concurrency model
 
-The mailbox may have multiple remote writers, but exactly one local watcher consumes it. Requests are executed serially and queue order is not guaranteed to be FIFO. This avoids concurrent local Git mutation but means long configured commands cause head-of-line blocking. See [concurrency.md](concurrency.md) for multi-client guidance.
+The mailbox may have multiple remote writers, but exactly one local watcher consumes it and owns all Drive/rclone side effects. The C1 development path can execute local transactions concurrently across different canonical repository paths when `max_workers > 1`; same-repository mutation remains serialized and the default is still `max_workers=1`. Queue order is not guaranteed to be FIFO. See [concurrency.md](concurrency.md) for multi-client guidance.
+
+The post-v0.3 scheduler refactor preserves these semantics behind explicit poll,
+classification, recovery, download/validation, execution, durable-result, and
+publication/cleanup stages before any worker count is raised. See
+[scheduler-architecture.md](scheduler-architecture.md) for the staged contracts
+and worker-lifecycle rationale.
+
+Version `0.3.1` completes the one-worker Phase B boundary: Drive/rclone transport and durable result publication remain watcher-owned, a bounded explicit scheduler owns worker lifecycle, and one local transaction worker owns only repository-local execution. The ownership table in `scheduler-architecture.md` is the gate for enabling a second worker.
 
 ## Multi-repository model
 
