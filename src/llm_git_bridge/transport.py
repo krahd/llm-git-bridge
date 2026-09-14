@@ -388,7 +388,12 @@ class RcloneTransport:
             except OSError as exc:
                 raise TransientTransportError("downloaded request cannot be stored safely; retry required") from exc
             try:
-                return local.read_text(encoding="utf-8-sig")
+                # Decode bytes without utf-8-sig or universal-newline translation.
+                # The caller binds acknowledgements to the exact downloaded UTF-8
+                # byte sequence; BOM and CRLF are therefore semantically relevant
+                # for replay identity even though JSON parsing accepts them.
+                data = local.read_bytes()
+                return data.decode("utf-8")
             except UnicodeError as exc:
                 raise BridgeError("remote request is not valid UTF-8 JSON text") from exc
             except OSError as exc:

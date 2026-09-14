@@ -10,6 +10,14 @@
 
 The mailbox may have multiple remote writers, but exactly one local watcher consumes it. Requests are executed serially and queue order is not guaranteed to be FIFO. This avoids concurrent local Git mutation but means long configured commands cause head-of-line blocking. See [concurrency.md](concurrency.md) for multi-client guidance.
 
+The post-v0.3 scheduler refactor preserves these semantics behind explicit poll,
+classification, recovery, download/validation, execution, durable-result, and
+publication/cleanup stages before any worker count is raised. See
+[scheduler-architecture.md](scheduler-architecture.md) for the staged contracts
+and worker-lifecycle rationale.
+
+Version `0.3.1` completes the one-worker Phase B boundary: Drive/rclone transport and durable result publication remain watcher-owned, a bounded explicit scheduler owns worker lifecycle, and one local transaction worker owns only repository-local execution. The ownership table in `scheduler-architecture.md` is the gate for enabling a second worker.
+
 ## Multi-repository model
 
 Do not mirror every repository to Drive. The local daemon recursively discovers repositories under configured roots and publishes a small path-free repository index. Repository contents are materialised only on demand. A remote client can request materialisation through the same request mailbox, so changing projects does not require a terminal command.
