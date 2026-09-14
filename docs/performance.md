@@ -13,6 +13,14 @@ The production measurements below were taken on one macOS host. The post-promoti
 
 Treat these numbers as reference measurements, not an SLA or cross-platform benchmark.
 
+## Single-thread gold qualification
+
+Version `0.3.0` is the frozen single-thread semantic baseline for later scheduler/concurrency work. The final pre-qualification A3 candidate runs **193 tests**. Its first production-Mac acceptance completed the configured validation command in **50.426 s** and the entire local edit transaction in **55.687 s**, at commit `33ffcdd091fcae1be80915d4f8a18389ff31be0e`. Independent materialisation matched 33/33 tracked files with no SHA-256 mismatch.
+
+That single measurement is not treated as the gold performance claim. After isolating the three real-time process cancellation/timeout tests from concurrent Git-heavy shards, A4 ran the identical 196-test source tree three times on the production Mac: **67.322 s, 67.967 s, and 71.158 s** (median **67.967 s**; total-local **72.543–76.563 s**). This repeated-run median, not the 50.426 s A3 fast tail, is the `0.3.0` gold comparison point. Live doctor sampling remained on healthy persistent RC. The durable qualification report in the project Drive remains the authoritative acceptance record. Later concurrent versions must compare both against their own `max_workers=1` mode and against this `0.3.0` baseline.
+
+The A3 pass also reduced the sequential test suite's Git subprocess count from 1,022 to 925 and introduced a bounded, test-only four-process sharded runner. The daemon itself remains strictly single-threaded in `0.3.0`. On the production Mac this reduced the A2 192-test configured gate from 238.934 s to 50.426 s for 193 tests.
+
 ## Validation-suite improvement
 
 A strict audit found that the same test suite that took roughly nine seconds in an isolated Linux audit environment took several minutes on the production Mac. Controlled probes showed unusually high per-process cost on that host, while the test suite launched more than a thousand Git subprocesses.
