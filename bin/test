@@ -16,7 +16,4 @@ if [ -n "${PYTHONPATH:-}" ]; then
 else
   export PYTHONPATH="$ROOT/src"
 fi
-if "$PYTHON" -c 'import sys; raise SystemExit(0 if sys.version_info >= (3, 12) else 1)' >/dev/null 2>&1; then
-  exec "$PYTHON" -m unittest discover -s "$ROOT/tests" -v --durations 20
-fi
-exec "$PYTHON" -m unittest discover -s "$ROOT/tests" -v
+exec "$PYTHON" "$ROOT/scripts/run_tests.py"
