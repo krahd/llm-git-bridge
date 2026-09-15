@@ -195,11 +195,14 @@ Materialisation remains watcher-owned and is preceded by a quiescent worker
 barrier; it is not parallelised in C1.
 
 Command-log retention receives the current set of in-flight transaction IDs so
-worker-owned logs cannot be pruned. If result publication fails while other jobs
-are still running, the watcher reaps every submitted worker and durably persists
-each completed signed result before propagating the original publication error.
-This prevents an unreachable handle from leaving a repository permanently marked
-in flight after a transient transport failure.
+worker-owned logs cannot be pruned. When a worker completes, the watcher releases
+that worker handle/repository ownership, signs the result, and persists it locally
+before attempting remote publication. A post-durable publication/cleanup
+`BridgeError` is contained and recorded as `scheduler-publication-error`; queued
+work and unrelated active workers remain intact, and ordinary durable-result
+recovery republishes the acknowledgement later. Only failures before durable local
+result persistence propagate to the outer fail-closed reaper, which drains all
+submitted workers before unwinding.
 
 
 ## Phases C2–K: fairness, recovery, observability, and release policy
@@ -210,7 +213,7 @@ Backpressure is explicit. `max_pending_jobs` defaults to 8, is validated from 1 
 
 Scheduler observability remains watcher-owned. Enqueue/dispatch/finish events record bounded queue depth, active workers, active repositories, queue wait, execution timing and utilisation. Concurrent diagnostics include the live worker/backlog limits and counts. No repository path or worker-local mutable object is exposed.
 
-Crash consistency remains durability-first. Worker-local execution returns an outcome to the watcher; the watcher signs and persists the result before remote publication. A publication exception reaps all submitted workers and leaves their durable results authoritative. On restart, durable-result reconciliation runs before request execution and republishes those acknowledgements; the scheduler's lost in-memory queue is not a recovery input.
+Crash consistency remains durability-first. Worker-local execution returns an outcome to the watcher; the watcher signs and persists the result before remote publication. Post-durable publication/cleanup `BridgeError` is contained so unrelated work can continue; the signed local result remains authoritative and is eligible for republish without mutation re-execution. Pre-durable persistence failure remains fail-closed and drains submitted workers before the concurrent frame unwinds. On restart, durable-result reconciliation runs before request execution and republishes available acknowledgements; the scheduler's lost in-memory queue is not a recovery input.
 
 Transport I/O remains serial by design. The watcher is the sole rclone/Drive owner even with multiple local workers. The programme found no ordinary end-to-end gain large enough to justify sharing transport state or increasing uncertain-write concurrency. Likewise, adaptive concurrency was rejected: explicit fixed limits are easier to audit and avoid guessing host capacity when configured repository commands may already spawn parallel builds.
 

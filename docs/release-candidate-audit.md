@@ -75,7 +75,7 @@ pattern that failed in the production canary.
 | independent request arrives after a long job starts | fixed in RC2; live-arrival later-poll regression passes |
 | worker A raises while worker B succeeds | B result remains correctly mapped/successful |
 | completions arrive out of submission order | per-handle result mapping remains exact |
-| publication fails with multiple workers complete | all workers are reaped and signed local results remain durable |
+| post-durable publication fails while other work is active | completed result stays durable; pending/active work is preserved and recovery republishes without re-execution; pre-durable persistence failure still reaps fail-closed |
 | daemon/scheduler restart after publication outage | fresh scheduler republishes durable results without local re-execution |
 | command-log retention during execution | active transaction IDs are excluded from pruning |
 | materialisation during edit work | watcher drains local transaction work first; materialisation is a quiescent barrier |

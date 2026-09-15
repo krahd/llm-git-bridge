@@ -163,6 +163,7 @@ Read [docs/security.md](docs/security.md) before enabling push or running valida
 
 - [Installation and setup](docs/installation.md)
 - [Using the bridge](docs/usage.md)
+- [LLM client skill](skills/llm-git-bridge-client/SKILL.md)
 - [Concurrency and multiple clients](docs/concurrency.md)
 - [Performance](docs/performance.md)
 - [Architecture](docs/architecture.md)
