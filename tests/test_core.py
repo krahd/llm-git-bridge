@@ -17,6 +17,7 @@ import llm_git_bridge.core as core
 from llm_git_bridge.core import (
     BridgeError,
     build_registry,
+    reconcile_registry_membership,
     build_snapshot,
     process_transaction,
     public_registry,
@@ -82,6 +83,9 @@ class CoreTests(unittest.TestCase):
         public = public_registry(local)
         blob = json.dumps(public)
         self.assertNotIn(str(parent), blob)
+        self.assertNotIn("git_marker_id", blob)
+        self.assertNotIn("repo_identity", blob)
+        self.assertNotIn("retired_repo_ids", blob)
         self.assertEqual(public["repos"][0]["name"], "alpha")
 
     def test_snapshot_excludes_sensitive_and_binary(self):
@@ -941,6 +945,175 @@ class CoreTests(unittest.TestCase):
         self.assertEqual(by_path[str(first.resolve())], first_id)
         self.assertNotEqual(by_path[str(second.resolve())], first_id)
 
+
+    def test_incremental_registry_discovers_new_repo_without_resampling_known_repo(self):
+        parent = Path(tempfile.mkdtemp(prefix="llmgb-discovery-"))
+        try:
+            first = parent / "first"
+            shutil.copytree(self._seed_repo, first, symlinks=True)
+            previous = build_registry([parent])
+            first_id = next(iter(previous["repos"]))
+
+            second = parent / "second"
+            shutil.copytree(self._seed_repo, second, symlinks=True)
+            with patch.object(core_mod, "repo_state", wraps=core_mod.repo_state) as state, patch.object(
+                core_mod, "is_git_repo", wraps=core_mod.is_git_repo
+            ) as is_repo:
+                current, added, removed, updated = reconcile_registry_membership([parent], previous)
+
+            by_path = {entry["path"]: rid for rid, entry in current["repos"].items()}
+            self.assertEqual(by_path[str(first.resolve())], first_id)
+            self.assertEqual(len(added), 1)
+            self.assertEqual(removed, ())
+            self.assertEqual(updated, ())
+            self.assertEqual(state.call_count, 1)
+            self.assertEqual(is_repo.call_count, 1)
+            self.assertEqual(state.call_args.args[0], second.resolve())
+            self.assertEqual(is_repo.call_args.args[0], second.resolve())
+        finally:
+            shutil.rmtree(parent, ignore_errors=True)
+
+    def test_incremental_registry_removes_missing_repo_under_available_root(self):
+        parent = Path(tempfile.mkdtemp(prefix="llmgb-discovery-remove-"))
+        try:
+            repo = parent / "gone"
+            shutil.copytree(self._seed_repo, repo, symlinks=True)
+            previous = build_registry([parent])
+            repo_id = next(iter(previous["repos"]))
+            shutil.rmtree(repo)
+
+            current, added, removed, updated = reconcile_registry_membership([parent], previous)
+
+            self.assertEqual(added, ())
+            self.assertEqual(removed, (repo_id,))
+            self.assertEqual(updated, ())
+            self.assertEqual(current["repos"], {})
+        finally:
+            shutil.rmtree(parent, ignore_errors=True)
+
+    def test_incremental_registry_preserves_entries_when_approved_root_is_unavailable(self):
+        parent = Path(tempfile.mkdtemp(prefix="llmgb-discovery-offline-"))
+        repo = parent / "repo"
+        shutil.copytree(self._seed_repo, repo, symlinks=True)
+        previous = build_registry([parent])
+        repo_id = next(iter(previous["repos"]))
+        shutil.rmtree(parent)
+
+        current, added, removed, updated = reconcile_registry_membership([parent], previous)
+
+        self.assertEqual(added, ())
+        self.assertEqual(removed, ())
+        self.assertEqual(updated, ())
+        self.assertIn(repo_id, current["repos"])
+
+    def test_incremental_registry_ignores_fake_git_marker(self):
+        parent = Path(tempfile.mkdtemp(prefix="llmgb-discovery-fake-"))
+        try:
+            fake = parent / "fake"
+            fake.mkdir()
+            (fake / ".git").write_text("not a gitdir\n", encoding="utf-8")
+            previous = {"version": 1, "generated_at": "test", "repos": {}}
+
+            current, added, removed, updated = reconcile_registry_membership([parent], previous)
+
+            self.assertEqual(current["repos"], {})
+            self.assertEqual(added, ())
+            self.assertEqual(removed, ())
+            self.assertEqual(updated, ())
+        finally:
+            shutil.rmtree(parent, ignore_errors=True)
+
+    def test_replaced_repo_at_same_path_gets_new_id_and_retires_old_policy_id(self):
+        parent = Path(tempfile.mkdtemp(prefix="llmgb-discovery-replace-"))
+        try:
+            repo = parent / "demo"
+            shutil.copytree(self._seed_repo, repo, symlinks=True)
+            previous = build_registry([parent])
+            old_id = next(iter(previous["repos"]))
+            old_marker = previous["repos"][old_id]["git_marker_id"]
+            shutil.rmtree(repo)
+            repo.mkdir()
+            sh(repo, "git", "init", "-q")
+            sh(repo, "git", "config", "user.email", "replacement@example.invalid")
+            sh(repo, "git", "config", "user.name", "Replacement")
+            (repo / "NEW.md").write_text("replacement\n", encoding="utf-8")
+            sh(repo, "git", "add", "NEW.md")
+            sh(repo, "git", "commit", "-qm", "replacement")
+
+            current, added, removed, updated = reconcile_registry_membership([parent], previous)
+
+            self.assertEqual(removed, (old_id,))
+            self.assertEqual(updated, ())
+            self.assertEqual(len(added), 1)
+            new_id = added[0]
+            self.assertNotEqual(new_id, old_id)
+            self.assertIn(old_id, current["retired_repo_ids"])
+            self.assertNotEqual(current["repos"][new_id]["git_marker_id"], old_marker)
+        finally:
+            shutil.rmtree(parent, ignore_errors=True)
+
+    def test_moved_repo_keeps_id_when_history_identity_matches(self):
+        parent = Path(tempfile.mkdtemp(prefix="llmgb-discovery-move-"))
+        try:
+            first = parent / "before"
+            shutil.copytree(self._seed_repo, first, symlinks=True)
+            previous = build_registry([parent])
+            repo_id = next(iter(previous["repos"]))
+            old_identity = previous["repos"][repo_id]["repo_identity"]
+            second = parent / "after"
+            first.rename(second)
+
+            current, added, removed, updated = reconcile_registry_membership([parent], previous)
+
+            self.assertEqual(added, ())
+            self.assertEqual(removed, ())
+            self.assertEqual(updated, (repo_id,))
+            self.assertEqual(current["repos"][repo_id]["path"], str(second.resolve()))
+            self.assertEqual(current["repos"][repo_id]["name"], "after")
+            self.assertEqual(current["repos"][repo_id]["repo_identity"], old_identity)
+        finally:
+            shutil.rmtree(parent, ignore_errors=True)
+
+    def test_additional_clone_of_same_history_does_not_steal_existing_id(self):
+        parent = Path(tempfile.mkdtemp(prefix="llmgb-discovery-clone-"))
+        try:
+            original = parent / "z-original"
+            shutil.copytree(self._seed_repo, original, symlinks=True)
+            previous = build_registry([parent])
+            original_id = next(iter(previous["repos"]))
+            clone = parent / "a-clone"
+            shutil.copytree(self._seed_repo, clone, symlinks=True)
+
+            current, added, removed, updated = reconcile_registry_membership([parent], previous)
+
+            self.assertEqual(removed, ())
+            self.assertEqual(updated, ())
+            self.assertEqual(current["repos"][original_id]["path"], str(original.resolve()))
+            self.assertEqual(len(added), 1)
+            clone_id = added[0]
+            self.assertNotEqual(clone_id, original_id)
+            self.assertEqual(current["repos"][clone_id]["path"], str(clone.resolve()))
+        finally:
+            shutil.rmtree(parent, ignore_errors=True)
+
+    def test_full_scan_does_not_reuse_retired_repository_id(self):
+        parent = Path(tempfile.mkdtemp(prefix="llmgb-retired-id-"))
+        try:
+            repo = parent / "demo"
+            shutil.copytree(self._seed_repo, repo, symlinks=True)
+            previous = build_registry([parent])
+            old_id = next(iter(previous["repos"]))
+            shutil.rmtree(repo)
+            removed = build_registry([parent], previous=previous)
+            self.assertIn(old_id, removed["retired_repo_ids"])
+
+            shutil.copytree(self._seed_repo, repo, symlinks=True)
+            current = build_registry([parent], previous=removed)
+            new_id = next(iter(current["repos"]))
+            self.assertNotEqual(new_id, old_id)
+            self.assertIn(old_id, current["retired_repo_ids"])
+        finally:
+            shutil.rmtree(parent, ignore_errors=True)
 
     def test_push_requires_local_opt_in(self):
         repo = self.make_repo()

@@ -23,17 +23,20 @@ from typing import Any, Callable, Collection
 
 from .core import (
     BridgeError,
+    UnknownRepositoryError,
     PROTOCOL_VERSION,
     add_disposable_worktree,
     branch_tip,
     branch_token,
     build_registry,
+    reconcile_registry_membership,
     build_snapshot,
     git,
     load_json,
     process_transaction,
     public_registry,
     repo_state,
+    repo_identity,
     retire_worktree,
     run,
     resolve_repo,
@@ -74,6 +77,10 @@ MAX_RESULT_BYTES = 2_000_000
 RESULT_AUTH_ALG = "hmac-sha256"
 
 
+class _RepositoryIdentityChanged(BridgeError):
+    """A registry ID now points at different Git history than it was bound to."""
+
+
 def _ensure_private_dirs() -> None:
     for path in (CONFIG_DIR, STATE_DIR):
         path.mkdir(parents=True, exist_ok=True, mode=0o700)
@@ -92,6 +99,7 @@ def default_config() -> dict[str, Any]:
         "allow_commit": True,
         "push_enabled_repos": [],
         "poll_interval": 1.0,
+        "registry_scan_interval": 30.0,
         "max_workers": 1,
         "max_pending_jobs": 8,
         "commands": {},
@@ -106,6 +114,17 @@ def _validate_poll_interval(value: Any) -> float:
         or not 0.5 <= float(value) <= 3600.0
     ):
         raise BridgeError("poll interval must be a finite number from 0.5 to 3600 seconds")
+    return float(value)
+
+
+def _validate_registry_scan_interval(value: Any) -> float:
+    if (
+        isinstance(value, bool)
+        or not isinstance(value, (int, float))
+        or not math.isfinite(float(value))
+        or not 5.0 <= float(value) <= 3600.0
+    ):
+        raise BridgeError("registry scan interval must be a finite number from 5 to 3600 seconds")
     return float(value)
 
 
@@ -157,6 +176,11 @@ def _validate_config(cfg: dict[str, Any]) -> dict[str, Any]:
         _validate_poll_interval(cfg.get("poll_interval"))
     except BridgeError as exc:
         raise BridgeError("config poll_interval must be a finite number from 0.5 to 3600 seconds") from exc
+
+    try:
+        _validate_registry_scan_interval(cfg.get("registry_scan_interval"))
+    except BridgeError as exc:
+        raise BridgeError("config registry_scan_interval must be a finite number from 5 to 3600 seconds") from exc
 
     max_workers = cfg.get("max_workers")
     if (
@@ -256,9 +280,125 @@ def load_registry() -> dict[str, Any]:
     return load_json(REGISTRY_FILE)
 
 
+def _registry_discovery_status(cfg: dict[str, Any], registry: dict[str, Any] | None = None) -> dict[str, Any]:
+    if registry is None and REGISTRY_FILE.exists():
+        registry = load_registry()
+    registry = registry or {"repos": {}}
+    discovery = registry.get("discovery") if isinstance(registry.get("discovery"), dict) else {}
+    interval_value = cfg.get("registry_scan_interval")
+    enabled = interval_value is not None
+    interval_s = _validate_registry_scan_interval(interval_value) if enabled else None
+    return {
+        "auto_discovery_enabled": enabled,
+        "scan_interval_s": interval_s,
+        "last_scan_at": discovery.get("last_scan_at"),
+        "last_scan_duration_s": discovery.get("last_scan_duration_s"),
+        "last_added": discovery.get("last_added", 0),
+        "last_removed": discovery.get("last_removed", 0),
+        "last_updated": discovery.get("last_updated", 0),
+        "repo_count": len(registry.get("repos", {})),
+    }
+
+
+def refresh_registry_membership(cfg: dict[str, Any], *, publish: bool = True) -> dict[str, Any]:
+    """Reconcile repo membership under approved roots without full Git state scans.
+
+    Existing entries are reused; only newly seen candidates invoke Git validation
+    and state sampling. Membership changes are published before the local registry
+    is replaced, so a remote publication failure cannot make local/remote membership
+    silently diverge until the next scheduled retry.
+    """
+    previous = load_json(REGISTRY_FILE) if REGISTRY_FILE.exists() else {
+        "version": 1,
+        "generated_at": utc_now(),
+        "repos": {},
+    }
+    started = time.monotonic()
+    roots = [Path(x) for x in cfg.get("roots", [])]
+    registry, added, removed, updated = reconcile_registry_membership(roots, previous)
+    duration_s = round(time.monotonic() - started, 4)
+    registry["discovery"] = {
+        "last_scan_at": utc_now(),
+        "last_scan_epoch": time.time(),
+        "last_scan_duration_s": duration_s,
+        "last_added": len(added),
+        "last_removed": len(removed),
+        "last_updated": len(updated),
+    }
+    changed = bool(added or removed or updated) or not REGISTRY_FILE.exists()
+    if publish and changed:
+        publish_registry(cfg, registry)
+    save_json(REGISTRY_FILE, registry)
+    _append_metric({
+        "event": "registry-discovery",
+        "duration_s": duration_s,
+        "added": len(added),
+        "removed": len(removed),
+        "updated": len(updated),
+        "repositories": len(registry.get("repos", {})),
+        "published": bool(publish and changed),
+        "recorded_at": utc_now(),
+    })
+    return registry
+
+
+def _registry_discovery_due(cfg: dict[str, Any], registry: dict[str, Any] | None) -> bool:
+    interval_value = cfg.get("registry_scan_interval")
+    if interval_value is None:
+        return False
+    interval_s = _validate_registry_scan_interval(interval_value)
+    if registry is None:
+        return True
+    discovery = registry.get("discovery")
+    if not isinstance(discovery, dict):
+        return True
+    last_scan_epoch = discovery.get("last_scan_epoch")
+    if isinstance(last_scan_epoch, bool) or not isinstance(last_scan_epoch, (int, float)):
+        return True
+    return time.time() - float(last_scan_epoch) >= interval_s
+
+
+def _maybe_refresh_registry_membership(
+    cfg: dict[str, Any],
+    registry: dict[str, Any] | None = None,
+) -> dict[str, Any] | None:
+    """Run bounded auto-discovery when due; preserve the prior registry on failure."""
+    if registry is None and REGISTRY_FILE.exists():
+        registry = load_registry()
+    if not _registry_discovery_due(cfg, registry):
+        return registry
+    try:
+        return refresh_registry_membership(cfg, publish=True)
+    except (BridgeError, OSError):
+        _append_metric({
+            "event": "registry-discovery-error",
+            "recorded_at": utc_now(),
+        })
+        if registry is None:
+            raise
+        return registry
+
+
+def _verify_registry_entry_identity(entry: dict[str, Any]) -> None:
+    expected = entry.get("repo_identity")
+    if not isinstance(expected, str) or not expected:
+        # Legacy registries are upgraded by the first automatic/full discovery pass.
+        return
+    path_value = entry.get("path")
+    if not isinstance(path_value, str) or not path_value:
+        raise BridgeError("repository registry entry is invalid")
+    try:
+        actual = repo_identity(Path(path_value))
+    except BridgeError as exc:
+        raise _RepositoryIdentityChanged("repository identity changed; wait for discovery refresh or run scan") from exc
+    if actual != expected:
+        raise _RepositoryIdentityChanged("repository identity changed; wait for discovery refresh or run scan")
+
+
 def refresh_repo_entry(cfg: dict[str, Any], repo_ref: str, *, publish: bool = True) -> tuple[dict[str, Any], str, dict[str, Any]]:
     registry = load_registry()
     repo_id, entry = resolve_repo(registry, repo_ref)
+    _verify_registry_entry_identity(entry)
     path = Path(entry["path"])
     state = repo_state(path)
     entry.update(
@@ -534,6 +674,12 @@ _METRIC_PUBLIC_KEYS = {
     "queue_wait_s",
     "execution_s",
     "scheduler_utilization",
+    "duration_s",
+    "added",
+    "removed",
+    "updated",
+    "repositories",
+    "published",
 }
 
 
@@ -562,6 +708,7 @@ def _process_diagnostics_request(
     filename: str,
     *,
     scheduler_status: dict[str, Any] | None = None,
+    registry_status: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
     txid = _validate_request_identity(obj, filename)
     limit = obj.get("limit", 10)
@@ -578,6 +725,8 @@ def _process_diagnostics_request(
     }
     if scheduler_status is not None:
         result["scheduler"] = dict(scheduler_status)
+    if registry_status is not None:
+        result["registry"] = dict(registry_status)
     return result
 
 
@@ -660,6 +809,7 @@ def _process_materialize_request(cfg: dict[str, Any], registry: dict[str, Any], 
     if not isinstance(repo_ref, str) or not repo_ref.strip():
         raise BridgeError("materialize request is missing repo")
     repo_id, entry = resolve_repo(registry, repo_ref)
+    _verify_registry_entry_identity(entry)
     branch = obj.get("branch")
 
     if branch is None:
@@ -1528,6 +1678,37 @@ def _plan_local_job(
     )
 
 
+def _plan_local_job_with_discovery(
+    cfg: dict[str, Any],
+    registry: dict[str, Any],
+    request: _ValidatedRequest,
+) -> tuple[_LocalJob, dict[str, Any]]:
+    """Plan repo work with bounded discovery and identity-replacement recovery."""
+    try:
+        job = _plan_local_job(registry, request)
+        if job.scheduling_key is not None and job.resource_class == "repository":
+            _verify_registry_entry_identity(registry["repos"][job.scheduling_key])
+        return job, registry
+    except UnknownRepositoryError:
+        refreshed = _maybe_refresh_registry_membership(cfg, registry)
+        if refreshed is None:
+            raise
+        job = _plan_local_job(refreshed, request)
+        if job.scheduling_key is not None and job.resource_class == "repository":
+            _verify_registry_entry_identity(refreshed["repos"][job.scheduling_key])
+        return job, refreshed
+    except _RepositoryIdentityChanged:
+        # A real local identity mismatch is not remotely forgeable: it requires the
+        # approved repository itself to have changed. Perform one full authoritative
+        # scan immediately so the old ID is retired and the public registry can
+        # expose the replacement under a fresh, policy-clean ID.
+        refreshed = refresh_registry(cfg, publish=True)
+        job = _plan_local_job(refreshed, request)
+        if job.scheduling_key is not None and job.resource_class == "repository":
+            _verify_registry_entry_identity(refreshed["repos"][job.scheduling_key])
+        return job, refreshed
+
+
 def _prepare_transaction_worker_task(
     cfg: dict[str, Any],
     registry: dict[str, Any],
@@ -1536,6 +1717,7 @@ def _prepare_transaction_worker_task(
     """Freeze all transaction inputs before handing work to a worker thread."""
     obj = request.obj
     repo_id, entry = resolve_repo(registry, obj.get("repo", ""))
+    _verify_registry_entry_identity(entry)
     commands_cfg = cfg.get("commands", {}).get(repo_id, {})
     commands_json = json.dumps(commands_cfg, sort_keys=True, separators=(",", ":"), ensure_ascii=False)
     return _TransactionWorkerTask(
@@ -1621,7 +1803,11 @@ def _execute_validated_request(
         result = _process_materialize_request(cfg, registry, obj, filename)
         registry = load_registry()
     elif kind == "diagnostics":
-        result = _process_diagnostics_request(obj, filename)
+        result = _process_diagnostics_request(
+            obj,
+            filename,
+            registry_status=_registry_discovery_status(cfg, registry),
+        )
     elif kind == "doctor":
         result = _process_doctor_request(cfg, obj, filename)
     elif kind == "transaction":
@@ -1680,38 +1866,48 @@ def _publish_and_cleanup_result(
     request_started: float,
     protected_command_log_txids: Collection[str] = (),
 ) -> None:
-    """Publish a durable result, acknowledge the request, then retire transient state."""
-    upload_started = time.monotonic()
-    transport.upload_control_json(
-        f"{REMOTE_ROOT}/results/{filename}",
-        result,
-        STATE_DIR / "outbox" / f"result-{filename}",
-    )
-    result_upload_s = round(time.monotonic() - upload_started, 4)
-    result_upload_transport = str(getattr(transport, "last_mode", "unknown"))
-    _mark_published(filename, source="processed", request_bytes_sha256=result.get("request_bytes_sha256"))
-    cleanup_status, cleanup_s, cleanup_transport = _cleanup_remote_request(transport, filename)
-    _cleanup_local_request_artifacts(filename)
-    _prune_local_results()
-    _prune_command_logs(protected_txids=protected_command_log_txids)
-    timings = result["transport_timings"]
-    _append_metric({
-        "event": "transaction",
-        "transaction_id": filename[:-5],
-        "transaction_list_s": poll.list_s,
-        "transaction_download_s": timings["transaction_download_s"],
-        "pre_result_upload_s": timings["pre_result_upload_s"],
-        "result_upload_s": result_upload_s,
-        "transaction_list_transport": poll.list_transport,
-        "transaction_download_transport": timings["transaction_download_transport"],
-        "result_upload_transport": result_upload_transport,
-        "request_cleanup_status": cleanup_status,
-        "request_cleanup_s": cleanup_s,
-        "request_cleanup_transport": cleanup_transport,
-        "request_total_s": round(time.monotonic() - request_started, 4),
-        "poll_total_s": round(time.monotonic() - poll_started, 4),
-        "recorded_at": utc_now(),
-    })
+    """Publish a durable result, acknowledge the request, then retire transient state.
+
+    This function runs only after the signed local result is durable. Expected
+    filesystem failures are normalised to ``BridgeError`` so the concurrent
+    scheduler can preserve unrelated pending/active work and let durable replay
+    retry publication. Pre-durable persistence remains outside this boundary and
+    therefore still fails closed.
+    """
+    try:
+        upload_started = time.monotonic()
+        transport.upload_control_json(
+            f"{REMOTE_ROOT}/results/{filename}",
+            result,
+            STATE_DIR / "outbox" / f"result-{filename}",
+        )
+        result_upload_s = round(time.monotonic() - upload_started, 4)
+        result_upload_transport = str(getattr(transport, "last_mode", "unknown"))
+        _mark_published(filename, source="processed", request_bytes_sha256=result.get("request_bytes_sha256"))
+        cleanup_status, cleanup_s, cleanup_transport = _cleanup_remote_request(transport, filename)
+        _cleanup_local_request_artifacts(filename)
+        _prune_local_results()
+        _prune_command_logs(protected_txids=protected_command_log_txids)
+        timings = result["transport_timings"]
+        _append_metric({
+            "event": "transaction",
+            "transaction_id": filename[:-5],
+            "transaction_list_s": poll.list_s,
+            "transaction_download_s": timings["transaction_download_s"],
+            "pre_result_upload_s": timings["pre_result_upload_s"],
+            "result_upload_s": result_upload_s,
+            "transaction_list_transport": poll.list_transport,
+            "transaction_download_transport": timings["transaction_download_transport"],
+            "result_upload_transport": result_upload_transport,
+            "request_cleanup_status": cleanup_status,
+            "request_cleanup_s": cleanup_s,
+            "request_cleanup_transport": cleanup_transport,
+            "request_total_s": round(time.monotonic() - request_started, 4),
+            "poll_total_s": round(time.monotonic() - poll_started, 4),
+            "recorded_at": utc_now(),
+        })
+    except OSError as exc:
+        raise BridgeError("post-durable result publication/cleanup failed") from exc
 
 
 def _finalize_request_result(
@@ -2014,7 +2210,7 @@ def _process_pending_concurrent(
                 if downloaded is None:
                     continue
                 request = _validate_downloaded_request(downloaded)
-                job = _plan_local_job(registry, request)
+                job, registry = _plan_local_job_with_discovery(cfg, registry, request)
 
                 if job.kind == "transaction":
                     enqueued_at = time.monotonic()
@@ -2052,6 +2248,7 @@ def _process_pending_concurrent(
                             "queue_depth": len(pending),
                             "max_pending_jobs": max_pending_jobs,
                         },
+                        registry_status=_registry_discovery_status(cfg, registry),
                     )
                 else:
                     result, registry = _execute_validated_request(
@@ -2110,6 +2307,13 @@ def _process_pending_concurrent(
 
             now = time.monotonic()
             if now >= next_live_poll_at and not (cancel_check is not None and cancel_check()):
+                # Keep repository discovery on schedule even while long-running
+                # workers keep this process_pending_once frame open. The watcher
+                # remains the sole registry writer; worker tasks already hold frozen
+                # repository paths/config snapshots.
+                refreshed_registry = _maybe_refresh_registry_membership(cfg, registry)
+                if refreshed_registry is not None:
+                    registry = refreshed_registry
                 live_poll_started = time.monotonic()
                 try:
                     live_poll = _poll_transaction_mailbox(transport)
@@ -2162,6 +2366,11 @@ def process_pending_once(
     scheduler: _LocalWorkerScheduler | None = None,
 ) -> int:
     """Run one synchronous mailbox cycle through explicit durable stages."""
+    # Auto-discovery is watcher-owned and rate-limited. Run it even while idle so
+    # newly created repositories under approved roots become visible remotely
+    # without an operator scan. Test/embedded callers that omit the new config key
+    # retain the historical no-auto-scan behaviour.
+    registry = _maybe_refresh_registry_membership(cfg)
     transport = transport_from_config(cfg)
     poll_started = time.monotonic()
     poll = _poll_transaction_mailbox(transport)
@@ -2175,7 +2384,8 @@ def process_pending_once(
     if not still_pending:
         return processed
 
-    registry = _ensure_registry_for_dispatch(cfg)
+    if registry is None:
+        registry = _ensure_registry_for_dispatch(cfg)
     if scheduler is not None and scheduler.max_workers > 1:
         return processed + _process_pending_concurrent(
             cfg,
@@ -2203,7 +2413,7 @@ def process_pending_once(
                 # A transient provider failure is not terminal application state.
                 continue
             request = _validate_downloaded_request(downloaded)
-            job = _plan_local_job(registry, request)
+            job, registry = _plan_local_job_with_discovery(cfg, registry, request)
             result, registry = _execute_validated_request(
                 cfg,
                 transport,
@@ -2297,6 +2507,7 @@ def cmd_status(_args: argparse.Namespace) -> int:
         f"concurrency: {int(cfg.get('max_workers', 1))} workers; "
         f"{int(cfg.get('max_pending_jobs', 8))} max pending jobs"
     )
+    print(f"repository auto-discovery: every {float(cfg.get('registry_scan_interval', 30.0)):.1f}s")
     if REGISTRY_FILE.exists():
         reg = load_registry()
         repos = reg.get("repos", {})
@@ -2550,6 +2761,14 @@ def cmd_configure_concurrency(args: argparse.Namespace) -> int:
     return 0
 
 
+def cmd_configure_discovery(args: argparse.Namespace) -> int:
+    cfg = load_config()
+    cfg["registry_scan_interval"] = args.interval
+    save_config(cfg)
+    print(f"configured repository auto-discovery: every {float(args.interval):.1f}s")
+    return 0
+
+
 def cmd_configure_push(args: argparse.Namespace) -> int:
     cfg = load_config()
     registry = load_registry()
@@ -2607,6 +2826,10 @@ def build_parser() -> argparse.ArgumentParser:
     s.add_argument("--workers", type=int, required=True)
     s.add_argument("--max-pending-jobs", type=int, required=True)
     s.set_defaults(func=cmd_configure_concurrency)
+
+    s = sub.add_parser("configure-discovery")
+    s.add_argument("--interval", type=float, required=True)
+    s.set_defaults(func=cmd_configure_discovery)
 
     s = sub.add_parser("configure-push")
     s.add_argument("repo")

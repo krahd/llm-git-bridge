@@ -19,6 +19,8 @@ This file records the failure modes the skill must continue to resist when maint
 13. **Concurrency overclaim** — One watcher owns transport; only local execution across different canonical repositories may overlap. Same repository remains serial.
 14. **Premature completion** — Distinguish request upload, commit, push, materialisation, and protected-branch promotion as separate evidence states.
 15. **Version drift** — If runtime version differs from the bundled assumptions, read the deployed protocol/security/concurrency docs before mutation.
+16. **Manual-registration assumption** — Do not tell the operator to `scan` for every repository. Repositories beneath approved roots are auto-discovered; adding a new root remains local policy.
+17. **Repository-ID privilege inheritance** — If a repository is locally replaced and receives a new ID, never assume configured commands or push permission follow its name/path. Re-read the public registry.
 
 ## Audit outcome for initial version
 

@@ -2,15 +2,18 @@
 
 ## Repository discovery
 
-`add-root` registers directories that may contain repositories. `scan` refreshes the local registry and publishes the path-free remote index.
+`add-root` explicitly approves a local directory as a repository-discovery trust boundary. While the watcher runs, it automatically discovers Git repositories created, cloned, removed, or moved beneath approved roots and republishes the path-free remote index only when membership changes. The default discovery interval is 30 seconds.
 
 ```bash
 bin/llm-git-bridge add-root ~/repos
-bin/llm-git-bridge scan
 bin/llm-git-bridge status
+# Optional: choose another bounded interval (5–3600 seconds).
+bin/llm-git-bridge configure-discovery --interval 30
+# Optional: force an immediate full Git/state refresh.
+bin/llm-git-bridge scan
 ```
 
-The authoritative Git repositories remain local.
+A newly created repository normally appears automatically; you do not register each repository by hand. Adding a completely new filesystem root is still an explicit local operation. Automatic discovery does not scan outside approved roots. The authoritative Git repositories remain local.
 
 ## Materialising snapshots
 
@@ -99,6 +102,8 @@ Merging to a protected/default branch is intentionally outside the remote protoc
 `diagnostics` returns a bounded view of recent daemon metrics without exposing raw local logs or filesystem paths.
 
 Both are protocol-v2 request kinds; see [protocol.md](protocol.md).
+
+`diagnostics` also reports path-free repository-discovery health: whether auto-discovery is enabled, its configured interval, last scan time/duration, membership changes, and current repository count. It never exposes approved-root or repository filesystem paths.
 
 ## Multiple clients
 

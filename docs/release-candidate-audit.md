@@ -168,3 +168,24 @@ The post-promotion RC3 canary proved the live-repoll repair under real transient
 RC4 makes the durable-result boundary explicit in the concurrent completion path. The watcher builds and persists the signed local acknowledgement first. Only a `BridgeError` from the subsequent remote publication/cleanup phase is contained as `scheduler-publication-error`; the repository worker is released, validated pending work is preserved, unrelated workers continue, and the existing durable-result recovery path republishes without re-executing the mutation. Failures before the signed result is durably persisted still propagate to the outer fail-closed reaper.
 
 Dedicated regressions prove both sides of the boundary: a B1 publication failure while A1 is active must not discard queued A2 or drain A1, and later recovery must publish B1 without mutation re-execution; conversely, a durable-local-result persistence failure must still unwind and reap all in-flight workers.
+
+## RC5 automatic-discovery adversarial extension
+
+RC5 extends the audit surface from scheduler concurrency to repository-registry lifecycle. Required regressions now prove:
+
+- a newly created valid Git repository beneath an approved root is discovered and path-free-published without manual `scan`;
+- discovery continues while a long unrelated worker is active;
+- unchanged membership causes no remote registry write;
+- fake `.git` markers are rejected by Git validation;
+- a temporarily unavailable approved root cannot cause mass deregistration;
+- repeated unknown-repository requests cannot bypass the configured scan interval;
+- registry-publication failure leaves the previous local registry untouched;
+- diagnostics expose bounded discovery state without filesystem paths;
+- moved intact repositories retain their ID where safely identifiable;
+- a different repository replacing a path retires the old policy ID, and full scans never recycle retired IDs;
+- local marker/history identity and the retired-ID ledger never enter public `repos.json`;
+- repository identity is checked before command/push policy is frozen for worker handoff.
+
+The initial inode-only replacement idea was deliberately rejected during adversarial testing because a filesystem may immediately reuse a deleted `.git` inode. The accepted design additionally binds the policy ID to Git history. This favors fail-closed policy reset over accidental privilege inheritance.
+
+RC5 also broadens the RC4 post-durable publication boundary only for expected local filesystem `OSError` conditions during outbox staging, publication-marker persistence, or local acknowledgement cleanup. Those errors are normalised into the already-contained `BridgeError` recovery path after the signed local result is durable. It does not catch arbitrary exceptions and does not alter pre-durable failure semantics.

@@ -1,6 +1,6 @@
 # Concurrency and multiple clients
 
-`llm-git-bridge` `1.0.0rc4` keeps the frozen `0.3.0` release as its semantic oracle and adds **bounded local concurrency across different canonical repositories** while retaining one mailbox owner. `max_workers` still defaults to `1` as a conservative migration policy; operators can explicitly enable the recommended initial setting of two workers after qualification on their host.
+`llm-git-bridge` `1.0.0rc5` retains the released RC4 bounded-concurrency design: local execution may overlap across different canonical repositories while one watcher owns mailbox/registry side effects. RC5 adds watcher-owned automatic repository discovery beneath approved roots without changing same-repository serialisation. `max_workers` still defaults to `1` as a conservative migration policy; operators can explicitly enable the recommended initial setting of two workers after qualification on their host.
 
 ## What is concurrent
 
@@ -82,3 +82,9 @@ bin/llm-git-bridge daemon restart
 ```
 
 `status` reports the configured worker/backlog limits. `diagnostics` results include live scheduler counts when processed by the concurrent path, and scheduler metrics expose queue depth, active workers/repositories, queue wait, execution timing, and utilisation without exposing local paths.
+
+## Repository discovery under concurrency
+
+RC5 keeps automatic repository discovery in the single watcher. Discovery can run while repository workers are active, but workers neither scan roots nor update registry state. This preserves one registry owner and prevents concurrent publication races. Same-repository exclusion continues to use canonical local paths frozen at dispatch; a later registry membership change cannot retarget an in-flight job.
+
+A newly created repository under an approved root becomes visible on the next bounded discovery pass even if another repository has a long-running worker. An unavailable root is not interpreted as a concurrent mass deletion. Replacement of a repository at an existing path cannot inherit the former repository ID's command/push policy; the identity check precedes policy-bearing dispatch and causes an authoritative registry refresh when needed.

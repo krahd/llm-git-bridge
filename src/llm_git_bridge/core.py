@@ -102,6 +102,10 @@ class BridgeError(RuntimeError):
     pass
 
 
+class UnknownRepositoryError(BridgeError):
+    """A repository reference is not present in the current local registry."""
+
+
 def utc_now() -> str:
     return datetime.now(timezone.utc).isoformat().replace("+00:00", "Z")
 
@@ -263,6 +267,22 @@ def is_git_repo(path: Path) -> bool:
     return p.returncode == 0 and p.stdout.strip() == "true"
 
 
+def repo_identity(path: Path) -> str:
+    """Return a stable logical-history identity for local policy binding.
+
+    The sorted root commits reachable from HEAD remain stable as the branch grows
+    and across a fresh clone of the same history. Replacing the working tree with
+    unrelated history changes the identity, preventing repository-ID-scoped command
+    and push policy from being inherited accidentally.
+    """
+    proc = git(path, "rev-list", "--max-parents=0", "HEAD", timeout=30)
+    roots = sorted(line.strip() for line in proc.stdout.splitlines() if line.strip())
+    if not roots:
+        raise BridgeError("repository has no stable history identity")
+    material = "\n".join(roots).encode("ascii", errors="strict")
+    return hashlib.sha256(material).hexdigest()
+
+
 def discover_repos(roots: Iterable[Path]) -> list[Path]:
     found: set[Path] = set()
     for root in roots:
@@ -279,6 +299,267 @@ def discover_repos(roots: Iterable[Path]) -> list[Path]:
                 found.add(cur.resolve())
                 dirs[:] = []
     return sorted(found, key=lambda p: str(p).lower())
+
+
+def discover_repo_markers(roots: Iterable[Path]) -> list[Path]:
+    """Discover candidate working-tree roots without spawning Git per known repo.
+
+    Approved roots remain the trust boundary. Hidden/build/cache directories are
+    skipped exactly as in :func:`discover_repos`, symlink directories are not
+    followed by ``os.walk``, and a ``.git`` file (linked worktree) or directory
+    is accepted only as a *candidate*. Callers must validate newly seen
+    candidates with Git before publishing them.
+    """
+    found: set[Path] = set()
+    for root in roots:
+        root = root.expanduser().resolve()
+        if not root.exists() or not root.is_dir():
+            continue
+        if (root / ".git").exists():
+            found.add(root)
+            continue
+        for current, dirs, _files in os.walk(root):
+            cur = Path(current)
+            dirs[:] = [d for d in dirs if d not in SKIP_PARTS and not d.startswith(".")]
+            if (cur / ".git").exists():
+                found.add(cur.resolve())
+                dirs[:] = []
+    return sorted(found, key=lambda p: str(p).lower())
+
+
+def git_marker_identity(path: Path) -> str | None:
+    """Return a cheap local-only identity for a working tree's .git marker.
+
+    Device/inode alone is insufficient because a filesystem may immediately reuse
+    both after deletion. ``st_ctime_ns`` changes when the inode is recreated but is
+    preserved by an ordinary rename on supported POSIX filesystems, so it gives the
+    membership scanner a cheap replacement signal without spawning Git for every
+    known repository. Repository-history identity remains the policy-bearing check.
+    """
+    try:
+        stat = (path / ".git").stat()
+    except OSError:
+        return None
+    return f"{int(stat.st_dev)}:{int(stat.st_ino)}:{int(stat.st_ctime_ns)}"
+
+
+def reconcile_registry_membership(
+    roots: Iterable[Path],
+    previous: dict[str, Any],
+) -> tuple[dict[str, Any], tuple[str, ...], tuple[str, ...], tuple[str, ...]]:
+    """Reconcile membership cheaply while preserving repository identity safely.
+
+    Known working trees are recognised by canonical path plus a local-only ``.git``
+    marker identity. The stable history identity is sampled for new repositories,
+    once when upgrading a legacy entry, and whenever the marker itself changes.
+    Normal periodic scans therefore avoid Git processes for known repositories.
+
+    A repository moved intact keeps its ID. Replacing a repository with unrelated
+    history retires the old ID so stale per-repository command/push policy cannot be
+    inherited. Entries below temporarily unavailable roots are preserved rather
+    than mass-removed. Returns ``(registry, added_ids, removed_ids, updated_ids)``.
+    """
+    resolved_roots = [Path(root).expanduser().resolve() for root in roots]
+    available_roots = [root for root in resolved_roots if root.exists() and root.is_dir()]
+    candidates = discover_repo_markers(available_roots)
+
+    previous_repos = previous.get("repos", {}) if isinstance(previous, dict) else {}
+    previous_by_path: dict[str, tuple[str, dict[str, Any]]] = {}
+    previous_by_marker: dict[str, tuple[str, dict[str, Any]]] = {}
+    previous_by_identity: dict[str, list[tuple[str, dict[str, Any]]]] = {}
+    for old_id, old_entry in previous_repos.items():
+        if not isinstance(old_id, str) or not isinstance(old_entry, dict):
+            continue
+        old_path = old_entry.get("path")
+        if isinstance(old_path, str):
+            previous_by_path[str(Path(old_path).expanduser().resolve())] = (old_id, old_entry)
+        marker = old_entry.get("git_marker_id")
+        if isinstance(marker, str) and marker and marker not in previous_by_marker:
+            previous_by_marker[marker] = (old_id, old_entry)
+        identity = old_entry.get("repo_identity")
+        if isinstance(identity, str) and identity:
+            previous_by_identity.setdefault(identity, []).append((old_id, old_entry))
+
+    candidate_records = [
+        (str(path.resolve()), path, git_marker_identity(path))
+        for path in candidates
+    ]
+
+    def within(path: Path, root: Path) -> bool:
+        return path == root or root in path.parents
+
+    matched_by_path: dict[str, tuple[str, dict[str, Any], str]] = {}
+    claimed_ids: set[str] = set()
+    updated_ids: list[str] = []
+    validated_identities: dict[str, str] = {}
+    invalid_candidates: set[str] = set()
+
+    def claim(
+        resolved: str,
+        path: Path,
+        match: tuple[str, dict[str, Any]],
+        identity: str,
+    ) -> None:
+        repo_id, old_entry = match
+        if repo_id in claimed_ids:
+            return
+        claimed_ids.add(repo_id)
+        matched_by_path[resolved] = (repo_id, old_entry, identity)
+        if old_entry.get("path") != resolved or old_entry.get("name") != path.name:
+            updated_ids.append(repo_id)
+
+    # First reserve direct path/marker matches for known repositories. This prevents
+    # a newly cloned copy of the same history from stealing the original repo ID
+    # merely because its pathname sorts first.
+    unmatched: list[tuple[str, Path, str | None, str | None]] = []
+    for resolved, path, marker in candidate_records:
+        match: tuple[str, dict[str, Any]] | None = None
+        identity: str | None = None
+        old = previous_by_path.get(resolved)
+        if old is not None:
+            old_marker = old[1].get("git_marker_id")
+            old_identity = old[1].get("repo_identity")
+            marker_unchanged = not isinstance(old_marker, str) or not old_marker or old_marker == marker
+            if marker_unchanged:
+                if isinstance(old_identity, str) and old_identity:
+                    identity = old_identity
+                else:
+                    identity = repo_identity(path)
+                    validated_identities[resolved] = identity
+                match = old
+            else:
+                identity = repo_identity(path)
+                validated_identities[resolved] = identity
+                if not isinstance(old_identity, str) or not old_identity or old_identity == identity:
+                    match = old
+        if match is None and marker:
+            by_marker = previous_by_marker.get(marker)
+            if by_marker is not None and by_marker[0] not in claimed_ids:
+                old_identity = by_marker[1].get("repo_identity")
+                if isinstance(old_identity, str) and old_identity:
+                    identity = old_identity
+                else:
+                    identity = repo_identity(path)
+                    validated_identities[resolved] = identity
+                match = by_marker
+        if match is not None and match[0] not in claimed_ids:
+            assert identity is not None
+            claim(resolved, path, match, identity)
+        else:
+            unmatched.append((resolved, path, marker, identity))
+
+    # A rename can change filesystem metadata on some platforms. For unmatched
+    # candidates, use the stable history identity only when it identifies exactly
+    # one unclaimed previous repository. An ordinary additional clone therefore
+    # gets its own ID while a moved intact repository can retain its policy ID.
+    for resolved, path, _marker, identity in unmatched:
+        if resolved in matched_by_path:
+            continue
+        verified_identity = validated_identities.get(resolved)
+        if verified_identity is None:
+            if not is_git_repo(path):
+                invalid_candidates.add(resolved)
+                continue
+            verified_identity = repo_identity(path)
+            validated_identities[resolved] = verified_identity
+        identity = verified_identity
+        candidates_for_identity = [
+            item for item in previous_by_identity.get(identity, [])
+            if item[0] not in claimed_ids
+        ]
+        if len(candidates_for_identity) == 1:
+            claim(resolved, path, candidates_for_identity[0], identity)
+
+    entries: dict[str, Any] = {}
+    removed_ids: list[str] = []
+    for old_id, old_entry in previous_repos.items():
+        if not isinstance(old_id, str) or not isinstance(old_entry, dict) or old_id in claimed_ids:
+            continue
+        old_path_value = old_entry.get("path")
+        if not isinstance(old_path_value, str):
+            removed_ids.append(old_id)
+            continue
+        old_path = Path(old_path_value).expanduser().resolve()
+        if any(within(old_path, root) for root in available_roots):
+            removed_ids.append(old_id)
+            continue
+        preserved = dict(old_entry)
+        preserved["id"] = old_id
+        preserved["path"] = str(old_path)
+        entries[old_id] = preserved
+        claimed_ids.add(old_id)
+
+    retired_ids = {
+        str(value) for value in previous.get("retired_repo_ids", [])
+        if isinstance(value, str) and value
+    }
+    retired_ids.update(removed_ids)
+
+    for resolved, path, marker in candidate_records:
+        match = matched_by_path.get(resolved)
+        if match is None:
+            continue
+        repo_id, old_entry, identity = match
+        entry = dict(old_entry)
+        entry.update({
+            "id": repo_id,
+            "name": path.name,
+            "path": resolved,
+            "git_marker_id": marker,
+            "repo_identity": identity,
+        })
+        entries[repo_id] = entry
+
+    used_ids = set(entries)
+    added_ids: list[str] = []
+    for resolved, path, marker in candidate_records:
+        if resolved in matched_by_path or resolved in invalid_candidates:
+            continue
+        identity = validated_identities.get(resolved)
+        if identity is None:
+            if not is_git_repo(path):
+                continue
+            identity = repo_identity(path)
+            validated_identities[resolved] = identity
+        name = path.name
+        base_id = slugify(name)
+        repo_id = base_id
+        unavailable = used_ids | retired_ids
+        if repo_id in unavailable:
+            repo_id = f"{base_id}-{path_fingerprint(path)}"
+        counter = 2
+        candidate_id = repo_id
+        while candidate_id in unavailable:
+            candidate_id = f"{repo_id}-{counter}"
+            counter += 1
+        repo_id = candidate_id
+        state = repo_state(path)
+        entries[repo_id] = {
+            "id": repo_id,
+            "name": name,
+            "path": resolved,
+            "git_marker_id": marker,
+            "repo_identity": identity,
+            "head": state["head"],
+            "branch": state["branch"],
+            "dirty": state["dirty"],
+            "tracked_dirty": state["tracked_dirty"],
+            "untracked": state["untracked"],
+            "last_seen": utc_now(),
+        }
+        used_ids.add(repo_id)
+        added_ids.append(repo_id)
+
+    retired_ids.difference_update(entries)
+    changed = bool(added_ids or removed_ids or updated_ids)
+    generated_at = utc_now() if changed else previous.get("generated_at", utc_now())
+    registry = {
+        "version": 1,
+        "generated_at": generated_at,
+        "repos": entries,
+        "retired_repo_ids": sorted(retired_ids),
+    }
+    return registry, tuple(sorted(added_ids)), tuple(sorted(removed_ids)), tuple(sorted(updated_ids))
 
 
 def repo_state(path: Path) -> dict[str, Any]:
@@ -330,28 +611,61 @@ def repo_state(path: Path) -> dict[str, Any]:
 
 def build_registry(roots: Iterable[Path], previous: dict[str, Any] | None = None) -> dict[str, Any]:
     repos = discover_repos(roots)
-    previous_by_path: dict[str, str] = {}
-    if previous:
-        for old_id, old_entry in previous.get("repos", {}).items():
-            old_path = old_entry.get("path")
-            if isinstance(old_path, str):
-                previous_by_path[str(Path(old_path).expanduser().resolve())] = old_id
+    previous = previous or {"repos": {}}
+    previous_repos = previous.get("repos", {})
+    previous_by_path: dict[str, tuple[str, dict[str, Any]]] = {}
+    previous_by_marker: dict[str, tuple[str, dict[str, Any]]] = {}
+    for old_id, old_entry in previous_repos.items():
+        if not isinstance(old_id, str) or not isinstance(old_entry, dict):
+            continue
+        old_path = old_entry.get("path")
+        if isinstance(old_path, str):
+            previous_by_path[str(Path(old_path).expanduser().resolve())] = (old_id, old_entry)
+        marker = old_entry.get("git_marker_id")
+        if isinstance(marker, str) and marker and marker not in previous_by_marker:
+            previous_by_marker[marker] = (old_id, old_entry)
 
-    current_paths = {str(path.resolve()) for path in repos}
-    reserved_ids = {
-        repo_id for old_path, repo_id in previous_by_path.items() if old_path in current_paths
+    records = [
+        (path, str(path.resolve()), git_marker_identity(path), repo_identity(path))
+        for path in repos
+    ]
+    matched: dict[str, str] = {}
+    claimed_ids: set[str] = set()
+    for path, resolved, marker, identity in records:
+        match: tuple[str, dict[str, Any]] | None = None
+        old = previous_by_path.get(resolved)
+        if old is not None:
+            old_identity = old[1].get("repo_identity")
+            if not isinstance(old_identity, str) or not old_identity or old_identity == identity:
+                match = old
+        if match is None and marker:
+            by_marker = previous_by_marker.get(marker)
+            if by_marker is not None and by_marker[0] not in claimed_ids:
+                old_identity = by_marker[1].get("repo_identity")
+                if not isinstance(old_identity, str) or not old_identity or old_identity == identity:
+                    match = by_marker
+        if match is not None and match[0] not in claimed_ids:
+            matched[resolved] = match[0]
+            claimed_ids.add(match[0])
+
+    retired_ids = {
+        str(value) for value in previous.get("retired_repo_ids", [])
+        if isinstance(value, str) and value
     }
+    retired_ids.update(
+        old_id for old_id in previous_repos
+        if isinstance(old_id, str) and old_id not in claimed_ids
+    )
+
     entries: dict[str, Any] = {}
     used_ids: set[str] = set()
-    for path in repos:
+    for path, resolved, marker, identity in records:
+        repo_id = matched.get(resolved)
         name = path.name
-        resolved = str(path.resolve())
-        if resolved in previous_by_path:
-            repo_id = previous_by_path[resolved]
-        else:
+        if repo_id is None:
             base_id = slugify(name)
             repo_id = base_id
-            unavailable = used_ids | reserved_ids
+            unavailable = used_ids | claimed_ids | retired_ids
             if repo_id in unavailable:
                 repo_id = f"{base_id}-{path_fingerprint(path)}"
             counter = 2
@@ -365,7 +679,9 @@ def build_registry(roots: Iterable[Path], previous: dict[str, Any] | None = None
         entries[repo_id] = {
             "id": repo_id,
             "name": name,
-            "path": str(path),
+            "path": resolved,
+            "git_marker_id": marker,
+            "repo_identity": identity,
             "head": state["head"],
             "branch": state["branch"],
             "dirty": state["dirty"],
@@ -373,7 +689,14 @@ def build_registry(roots: Iterable[Path], previous: dict[str, Any] | None = None
             "untracked": state["untracked"],
             "last_seen": utc_now(),
         }
-    return {"version": 1, "generated_at": utc_now(), "repos": entries}
+
+    retired_ids.difference_update(entries)
+    return {
+        "version": 1,
+        "generated_at": utc_now(),
+        "repos": entries,
+        "retired_repo_ids": sorted(retired_ids),
+    }
 
 
 def public_registry(local_registry: dict[str, Any]) -> dict[str, Any]:
@@ -403,7 +726,7 @@ def resolve_repo(registry: dict[str, Any], ref: str) -> tuple[str, dict[str, Any
         return matches[0]
     if len(matches) > 1:
         raise BridgeError(f"repository name is ambiguous: {ref}")
-    raise BridgeError(f"unknown repository: {ref}")
+    raise UnknownRepositoryError(f"unknown repository: {ref}")
 
 
 def _is_sensitive(rel: Path) -> bool:

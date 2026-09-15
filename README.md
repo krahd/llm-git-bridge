@@ -4,7 +4,7 @@
 
 It exposes a deliberately small mailbox protocol for repository discovery, filtered snapshots, patch transactions, local validation commands, commits, and optional safe-branch pushes. Google Drive through `rclone` is the first transport, but the core protocol is provider-neutral: the remote client does not need direct filesystem access, a GitHub token, or arbitrary shell access on the host.
 
-> **Status:** `1.0.0rc4` protocol-v2 release candidate. The frozen `0.3.0` single-thread release remains the semantic oracle. Local transaction execution is bounded and may overlap across different canonical repositories; same-repository mutation remains serial. Existing and new configurations default to `max_workers=1` unless the operator explicitly enables concurrency.
+> **Status:** `1.0.0rc5` protocol-v2 release candidate, built on the released `v1.0.0-rc4` concurrency baseline. RC5 adds bounded automatic repository discovery inside explicitly approved local roots and hardens post-durable publication/cleanup error handling. Local transaction execution remains bounded and may overlap across different canonical repositories; same-repository mutation remains serial. Existing and new configurations default to `max_workers=1` unless the operator explicitly enables concurrency.
 
 ## Why use it?
 
@@ -44,6 +44,8 @@ signed result JSON
 
 Repositories stay local. The remote mailbox contains a path-free repository index, filtered snapshots on demand, request objects, and signed results. `.git` history and common secrets are not mirrored.
 
+Approved roots are an ongoing trust boundary, not a one-time import list. While the watcher runs, it periodically discovers newly created or cloned Git repositories beneath those roots and republishes the path-free index only when membership changes. `scan` remains available as an explicit full refresh/debug operation; adding a completely new filesystem root is still a local operator action.
+
 ## Quick start
 
 ### Requirements
@@ -61,7 +63,6 @@ cd llm-git-bridge
 
 bin/llm-git-bridge setup --remote YOUR_RCLONE_REMOTE
 bin/llm-git-bridge add-root ~/repos
-bin/llm-git-bridge scan
 bin/llm-git-bridge status
 ```
 

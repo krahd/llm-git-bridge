@@ -218,3 +218,9 @@ Crash consistency remains durability-first. Worker-local execution returns an ou
 Transport I/O remains serial by design. The watcher is the sole rclone/Drive owner even with multiple local workers. The programme found no ordinary end-to-end gain large enough to justify sharing transport state or increasing uncertain-write concurrency. Likewise, adaptive concurrency was rejected: explicit fixed limits are easier to audit and avoid guessing host capacity when configured repository commands may already spawn parallel builds.
 
 The release candidate therefore has one simple concurrency rule: parallelise only independent local repository work, keep every global/durable side effect under one owner, and bound every queue/worker dimension explicitly.
+
+## RC5 registry discovery while workers are active
+
+Repository membership discovery is watcher-owned and does not consume worker slots. The watcher checks the bounded discovery deadline before ordinary polling and inside the active-worker live-poll loop. Consequently a long build on repository A does not postpone discovery of a newly cloned repository B until A completes. Membership refresh never mutates frozen worker inputs already handed off.
+
+Unknown-repository requests receive at most the discovery pass already due under the configured interval; repeated unknown names cannot turn the watcher into an unbounded filesystem scanner. A genuine identity mismatch in an already registered local repository is a separate local-state event and triggers one authoritative full refresh before policy-bearing work is planned.

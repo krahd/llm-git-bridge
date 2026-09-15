@@ -179,3 +179,11 @@ The first post-promotion two-worker canary exposed a gap not covered by the same
 ### RC4 durable-result publication boundary (2026-09-14)
 
 The RC3 production canary verified later-arrival concurrency and transient live-list recovery, then exposed a distinct result-publication head-of-line path: after an independent worker completed and its signed result was durably saved, a transient remote publication failure still unwound the concurrent scheduler frame, cleared validated pending work, and drained active workers. RC4 contains only post-durable `BridgeError` publication failures, records `scheduler-publication-error`, preserves pending/active scheduler state, and relies on the existing authenticated durable-result replay path. Pre-durable persistence failures remain fail-closed. RC3 remains deployed as the recovery baseline until RC4 completes the same local, production-Mac, materialisation, promotion, and live-canary gates; RC3 must not be tagged.
+
+## RC5 post-RC4 automatic discovery candidate (2026-09-14)
+
+The post-RC4 candidate adds watcher-owned automatic repository discovery beneath explicitly approved roots. Normal creation/cloning of a repository no longer requires a manual `scan`; `scan` remains the operator's immediate full-state refresh. Discovery defaults to 30 seconds, is bounded to 5–3600 seconds, continues while long workers are active, publishes only membership changes, and exposes path-free health through diagnostics.
+
+The adversarial pass found a policy-identity hazard: repository IDs key configured commands and push permission, so a different repository replacing a working tree must not inherit the old ID. RC5 binds registry IDs to local Git-history identity, retires replaced IDs, preserves IDs for the same repository moved intact, and verifies identity before repository-dependent dispatch. These local identity fields are not remotely published.
+
+The same candidate includes post-RC4 durability hardening that normalises expected raw filesystem `OSError` failures occurring only after the signed result is durably persisted into the existing `BridgeError` publication-recovery path. Pre-durable persistence failures remain fail-closed.

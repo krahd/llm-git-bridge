@@ -87,3 +87,9 @@ The bridge deliberately does not auto-rebase or auto-merge.
 Doctor and diagnostics are lightweight watcher-owned operations and may be serviced while repository workers are active.
 
 Doctor is for versions/transport/RC health/OAuth-client-presence. Diagnostics is for bounded recent sanitized metrics and scheduler counts. Neither exposes raw local paths or command output.
+
+## Repository-index freshness
+
+The local operator approves filesystem roots, not each repository individually. The watcher periodically discovers valid Git repositories beneath those roots and republishes `v2/meta/repos.json` when membership changes. A client should normally wait/re-read the index rather than asking for a manual per-repository registration. `scan`, `add-root`, and discovery-interval configuration are local operator controls.
+
+An unknown-repository request does not permit the remote client to force unbounded rescanning. Discovery remains rate-limited. If a repository was replaced locally, its public ID may change so local command/push policy cannot transfer to unrelated history; re-read the index rather than assuming the old ID follows the path.

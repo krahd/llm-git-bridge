@@ -51,17 +51,16 @@ Read [google-drive-oauth.md](google-drive-oauth.md) before running it. The brows
 
 You can check the current transport state with a remote `doctor` request. `custom_drive_client_id_configured: false` means the private-client migration has not yet been completed.
 
-## 4. Register repository roots
+## 4. Approve repository roots
 
 Add one or more directories under which the bridge should discover Git repositories:
 
 ```bash
 bin/llm-git-bridge add-root ~/repos
-bin/llm-git-bridge scan
 bin/llm-git-bridge status
 ```
 
-The remote repository registry contains repository IDs and state, not local filesystem paths.
+The remote repository registry contains repository IDs and state, not local filesystem paths. The watcher automatically discovers new Git repositories created or cloned beneath approved roots (30 seconds by default), so normal operation does not require another `scan`. Use `scan` only when you want an immediate full state refresh, and use `configure-discovery --interval SECONDS` to change the bounded 5–3600 second discovery interval. Adding a new root remains an explicit local action.
 
 ## 5. Configure validation commands
 

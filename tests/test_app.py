@@ -13,7 +13,7 @@ from pathlib import Path
 from unittest.mock import Mock, call, patch
 
 from llm_git_bridge import app
-from llm_git_bridge.core import BridgeError, save_json
+from llm_git_bridge.core import BridgeError, git_marker_identity, repo_identity, save_json
 from llm_git_bridge.transport import RcloneTransport, RemoteFileEntry, TransientTransportError
 
 
@@ -141,6 +141,267 @@ class AppTests(unittest.TestCase):
         app.CONFIG_DIR, app.CONFIG_FILE, app.STATE_DIR, app.REGISTRY_FILE, app.PUBLISHED_DIR = self.old
         shutil.rmtree(self.tmp, ignore_errors=True)
 
+
+    def test_auto_discovery_adds_new_repo_and_publishes_path_free_registry_while_idle(self):
+        new_repo = self.tmp / "new-repo"
+        shutil.copytree(self._seed_repo, new_repo, symlinks=True)
+        cfg = dict(self.cfg)
+        cfg["registry_scan_interval"] = 5.0
+
+        self.assertEqual(app.process_pending_once(cfg), 0)
+
+        registry = json.loads(app.REGISTRY_FILE.read_text(encoding="utf-8"))
+        by_name = {entry["name"]: entry for entry in registry["repos"].values()}
+        self.assertIn("new-repo", by_name)
+        self.assertEqual(by_name["new-repo"]["path"], str(new_repo.resolve()))
+        published = json.loads(self.fake.files["v2/meta/repos.json"])
+        self.assertIn("new-repo", {entry["name"] for entry in published["repos"]})
+        self.assertNotIn(str(self.tmp), json.dumps(published))
+        self.assertEqual(registry["discovery"]["last_added"], 1)
+        self.assertEqual(registry["discovery"]["last_removed"], 0)
+
+    def test_auto_discovery_publish_failure_does_not_replace_local_registry(self):
+        new_repo = self.tmp / "publish-failure-repo"
+        shutil.copytree(self._seed_repo, new_repo, symlinks=True)
+        cfg = dict(self.cfg)
+        cfg["registry_scan_interval"] = 5.0
+        before = app.REGISTRY_FILE.read_bytes()
+
+        with patch.object(app, "publish_registry", side_effect=BridgeError("publish failed")):
+            with self.assertRaisesRegex(BridgeError, "publish failed"):
+                app.refresh_registry_membership(cfg, publish=True)
+
+        self.assertEqual(app.REGISTRY_FILE.read_bytes(), before)
+
+    def test_auto_discovery_continues_while_long_worker_is_active(self):
+        registry = json.loads(app.REGISTRY_FILE.read_text(encoding="utf-8"))
+        registry["discovery"] = {
+            "last_scan_at": "test",
+            "last_scan_epoch": time.time(),
+            "last_scan_duration_s": 0.0,
+            "last_added": 0,
+            "last_removed": 0,
+            "last_updated": 0,
+        }
+        save_json(app.REGISTRY_FILE, registry)
+        cfg = dict(self.cfg)
+        cfg.update({"registry_scan_interval": 5.0, "max_workers": 2, "max_pending_jobs": 8, "poll_interval": 0.5})
+        txid = "tx-discovery-active-worker"
+        self.fake.files[f"v2/transactions/{txid}.json"] = json.dumps({
+            "protocol": 2,
+            "kind": "transaction",
+            "transaction_id": txid,
+            "repo": "repo",
+            "base_sha": self._seed_head,
+            "branch": "ai/discovery-active-worker",
+            "patch": "",
+            "run": [],
+        }) + "\n"
+        new_repo = self.tmp / "created-while-active"
+        worker_started = threading.Event()
+        discovered = threading.Event()
+
+        def worker(task, _cancel):
+            worker_started.set()
+            self.assertTrue(discovered.wait(4.0), "registry discovery stalled behind active worker")
+            return self._b2_dummy_worker_outcome(task.filename[:-5], repo_id=task.repo_id)
+
+        def create_repo():
+            self.assertTrue(worker_started.wait(2.0))
+            shutil.copytree(self._seed_repo, new_repo, symlinks=True)
+
+        def discovery_due(_cfg, _registry):
+            return worker_started.is_set() and (new_repo / ".git").exists() and not discovered.is_set()
+
+        real_refresh = app.refresh_registry_membership
+
+        def refresh_and_signal(*args, **kwargs):
+            refreshed = real_refresh(*args, **kwargs)
+            if "created-while-active" in {entry["name"] for entry in refreshed["repos"].values()}:
+                discovered.set()
+            return refreshed
+
+        creator = threading.Thread(target=create_repo)
+        creator.start()
+        scheduler = app._LocalWorkerScheduler(max_workers=2, queue_capacity=2, worker_fn=worker)
+        scheduler.start()
+        try:
+            with patch.object(app, "_registry_discovery_due", side_effect=discovery_due), patch.object(
+                app, "refresh_registry_membership", side_effect=refresh_and_signal
+            ):
+                self.assertEqual(app.process_pending_once(cfg, scheduler=scheduler), 1)
+        finally:
+            creator.join(2.0)
+            scheduler.shutdown(cancel_running=True)
+
+        self.assertTrue(discovered.is_set())
+        published = json.loads(self.fake.files["v2/meta/repos.json"])
+        self.assertIn("created-while-active", {entry["name"] for entry in published["repos"]})
+
+    def test_auto_discovery_does_not_publish_when_membership_is_unchanged(self):
+        cfg = dict(self.cfg)
+        cfg["registry_scan_interval"] = 5.0
+
+        self.assertEqual(app.process_pending_once(cfg), 0)
+
+        self.assertNotIn("v2/meta/repos.json", self.fake.files)
+        registry = json.loads(app.REGISTRY_FILE.read_text(encoding="utf-8"))
+        self.assertIn("discovery", registry)
+        self.assertEqual(registry["discovery"]["last_added"], 0)
+        self.assertEqual(registry["discovery"]["last_removed"], 0)
+
+    def test_unknown_repo_retries_against_due_auto_discovery_once(self):
+        new_repo = self.tmp / "arrived-later"
+        shutil.copytree(self._seed_repo, new_repo, symlinks=True)
+        registry = json.loads(app.REGISTRY_FILE.read_text(encoding="utf-8"))
+        registry["discovery"] = {
+            "last_scan_at": "test",
+            "last_scan_epoch": 0.0,
+            "last_scan_duration_s": 0.0,
+            "last_added": 0,
+            "last_removed": 0,
+        }
+        save_json(app.REGISTRY_FILE, registry)
+        cfg = dict(self.cfg)
+        cfg["registry_scan_interval"] = 5.0
+        txid = "tx-auto-discovery-late"
+        filename = f"{txid}.json"
+        raw = json.dumps({
+            "protocol": 2,
+            "kind": "materialize",
+            "transaction_id": txid,
+            "repo": "arrived-later",
+        }) + "\n"
+        downloaded = app._DownloadedRequest(
+            filename=filename,
+            raw=raw,
+            request_bytes_sha256="0" * 64,
+            download_s=0.0,
+            download_transport="test",
+        )
+        request = app._ValidatedRequest(downloaded=downloaded, obj=json.loads(raw))
+
+        job, refreshed = app._plan_local_job_with_discovery(cfg, registry, request)
+
+        self.assertEqual(job.kind, "materialize")
+        self.assertIsNotNone(job.scheduling_key)
+        self.assertIn("arrived-later", {entry["name"] for entry in refreshed["repos"].values()})
+        self.assertIn("v2/meta/repos.json", self.fake.files)
+
+    def test_auto_discovery_scan_interval_rate_limits_unknown_repo_rescans(self):
+        registry = json.loads(app.REGISTRY_FILE.read_text(encoding="utf-8"))
+        registry["discovery"] = {
+            "last_scan_at": "test",
+            "last_scan_epoch": time.time(),
+            "last_scan_duration_s": 0.0,
+            "last_added": 0,
+            "last_removed": 0,
+        }
+        save_json(app.REGISTRY_FILE, registry)
+        cfg = dict(self.cfg)
+        cfg["registry_scan_interval"] = 60.0
+        txid = "tx-auto-discovery-rate-limit"
+        filename = f"{txid}.json"
+        raw = json.dumps({
+            "protocol": 2,
+            "kind": "materialize",
+            "transaction_id": txid,
+            "repo": "not-there",
+        }) + "\n"
+        request = app._ValidatedRequest(
+            downloaded=app._DownloadedRequest(
+                filename=filename,
+                raw=raw,
+                request_bytes_sha256="0" * 64,
+                download_s=0.0,
+                download_transport="test",
+            ),
+            obj=json.loads(raw),
+        )
+
+        with patch.object(app, "refresh_registry_membership") as refresh:
+            with self.assertRaisesRegex(BridgeError, "unknown repository"):
+                app._plan_local_job_with_discovery(cfg, registry, request)
+        refresh.assert_not_called()
+
+    def test_diagnostics_exposes_path_free_registry_discovery_status(self):
+        cfg = dict(self.cfg)
+        cfg["registry_scan_interval"] = 5.0
+        txid = "tx-registry-diagnostics"
+        self.fake.files[f"v2/transactions/{txid}.json"] = json.dumps({
+            "protocol": 2,
+            "kind": "diagnostics",
+            "transaction_id": txid,
+        }) + "\n"
+
+        self.assertEqual(app.process_pending_once(cfg), 1)
+
+        result = json.loads(self.fake.files[f"v2/results/{txid}.json"])
+        status = result["registry"]
+        self.assertTrue(status["auto_discovery_enabled"])
+        self.assertEqual(status["scan_interval_s"], 5.0)
+        self.assertEqual(status["repo_count"], 1)
+        self.assertIsInstance(status["last_scan_at"], str)
+        self.assertNotIn(str(self.tmp), json.dumps(status))
+
+    def test_repository_replacement_at_same_path_is_rejected_before_policy_can_apply(self):
+        registry = json.loads(app.REGISTRY_FILE.read_text(encoding="utf-8"))
+        registry["repos"]["repo"]["git_marker_id"] = git_marker_identity(self.repo)
+        registry["repos"]["repo"]["repo_identity"] = repo_identity(self.repo)
+        save_json(app.REGISTRY_FILE, registry)
+        old_marker_id = registry["repos"]["repo"]["git_marker_id"]
+        old_repo_identity = registry["repos"]["repo"]["repo_identity"]
+        shutil.rmtree(self.repo)
+        self.repo.mkdir()
+        sh(self.repo, "git", "init", "-q")
+        sh(self.repo, "git", "config", "user.email", "replacement@example.invalid")
+        sh(self.repo, "git", "config", "user.name", "Replacement User")
+        (self.repo / "README.md").write_text("replacement history\n", encoding="utf-8")
+        sh(self.repo, "git", "add", "README.md")
+        sh(self.repo, "git", "commit", "-qm", "replacement initial")
+        self.assertNotEqual(repo_identity(self.repo), old_repo_identity)
+        # Filesystems may immediately reuse the same .git inode. The security
+        # boundary therefore must not depend on marker identity alone.
+        _ = old_marker_id == git_marker_identity(self.repo)
+        txid = "tx-replaced-repo-policy"
+        replacement_head = sh(self.repo, "git", "rev-parse", "HEAD")
+        patch_text = """diff --git a/README.md b/README.md
+--- a/README.md
++++ b/README.md
+@@ -1 +1 @@
+-replacement history
++replacement changed
+"""
+        cfg = {
+            **self.cfg,
+            "commands": {"repo": {"privileged": ["python3", "-c", "print('old policy')"]}},
+            "push_enabled_repos": ["repo"],
+        }
+        self.fake.files[f"v2/transactions/{txid}.json"] = json.dumps({
+            "protocol": 2,
+            "kind": "transaction",
+            "transaction_id": txid,
+            "repo": "repo",
+            "base_sha": replacement_head,
+            "branch": "ai/replaced-repo-policy",
+            "patch": patch_text,
+            "run": ["privileged"],
+            "push": False,
+        }) + "\n"
+
+        self.assertEqual(app.process_pending_once(cfg), 1)
+
+        result = json.loads(self.fake.files[f"v2/results/{txid}.json"])
+        self.assertEqual(result["status"], "error")
+        self.assertIn("requested command is not configured locally: privileged", result["error"])
+        self.assertNotEqual(
+            subprocess.run(
+                ["git", "-C", str(self.repo), "show-ref", "--verify", "refs/heads/ai/replaced-repo-policy"],
+                stdout=subprocess.PIPE,
+                stderr=subprocess.PIPE,
+            ).returncode,
+            0,
+        )
 
     def test_disappeared_registered_repo_yields_signed_generic_error_without_path_leak(self):
         txid = "tx-missing-repo"
@@ -2183,7 +2444,7 @@ class AppTests(unittest.TestCase):
             nonlocal failed
             if source == "processed" and not failed:
                 failed = True
-                raise BridgeError("simulated marker persistence failure")
+                raise OSError("simulated marker persistence failure")
             return original_mark(name, source=source, request_bytes_sha256=request_bytes_sha256)
 
         with patch("llm_git_bridge.app._process_doctor_request", return_value={
@@ -2191,7 +2452,7 @@ class AppTests(unittest.TestCase):
             "status": "success", "processed_at": "test", "operation": "doctor", "doctor": {},
         }) as doctor:
             with patch.object(app, "_mark_published", side_effect=fail_once):
-                with self.assertRaisesRegex(BridgeError, "simulated marker persistence failure"):
+                with self.assertRaisesRegex(BridgeError, "post-durable result publication/cleanup failed"):
                     app.process_pending_once(self.cfg)
             self.assertEqual(app.process_pending_once(self.cfg), 1)
         doctor.assert_called_once()
@@ -3151,6 +3412,26 @@ class TransportTests(unittest.TestCase):
         self.assertEqual(cfg["max_workers"], 2)
         self.assertEqual(cfg["max_pending_jobs"], 8)
 
+    def test_configure_discovery_cli_persists_validated_interval(self):
+        parser = app.build_parser()
+        args = parser.parse_args(["configure-discovery", "--interval", "45"])
+        with patch("builtins.print"):
+            self.assertEqual(app.cmd_configure_discovery(args), 0)
+        cfg = app.load_config()
+        self.assertEqual(cfg["registry_scan_interval"], 45.0)
+
+    def test_registry_scan_interval_is_bounded_and_validated(self):
+        self.assertEqual(app.default_config()["registry_scan_interval"], 30.0)
+        for value in (5, 30, 3600):
+            cfg = app.default_config()
+            cfg["registry_scan_interval"] = value
+            self.assertEqual(app._validate_config(cfg)["registry_scan_interval"], value)
+        for value in (True, 0, 4.9, 3600.1, float("nan"), float("inf"), "30"):
+            cfg = app.default_config()
+            cfg["registry_scan_interval"] = value
+            with self.subTest(value=value), self.assertRaisesRegex(BridgeError, "registry_scan_interval"):
+                app._validate_config(cfg)
+
     def test_d_pending_limit_cannot_be_lower_than_worker_count(self):
         cfg = app.default_config()
         cfg["max_workers"] = 4
@@ -3201,6 +3482,8 @@ class TransportTests(unittest.TestCase):
             {**base, "transport": "not-an-object"},
             {**base, "poll_interval": float("nan")},
             {**base, "poll_interval": 0.1},
+            {**base, "registry_scan_interval": float("nan")},
+            {**base, "registry_scan_interval": 4.0},
             {**base, "safe_branch_prefix": "ai//"},
             {**base, "safe_branch_prefix": ".hidden/"},
             {**base, "commands": {"repo": {"bad name": ["true"]}}},
