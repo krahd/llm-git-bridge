@@ -250,6 +250,24 @@ class AppTests(unittest.TestCase):
         self.assertEqual(registry["discovery"]["last_added"], 0)
         self.assertEqual(registry["discovery"]["last_removed"], 0)
 
+    def test_auto_discovery_does_not_publish_for_equivalent_canonical_path(self):
+        registry = json.loads(app.REGISTRY_FILE.read_text(encoding="utf-8"))
+        registry["repos"]["repo"]["path"] = str(
+            self.tmp / ".." / self.tmp.name / "repo"
+        )
+        save_json(app.REGISTRY_FILE, registry)
+        cfg = dict(self.cfg)
+        cfg["registry_scan_interval"] = 5.0
+
+        self.assertEqual(app.process_pending_once(cfg), 0)
+
+        self.assertNotIn("v2/meta/repos.json", self.fake.files)
+        refreshed = json.loads(app.REGISTRY_FILE.read_text(encoding="utf-8"))
+        self.assertEqual(refreshed["repos"]["repo"]["path"], str(self.repo.resolve()))
+        self.assertEqual(refreshed["discovery"]["last_added"], 0)
+        self.assertEqual(refreshed["discovery"]["last_removed"], 0)
+        self.assertEqual(refreshed["discovery"]["last_updated"], 0)
+
     def test_unknown_repo_retries_against_due_auto_discovery_once(self):
         new_repo = self.tmp / "arrived-later"
         shutil.copytree(self._seed_repo, new_repo, symlinks=True)

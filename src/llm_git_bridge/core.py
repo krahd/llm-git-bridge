@@ -405,7 +405,13 @@ def reconcile_registry_membership(
             return
         claimed_ids.add(repo_id)
         matched_by_path[resolved] = (repo_id, old_entry, identity)
-        if old_entry.get("path") != resolved or old_entry.get("name") != path.name:
+        old_path_value = old_entry.get("path")
+        old_resolved = (
+            str(Path(old_path_value).expanduser().resolve())
+            if isinstance(old_path_value, str)
+            else None
+        )
+        if old_resolved != resolved or old_entry.get("name") != path.name:
             updated_ids.append(repo_id)
 
     # First reserve direct path/marker matches for known repositories. This prevents
