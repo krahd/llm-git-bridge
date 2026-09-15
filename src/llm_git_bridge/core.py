@@ -463,10 +463,24 @@ def reconcile_registry_membership(
             continue
         verified_identity = validated_identities.get(resolved)
         if verified_identity is None:
-            if not is_git_repo(path):
+            # A .git marker is only a candidate. Completely new worktrees may be
+            # transiently non-admissible (for example, `git init` before the first
+            # commit). They must not poison discovery for every known repository.
+            # Candidates associated with an existing registry identity remain
+            # fail-closed: an identity-validation failure there may indicate
+            # replacement or policy-bound identity drift.
+            prior_path_match = resolved in previous_by_path
+            prior_marker_match = bool(_marker and _marker in previous_by_marker)
+            try:
+                if not is_git_repo(path):
+                    invalid_candidates.add(resolved)
+                    continue
+                verified_identity = repo_identity(path)
+            except BridgeError:
+                if prior_path_match or prior_marker_match:
+                    raise
                 invalid_candidates.add(resolved)
                 continue
-            verified_identity = repo_identity(path)
             validated_identities[resolved] = verified_identity
         identity = verified_identity
         candidates_for_identity = [

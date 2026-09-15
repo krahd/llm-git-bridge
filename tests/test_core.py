@@ -1023,6 +1023,56 @@ class CoreTests(unittest.TestCase):
         finally:
             shutil.rmtree(parent, ignore_errors=True)
 
+    def test_incremental_registry_ignores_unborn_new_repo_until_it_has_history(self):
+        parent = Path(tempfile.mkdtemp(prefix="llmgb-discovery-unborn-"))
+        try:
+            known = parent / "known"
+            shutil.copytree(self._seed_repo, known, symlinks=True)
+            previous = build_registry([parent])
+            known_id = next(iter(previous["repos"]))
+
+            unborn = parent / "unborn"
+            unborn.mkdir()
+            sh(unborn, "git", "init", "-q")
+
+            current, added, removed, updated = reconcile_registry_membership([parent], previous)
+
+            self.assertEqual(set(current["repos"]), {known_id})
+            self.assertEqual(added, ())
+            self.assertEqual(removed, ())
+            self.assertEqual(updated, ())
+
+            sh(unborn, "git", "config", "user.email", "unborn@example.invalid")
+            sh(unborn, "git", "config", "user.name", "Unborn")
+            (unborn / "README.md").write_text("ready\n", encoding="utf-8")
+            sh(unborn, "git", "add", "README.md")
+            sh(unborn, "git", "commit", "-qm", "initial")
+
+            admitted, added, removed, updated = reconcile_registry_membership([parent], current)
+            self.assertEqual(len(added), 1)
+            self.assertEqual(removed, ())
+            self.assertEqual(updated, ())
+            self.assertIn(known_id, admitted["repos"])
+            self.assertEqual(admitted["repos"][added[0]]["path"], str(unborn.resolve()))
+        finally:
+            shutil.rmtree(parent, ignore_errors=True)
+
+    def test_incremental_registry_keeps_known_identity_validation_fail_closed(self):
+        parent = Path(tempfile.mkdtemp(prefix="llmgb-discovery-known-fail-"))
+        try:
+            repo = parent / "known"
+            shutil.copytree(self._seed_repo, repo, symlinks=True)
+            previous = build_registry([parent])
+            # Force the cheap marker to look changed so the policy-bearing history
+            # identity must be revalidated rather than reused.
+            previous["repos"][next(iter(previous["repos"]))]["git_marker_id"] = "changed-marker"
+
+            with patch.object(core_mod, "repo_identity", side_effect=BridgeError("identity unavailable")):
+                with self.assertRaisesRegex(BridgeError, "identity unavailable"):
+                    reconcile_registry_membership([parent], previous)
+        finally:
+            shutil.rmtree(parent, ignore_errors=True)
+
     def test_replaced_repo_at_same_path_gets_new_id_and_retires_old_policy_id(self):
         parent = Path(tempfile.mkdtemp(prefix="llmgb-discovery-replace-"))
         try:
