@@ -1,0 +1,3 @@
+interface:
+  display_name: "LLM Git Bridge Client"
+  short_description: "Safely operate llm-git-bridge from an LLM client"

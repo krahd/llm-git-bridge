@@ -102,6 +102,6 @@ Both are protocol-v2 request kinds; see [protocol.md](protocol.md).
 
 ## Multiple clients
 
-Several ChatGPT sessions or other clients can submit work to the same mailbox. Requests are consumed by one local watcher and therefore execute serially. There is no FIFO guarantee.
+Several ChatGPT sessions or other clients can submit work to the same mailbox. One local watcher owns mailbox transport and result publication. When `max_workers > 1`, local edit execution may overlap across different canonical repositories; same-repository mutation remains serialised. There is no FIFO guarantee.
 
-See [concurrency.md](concurrency.md) before using multiple editing sessions against the same repository.
+See [concurrency.md](concurrency.md) before using multiple editing sessions, especially for dependent work or work against the same repository.
