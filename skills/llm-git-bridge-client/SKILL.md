@@ -10,7 +10,7 @@ Use the bridge as a **mailbox protocol**, not as shell access and not as a subst
 ## Start every session by grounding state
 
 1. Identify the mailbox root and transport available to the current client.
-2. Read `v2/meta/repos.json` before naming repositories from memory. Re-read it when a repository was just created/cloned or an unknown-repository response suggests your cached index is stale; repositories beneath operator-approved roots are discovered automatically on a bounded interval.
+2. Read `v2/meta/repos.json` before naming repositories from memory. Re-read it when a repository was just created/cloned or an unknown-repository response suggests your cached index is stale; repositories beneath operator-approved roots are discovered automatically on a bounded interval. If an expected repository is still absent, check discovery diagnostics and a successful recent `last_scan_at` before asking the operator to intervene.
 3. If operational state matters, submit `doctor` and, when useful, `diagnostics` requests.
 4. Before preparing an edit, materialise the repository or relevant safe-prefix branch and read its fresh filtered snapshot.
 5. Treat the snapshot's Git identity as authoritative remote context. Never invent local filesystem paths.
@@ -86,6 +86,7 @@ Read [references/result-and-recovery.md](references/result-and-recovery.md) befo
 - **Push error after successful commit:** preserve/report the local commit as successful local mutation and treat push as a secondary failure.
 - **Snapshot error after successful commit:** preserve/report the local commit and materialise later if a snapshot is needed.
 - **Result publication ambiguity:** do not resubmit changed work under the same ID. Allow durable local-result recovery/republish to work.
+- **Materialisation acknowledgement ambiguity:** if a read-only materialisation returns `rclone rc write outcome is unknown; retry required`, do not loop retries. Inspect the authoritative remote snapshot and independent current-state evidence first. If the snapshot already carries the required branch/head, use it as state evidence and record the transport acknowledgement failure separately. If it is stale or absent and fresh bytes are still required, issue at most one fresh materialisation under a new transaction ID after confirming no earlier materialisation remains pending; repeated ambiguity is a transport residual to report, not a reason to keep retrying.
 
 ## Respect the execution trust boundary
 
@@ -107,6 +108,16 @@ Treat those as safety boundaries to resolve at the source, not obstacles to rout
 ## Promotion and protected branches
 
 A normal remote transaction ends on a validated safe branch. Merging/promoting to `main` or another protected/default branch is intentionally outside the remote protocol. Use the repository's approved human/local guarded promotion process and independently verify the result afterward.
+
+When generating a local promotion, release, migration, or canary wrapper:
+
+- make preflight checks side-effect free;
+- track which mutations actually occurred and only restart/restore/clean up state that the wrapper itself changed;
+- never restart the daemon merely because an early preflight check failed;
+- capture a child command's exit status immediately (`rc=$?`) before any `echo`, logging, cleanup helper, or other command can overwrite `$?`;
+- make traps and cleanup preserve and return the captured status;
+- never infer successful promotion from a wrapper exit code unless the wrapper demonstrably preserves the child status;
+- independently verify protected branch/tag/runtime state after the local boundary.
 
 ## Evidence discipline
 

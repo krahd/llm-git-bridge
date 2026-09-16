@@ -1057,6 +1057,27 @@ class CoreTests(unittest.TestCase):
         finally:
             shutil.rmtree(parent, ignore_errors=True)
 
+    def test_incremental_registry_empty_marker_scan_does_not_mass_retire_policy_ids(self):
+        parent = Path(tempfile.mkdtemp(prefix="llmgb-discovery-empty-guard-"))
+        try:
+            first = parent / "first"
+            second = parent / "second"
+            shutil.copytree(self._seed_repo, first, symlinks=True)
+            shutil.copytree(self._seed_repo, second, symlinks=True)
+            previous = build_registry([parent])
+            previous_ids = set(previous["repos"])
+
+            with patch.object(core_mod, "discover_repo_markers", return_value=[]):
+                current, added, removed, updated = reconcile_registry_membership([parent], previous)
+
+            self.assertEqual(set(current["repos"]), previous_ids)
+            self.assertEqual(added, ())
+            self.assertEqual(removed, ())
+            self.assertEqual(updated, ())
+            self.assertEqual(current["retired_repo_ids"], previous["retired_repo_ids"])
+        finally:
+            shutil.rmtree(parent, ignore_errors=True)
+
     def test_incremental_registry_keeps_known_identity_validation_fail_closed(self):
         parent = Path(tempfile.mkdtemp(prefix="llmgb-discovery-known-fail-"))
         try:

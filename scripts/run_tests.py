@@ -13,7 +13,9 @@ import os
 from pathlib import Path
 import subprocess
 import sys
+import tempfile
 import unittest
+from typing import IO
 
 DEFAULT_JOBS = 4
 MAX_JOBS = 8
@@ -71,24 +73,31 @@ def _run_shards(
     duration_args: list[str],
     label: str,
 ) -> bool:
-    processes: list[tuple[int, subprocess.Popen[str]]] = []
+    processes: list[tuple[int, subprocess.Popen[str], IO[str]]] = []
     try:
         for index, shard in enumerate(shards, start=1):
             argv = [sys.executable, "-m", "unittest", "-v", *duration_args, *shard]
-            proc = subprocess.Popen(
-                argv,
-                cwd=root,
-                env=env,
-                text=True,
-                stdout=subprocess.PIPE,
-                stderr=subprocess.STDOUT,
-            )
-            processes.append((index, proc))
+            output_file = tempfile.TemporaryFile(mode="w+", encoding="utf-8", errors="replace")
+            try:
+                proc = subprocess.Popen(
+                    argv,
+                    cwd=root,
+                    env=env,
+                    text=True,
+                    stdout=output_file,
+                    stderr=subprocess.STDOUT,
+                )
+            except BaseException:
+                output_file.close()
+                raise
+            processes.append((index, proc, output_file))
 
         failed = False
         total = len(processes)
-        for index, proc in processes:
-            output, _ = proc.communicate()
+        for index, proc, output_file in processes:
+            proc.wait()
+            output_file.seek(0)
+            output = output_file.read()
             print(f"=== {label} {index}/{total} ===")
             if output:
                 print(output, end="" if output.endswith("\n") else "\n")
@@ -96,15 +105,18 @@ def _run_shards(
                 failed = True
         return failed
     except KeyboardInterrupt:
-        for _index, proc in processes:
+        for _index, proc, _output_file in processes:
             if proc.poll() is None:
                 proc.terminate()
-        for _index, proc in processes:
+        for _index, proc, _output_file in processes:
             try:
                 proc.wait(timeout=5)
             except subprocess.TimeoutExpired:
                 proc.kill()
         raise
+    finally:
+        for _index, _proc, output_file in processes:
+            output_file.close()
 
 
 def main() -> int:

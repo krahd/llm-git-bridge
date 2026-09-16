@@ -21,10 +21,16 @@ This file records the failure modes the skill must continue to resist when maint
 15. **Version drift** — If runtime version differs from the bundled assumptions, read the deployed protocol/security/concurrency docs before mutation.
 16. **Manual-registration assumption** — Do not tell the operator to `scan` for every repository. Repositories beneath approved roots are auto-discovered; adding a new root remains local policy.
 17. **Repository-ID privilege inheritance** — If a repository is locally replaced and receives a new ID, never assume configured commands or push permission follow its name/path. Re-read the public registry.
+18. **Materialisation retry loop** — A terminal `rclone rc write outcome is unknown; retry required` can mean acknowledgement was lost after the snapshot write. Inspect the authoritative snapshot first; allow at most one fresh materialisation when the snapshot is stale/absent and fresh bytes are required. Repeated ambiguity is a transport residual, not permission for an unbounded retry loop.
+19. **Preflight cleanup/exit-code corruption** — Local promotion/canary scripts must not restart/restore/mutate anything after a preflight refusal unless they actually changed that state. Capture a child's exit code immediately and preserve it through cleanup; never report `$?` after an intervening `echo` or other command as the child's status.
 
 ## Audit outcome for initial version
 
 PASS after repairs. The skill was rewritten to address every case above, and its source hierarchy was changed to avoid inheriting the stale RC4 `docs/usage.md` concurrency sentence.
+
+## RC5 maintenance audit
+
+PASS after adding cases 18–19 from production RC5 experience and strengthening case 16's operational guidance. The skill now distinguishes materialised state from transport acknowledgement and requires side-effect-free preflight plus exact exit-code preservation for local operator scripts.
 
 ## Maintenance rule
 

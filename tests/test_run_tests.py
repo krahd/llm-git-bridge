@@ -1,7 +1,10 @@
 from __future__ import annotations
 
 import importlib.util
+import os
 from pathlib import Path
+import tempfile
+import time
 import unittest
 
 
@@ -46,6 +49,39 @@ class RunTestsTests(unittest.TestCase):
         combined = [test_id for shard in shards for test_id in shard] + serial
         self.assertCountEqual(combined, ids)
         self.assertEqual(len(combined), len(set(combined)))
+
+    def test_shard_collection_does_not_wait_for_descendant_held_stdout(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            test_file = root / "test_descendant_stdout.py"
+            test_file.write_text(
+                "import subprocess\n"
+                "import sys\n"
+                "import unittest\n"
+                "class DescendantStdoutTests(unittest.TestCase):\n"
+                "    def test_returns_before_descendant_closes_stdout(self):\n"
+                "        subprocess.Popen([sys.executable, '-c', 'import time; time.sleep(3)'])\n"
+                "if __name__ == '__main__':\n"
+                "    unittest.main()\n"
+            )
+            env = os.environ.copy()
+            pythonpath = [str(root)]
+            if env.get("PYTHONPATH"):
+                pythonpath.append(env["PYTHONPATH"])
+            env["PYTHONPATH"] = os.pathsep.join(pythonpath)
+
+            started = time.monotonic()
+            failed = RUNNER._run_shards(
+                [["test_descendant_stdout.DescendantStdoutTests.test_returns_before_descendant_closes_stdout"]],
+                root=root,
+                env=env,
+                duration_args=[],
+                label="regression shard",
+            )
+            elapsed = time.monotonic() - started
+
+            self.assertFalse(failed)
+            self.assertLess(elapsed, 2.0)
 
 
 if __name__ == "__main__":

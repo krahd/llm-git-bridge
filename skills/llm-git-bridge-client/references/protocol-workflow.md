@@ -24,6 +24,8 @@ Submit a materialisation request. For the authoritative current checkout, omit `
 
 Wait for the materialisation result, then read the referenced snapshot. Use its exact HEAD and file hashes/content as the basis for edits.
 
+If materialisation terminates with `rclone rc write outcome is unknown; retry required`, follow [result-and-recovery.md](result-and-recovery.md) rather than retrying in a loop. The remote snapshot may already have been written even though acknowledgement was lost.
+
 ### 3. Prepare the patch
 
 Create a standard unified Git diff against the materialised base. Do not include `.git` state or local paths. Avoid protected content and CI/automation control paths. The bridge will independently validate changed paths and Git modes.
@@ -90,6 +92,6 @@ Doctor is for versions/transport/RC health/OAuth-client-presence. Diagnostics is
 
 ## Repository-index freshness
 
-The local operator approves filesystem roots, not each repository individually. The watcher periodically discovers valid Git repositories beneath those roots and republishes `v2/meta/repos.json` when membership changes. A client should normally wait/re-read the index rather than asking for a manual per-repository registration. `scan`, `add-root`, and discovery-interval configuration are local operator controls.
+The local operator approves filesystem roots, not each repository individually. The watcher periodically discovers valid Git repositories beneath those roots and republishes `v2/meta/repos.json` when membership changes. A client should normally wait/re-read the index rather than asking for a manual per-repository registration. If a repository remains absent after the normal interval, use diagnostics to confirm `auto_discovery_enabled` and a successful recent `last_scan_at` before escalating. `scan`, `add-root`, and discovery-interval configuration are local operator controls.
 
 An unknown-repository request does not permit the remote client to force unbounded rescanning. Discovery remains rate-limited. If a repository was replaced locally, its public ID may change so local command/push policy cannot transfer to unrelated history; re-read the index rather than assuming the old ID follows the path.

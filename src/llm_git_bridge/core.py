@@ -385,6 +385,15 @@ def reconcile_registry_membership(
         for path in candidates
     ]
 
+    # A periodic marker walk is an optimisation, not an authoritative delete
+    # command. os.walk() can yield no candidates when a root is momentarily
+    # unreadable or under severe filesystem pressure without raising an error.
+    # Do not let one such empty observation mass-retire multiple policy-bearing
+    # IDs at once. A one-repository root keeps the existing automatic-removal
+    # behaviour; complete multi-repository purges require explicit ``scan``, which
+    # still uses the full authoritative registry rebuild.
+    empty_scan_guard = bool(len(previous_repos) > 1 and available_roots and not candidate_records)
+
     def within(path: Path, root: Path) -> bool:
         return path == root or root in path.parents
 
@@ -500,7 +509,7 @@ def reconcile_registry_membership(
             removed_ids.append(old_id)
             continue
         old_path = Path(old_path_value).expanduser().resolve()
-        if any(within(old_path, root) for root in available_roots):
+        if any(within(old_path, root) for root in available_roots) and not empty_scan_guard:
             removed_ids.append(old_id)
             continue
         preserved = dict(old_entry)

@@ -52,6 +52,21 @@ Report this as “local commit succeeded; push failed”, not “transaction fai
 
 Snapshot generation/publication is also secondary to the durable commit. By default edit results defer snapshot publication. When exact branch contents are needed later, issue a materialisation request.
 
+## Materialisation acknowledgement ambiguity
+
+A read-only materialisation can fail closed with an error such as `rclone rc write outcome is unknown; retry required` when the transport cannot determine whether snapshot publication was acknowledged. This error does **not** by itself prove that the snapshot write failed or that Git state is wrong.
+
+Use this bounded recovery procedure:
+
+1. Do not immediately submit repeated materialisations.
+2. Inspect the authoritative remote snapshot path (`v2/repos/<repo-id>/snapshot.json`, or the safe-branch snapshot path when applicable).
+3. Compare its `branch`, `head`, generation time, file count/hashes as needed against independent authoritative evidence such as the current registry head, a durable edit result, or a previously verified protected-branch state.
+4. If the snapshot already contains the required current branch/head and bytes, use it as materialised-state evidence and record the transport acknowledgement ambiguity separately.
+5. If the snapshot is stale or absent and fresh bytes remain necessary, confirm no earlier materialisation is still pending, then issue **one** fresh materialisation under a new globally unique transaction ID.
+6. If the fresh attempt returns the same acknowledgement ambiguity, stop retrying automatically. Report a transport residual and use other independent evidence where sufficient; escalate only if fresh snapshot bytes are genuinely required and unavailable.
+
+Materialisation is read-only with respect to Git state, so this recovery rule never converts an ambiguous edit/mutation into assumed success.
+
 ## Publication ambiguity
 
 If result upload times out or transport fails after the local result is durable, allow the daemon's recovery logic to reconcile/republish. Avoid duplicate changed requests. In concurrent mode, post-durable publication failure must not be interpreted by the client as permission to re-execute the mutation.
@@ -59,3 +74,11 @@ If result upload times out or transport fails after the local result is durable,
 ## Promotion boundary
 
 A safe-branch transaction result does not prove protected `main` changed. Protected-branch promotion is a separate local/human operation. After promotion, independently materialise or otherwise verify the protected branch before reporting it as promoted.
+
+When constructing a local promotion/canary/release wrapper, preserve evidence and exit semantics:
+
+- preflight must not mutate production state;
+- cleanup/restart/restore must be conditional on the corresponding mutation actually occurring;
+- capture child exit status immediately before any other command can replace `$?`;
+- cleanup traps must preserve and return that captured status;
+- verify protected refs/runtime independently after the wrapper completes.
