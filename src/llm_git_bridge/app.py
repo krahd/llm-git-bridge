@@ -365,6 +365,65 @@ def detect_rclone_remote() -> str:
     raise BridgeError("no llm-git-bridge: rclone remote found; pass --remote <name> to use another configured remote")
 
 
+def _setup_is_interactive(args: argparse.Namespace) -> bool:
+    return not bool(getattr(args, "non_interactive", False)) and bool(
+        getattr(sys.stdin, "isatty", lambda: False)()
+    )
+
+
+def _setup_input(prompt: str) -> str:
+    try:
+        return input(prompt)
+    except EOFError as exc:
+        raise BridgeError(
+            "interactive setup lost its input stream; rerun setup in a terminal or use the roots commands"
+        ) from exc
+
+
+def _setup_yes_no(prompt: str, *, default: bool) -> bool:
+    suffix = " [Y/n] " if default else " [y/N] "
+    while True:
+        answer = _setup_input(prompt + suffix).strip().lower()
+        if not answer:
+            return default
+        if answer in {"y", "yes"}:
+            return True
+        if answer in {"n", "no"}:
+            return False
+        print("Please answer yes or no.")
+
+
+def _setup_repository_roots(cfg: dict[str, Any]) -> list[dict[str, Any]]:
+    roots = _prune_redundant_roots(_configured_roots(cfg))
+    if roots:
+        print("\nCurrent repository roots:")
+        for root in roots:
+            print(f"  {root['path']} (push={'enabled' if root['push'] else 'disabled'})")
+        if not _setup_yes_no("Keep these repository roots?", default=True):
+            roots = []
+
+    add_more = not roots or _setup_yes_no("Add another repository folder?", default=False)
+    while add_more:
+        raw_path = _setup_input("Repository folder: ").strip()
+        if not raw_path:
+            if roots:
+                break
+            print("Enter a folder containing one or more Git repositories.")
+            continue
+        path = Path(raw_path).expanduser().resolve()
+        if not path.is_dir():
+            print(f"Folder does not exist: {path}")
+            continue
+        allow_push = _setup_yes_no(
+            "Allow the LLM to push safe bridge branches for repositories under this folder?",
+            default=True,
+        )
+        roots.append({"path": str(path), "push": allow_push})
+        roots = _prune_redundant_roots(roots)
+        add_more = _setup_yes_no("Add another repository folder?", default=False)
+    return roots
+
+
 def transport_from_config(cfg: dict[str, Any]) -> RcloneTransport:
     transport = cfg.get("transport", {})
     if transport.get("type") != "rclone":
@@ -2587,15 +2646,40 @@ def process_pending_once(
 
 def cmd_setup(args: argparse.Namespace) -> int:
     cfg = load_config()
-    remote = args.remote or cfg.get("transport", {}).get("remote") or detect_rclone_remote()
+    interactive = _setup_is_interactive(args)
+    remote = args.remote or cfg.get("transport", {}).get("remote")
+    if not remote:
+        try:
+            remote = detect_rclone_remote()
+        except BridgeError:
+            if not interactive:
+                raise
+            remote = _setup_input("rclone remote name for the bridge: ").strip().rstrip(":")
+            if not remote:
+                raise BridgeError("an rclone remote name is required")
     transport_cfg = cfg.setdefault("transport", {})
     transport_cfg.update({"type": "rclone", "remote": remote.rstrip(":")})
     transport_cfg.setdefault("rc_enabled", True)
+    if interactive:
+        print("LLM Git Bridge setup")
+        cfg["roots"] = _setup_repository_roots(cfg)
     save_config(cfg)
     transport = transport_from_config(cfg)
     for rel in ("meta", "repos", "transactions", "results"):
         transport.ensure_dir(f"{REMOTE_ROOT}/{rel}")
-    print(f"configured rclone remote: {cfg['transport']['remote']}:")
+    registry = refresh_registry(cfg, publish=True)
+    push_enabled = sum(
+        1
+        for repo_id, entry in registry.get("repos", {}).items()
+        if _repo_push_allowed(cfg, repo_id, Path(entry["path"]))
+    )
+    print("\nSetup complete")
+    print(f"rclone remote: {cfg['transport']['remote']}:")
+    print(f"repository roots: {len(cfg['roots'])}")
+    print(f"repositories discovered: {len(registry.get('repos', {}))}")
+    print(f"repositories with inherited/effective push permission: {push_enabled}")
+    if not interactive:
+        print("Run 'llm-git-bridge setup' in a terminal to configure repository roots interactively.")
     return 0
 
 
@@ -2984,6 +3068,7 @@ def build_parser() -> argparse.ArgumentParser:
 
     s = sub.add_parser("setup")
     s.add_argument("--remote")
+    s.add_argument("--non-interactive", action="store_true")
     s.set_defaults(func=cmd_setup)
 
     s = sub.add_parser("add-root")

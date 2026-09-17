@@ -2234,6 +2234,71 @@ class AppTests(unittest.TestCase):
             {"read": True, "edit": True, "push": True},
         )
 
+    def test_interactive_setup_configures_multiple_roots_and_push_policies(self):
+        other_root = self.tmp / "other-root"
+        other_root.mkdir()
+        shutil.copytree(self._seed_repo, other_root / "other-repo", symlinks=True)
+        args = app.build_parser().parse_args(["setup", "--remote", "fake"])
+        answers = iter([
+            str(self.tmp),
+            "yes",
+            "yes",
+            str(other_root),
+            "no",
+            "no",
+        ])
+
+        with patch("llm_git_bridge.app._setup_is_interactive", return_value=True), patch(
+            "builtins.input", side_effect=lambda _prompt: next(answers)
+        ), patch("builtins.print"):
+            self.assertEqual(app.cmd_setup(args), 0)
+
+        cfg = app.load_config()
+        roots = {root["path"]: root["push"] for root in cfg["roots"]}
+        self.assertEqual(roots[str(self.tmp.resolve())], True)
+        # other_root is nested beneath self.tmp and deliberately changes policy,
+        # so it remains as a meaningful most-specific override.
+        self.assertEqual(roots[str(other_root.resolve())], False)
+        registry = app.load_registry()
+        names = {entry["name"] for entry in registry["repos"].values()}
+        self.assertIn("repo", names)
+        self.assertIn("other-repo", names)
+
+    def test_interactive_setup_rerun_can_keep_existing_roots_without_reentry(self):
+        cfg = app.default_config()
+        cfg["transport"]["remote"] = "fake"
+        cfg["roots"] = [{"path": str(self.tmp), "push": True}]
+        app.save_config(cfg)
+        args = app.build_parser().parse_args(["setup"])
+        answers = iter(["yes", "no"])
+
+        with patch("llm_git_bridge.app._setup_is_interactive", return_value=True), patch(
+            "builtins.input", side_effect=lambda _prompt: next(answers)
+        ), patch("builtins.print"):
+            self.assertEqual(app.cmd_setup(args), 0)
+
+        self.assertEqual(
+            app.load_config()["roots"],
+            [{"path": str(self.tmp.resolve()), "push": True}],
+        )
+
+    def test_interactive_setup_reports_eof_as_actionable_error(self):
+        with patch("builtins.input", side_effect=EOFError):
+            with self.assertRaisesRegex(BridgeError, "rerun setup in a terminal"):
+                app._setup_input("Repository folder: ")
+
+    def test_setup_noninteractive_preserves_roots_and_does_not_prompt(self):
+        cfg = app.default_config()
+        cfg["transport"]["remote"] = "fake"
+        cfg["roots"] = [{"path": str(self.tmp), "push": True}]
+        app.save_config(cfg)
+        args = app.build_parser().parse_args(["setup", "--non-interactive"])
+
+        with patch("builtins.input") as mocked_input, patch("builtins.print"):
+            self.assertEqual(app.cmd_setup(args), 0)
+        mocked_input.assert_not_called()
+        self.assertEqual(app.load_config()["roots"], cfg["roots"])
+
     def test_materialize_request_is_remote_triggerable(self):
         repo_id = next(iter(json.loads(app.REGISTRY_FILE.read_text())["repos"]))
         txid = "tx-materialize"
