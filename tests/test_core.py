@@ -80,13 +80,33 @@ class CoreTests(unittest.TestCase):
         repo = self.clone_seed_repo(parent / "alpha")
 
         local = build_registry([parent])
-        public = public_registry(local)
+        repo_id = next(iter(local["repos"]))
+        public = public_registry(
+            local,
+            {repo_id: {"read": True, "edit": True, "push": False}},
+        )
         blob = json.dumps(public)
         self.assertNotIn(str(parent), blob)
         self.assertNotIn("git_marker_id", blob)
         self.assertNotIn("repo_identity", blob)
         self.assertNotIn("retired_repo_ids", blob)
         self.assertEqual(public["repos"][0]["name"], "alpha")
+        self.assertEqual(
+            public["repos"][0]["capabilities"],
+            {"read": True, "edit": True, "push": False},
+        )
+
+    def test_public_registry_requires_complete_boolean_capabilities(self):
+        parent = Path(tempfile.mkdtemp(prefix="llmgb-root-"))
+        self.addCleanup(shutil.rmtree, parent, ignore_errors=True)
+        self.clone_seed_repo(parent / "alpha")
+        local = build_registry([parent])
+        repo_id = next(iter(local["repos"]))
+
+        with self.assertRaisesRegex(BridgeError, "public capabilities"):
+            public_registry(local, {})
+        with self.assertRaisesRegex(BridgeError, "public capabilities"):
+            public_registry(local, {repo_id: {"read": True, "edit": True, "push": "yes"}})
 
     def test_snapshot_excludes_sensitive_and_binary(self):
         repo = self.make_repo()

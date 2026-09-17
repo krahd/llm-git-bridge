@@ -719,13 +719,24 @@ def build_registry(roots: Iterable[Path], previous: dict[str, Any] | None = None
     }
 
 
-def public_registry(local_registry: dict[str, Any]) -> dict[str, Any]:
+def public_registry(
+    local_registry: dict[str, Any],
+    capabilities_by_repo: dict[str, dict[str, bool]],
+) -> dict[str, Any]:
     public_entries = []
     for repo_id, entry in sorted(local_registry.get("repos", {}).items()):
+        capabilities = capabilities_by_repo.get(repo_id)
+        if (
+            not isinstance(capabilities, dict)
+            or set(capabilities) != {"read", "edit", "push"}
+            or not all(isinstance(capabilities[key], bool) for key in ("read", "edit", "push"))
+        ):
+            raise BridgeError(f"missing or invalid public capabilities for repository: {repo_id}")
         public_entries.append(
             {
                 "id": repo_id,
                 "name": entry["name"],
+                "capabilities": dict(capabilities),
                 "head": entry["head"],
                 "branch": entry["branch"],
                 "dirty": entry["dirty"],

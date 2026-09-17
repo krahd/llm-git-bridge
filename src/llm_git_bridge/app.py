@@ -354,11 +354,23 @@ def transport_from_config(cfg: dict[str, Any]) -> RcloneTransport:
     return RcloneTransport(str(remote), rc_socket=rc_socket)
 
 
+def _public_capabilities(cfg: dict[str, Any], registry: dict[str, Any]) -> dict[str, dict[str, bool]]:
+    capabilities: dict[str, dict[str, bool]] = {}
+    allow_commit = bool(cfg.get("allow_commit", True))
+    for repo_id, entry in registry.get("repos", {}).items():
+        capabilities[repo_id] = {
+            "read": True,
+            "edit": allow_commit,
+            "push": _repo_push_allowed(cfg, repo_id, Path(entry["path"])),
+        }
+    return capabilities
+
+
 def publish_registry(cfg: dict[str, Any], registry: dict[str, Any]) -> None:
     transport = transport_from_config(cfg)
     transport.upload_json(
         f"{REMOTE_ROOT}/meta/repos.json",
-        public_registry(registry),
+        public_registry(registry, _public_capabilities(cfg, registry)),
         STATE_DIR / "outbox" / "repos.json",
     )
 
@@ -2876,6 +2888,7 @@ def cmd_configure_push(args: argparse.Namespace) -> int:
     overrides = cfg.setdefault("repo_overrides", {})
     overrides[repo_id] = {"push": args.action == "enable"}
     save_config(cfg)
+    publish_registry(cfg, registry)
     print(f"push {'enabled' if args.action == 'enable' else 'disabled'} for {repo_id}")
     return 0
 
