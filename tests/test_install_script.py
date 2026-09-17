@@ -137,6 +137,142 @@ class InstallerTests(unittest.TestCase):
             self.assertTrue((install_dir / "updated.txt").is_file())
             self.assertEqual(config_file.read_text(encoding="utf-8"), '{"keep": true}\n')
 
+    def test_installer_tag_install_is_rerunnable(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            seed = root / "seed"
+            origin = root / "origin.git"
+            install_dir = root / "installed"
+            bin_dir = root / "commands"
+            fake_bin = root / "fake-bin"
+            home = root / "home"
+            fake_bin.mkdir()
+            home.mkdir()
+
+            subprocess.run(["git", "init", "-q", "-b", "main", str(seed)], check=True)
+            (seed / "bin").mkdir()
+            bridge = seed / "bin" / "llm-git-bridge"
+            bridge.write_text("#!/bin/sh\nexit 0\n", encoding="utf-8")
+            bridge.chmod(0o755)
+            subprocess.run(["git", "-C", str(seed), "add", "."], check=True)
+            subprocess.run(
+                [
+                    "git", "-C", str(seed),
+                    "-c", "user.name=Installer Test",
+                    "-c", "user.email=installer@example.invalid",
+                    "commit", "-qm", "initial",
+                ],
+                check=True,
+            )
+            tagged_head = subprocess.check_output(
+                ["git", "-C", str(seed), "rev-parse", "HEAD"], text=True
+            ).strip()
+            subprocess.run(["git", "-C", str(seed), "tag", "v-test"], check=True)
+            subprocess.run(["git", "clone", "-q", "--bare", str(seed), str(origin)], check=True)
+
+            rclone = fake_bin / "rclone"
+            rclone.write_text("#!/bin/sh\nexit 0\n", encoding="utf-8")
+            rclone.chmod(0o755)
+            env = os.environ.copy()
+            env.update(
+                {
+                    "HOME": str(home),
+                    "PATH": f"{fake_bin}{os.pathsep}{env['PATH']}",
+                    "LLM_GIT_BRIDGE_REPO_URL": str(origin),
+                    "LLM_GIT_BRIDGE_REF": "v-test",
+                    "LLM_GIT_BRIDGE_INSTALL_DIR": str(install_dir),
+                    "LLM_GIT_BRIDGE_BIN_DIR": str(bin_dir),
+                }
+            )
+
+            for _ in range(2):
+                proc = subprocess.run(
+                    ["sh", str(INSTALLER), "--no-setup", "--no-daemon"],
+                    env=env, capture_output=True, text=True, timeout=20,
+                )
+                self.assertEqual(proc.returncode, 0, proc.stderr)
+                head = subprocess.check_output(
+                    ["git", "-C", str(install_dir), "rev-parse", "HEAD"], text=True
+                ).strip()
+                self.assertEqual(head, tagged_head)
+
+    def test_installer_refuses_local_branch_commits_not_on_origin(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            seed = root / "seed"
+            origin = root / "origin.git"
+            install_dir = root / "installed"
+            bin_dir = root / "commands"
+            fake_bin = root / "fake-bin"
+            home = root / "home"
+            fake_bin.mkdir()
+            home.mkdir()
+
+            subprocess.run(["git", "init", "-q", "-b", "main", str(seed)], check=True)
+            (seed / "bin").mkdir()
+            bridge = seed / "bin" / "llm-git-bridge"
+            bridge.write_text("#!/bin/sh\nexit 0\n", encoding="utf-8")
+            bridge.chmod(0o755)
+            subprocess.run(["git", "-C", str(seed), "add", "."], check=True)
+            subprocess.run(
+                [
+                    "git", "-C", str(seed),
+                    "-c", "user.name=Installer Test",
+                    "-c", "user.email=installer@example.invalid",
+                    "commit", "-qm", "initial",
+                ],
+                check=True,
+            )
+            subprocess.run(["git", "clone", "-q", "--bare", str(seed), str(origin)], check=True)
+
+            rclone = fake_bin / "rclone"
+            rclone.write_text("#!/bin/sh\nexit 0\n", encoding="utf-8")
+            rclone.chmod(0o755)
+            env = os.environ.copy()
+            env.update(
+                {
+                    "HOME": str(home),
+                    "PATH": f"{fake_bin}{os.pathsep}{env['PATH']}",
+                    "LLM_GIT_BRIDGE_REPO_URL": str(origin),
+                    "LLM_GIT_BRIDGE_REF": "main",
+                    "LLM_GIT_BRIDGE_INSTALL_DIR": str(install_dir),
+                    "LLM_GIT_BRIDGE_BIN_DIR": str(bin_dir),
+                }
+            )
+
+            first = subprocess.run(
+                ["sh", str(INSTALLER), "--no-setup", "--no-daemon"],
+                env=env, capture_output=True, text=True, timeout=20,
+            )
+            self.assertEqual(first.returncode, 0, first.stderr)
+            (install_dir / "local-only.txt").write_text("local\n", encoding="utf-8")
+            subprocess.run(["git", "-C", str(install_dir), "add", "local-only.txt"], check=True)
+            subprocess.run(
+                [
+                    "git", "-C", str(install_dir),
+                    "-c", "user.name=Installer Test",
+                    "-c", "user.email=installer@example.invalid",
+                    "commit", "-qm", "local-only",
+                ],
+                check=True,
+            )
+            local_head = subprocess.check_output(
+                ["git", "-C", str(install_dir), "rev-parse", "HEAD"], text=True
+            ).strip()
+
+            second = subprocess.run(
+                ["sh", str(INSTALLER), "--no-setup", "--no-daemon"],
+                env=env, capture_output=True, text=True, timeout=20,
+            )
+            self.assertNotEqual(second.returncode, 0)
+            self.assertIn("contains commits not present", second.stderr)
+            self.assertEqual(
+                subprocess.check_output(
+                    ["git", "-C", str(install_dir), "rev-parse", "HEAD"], text=True
+                ).strip(),
+                local_head,
+            )
+
     def test_wrapper_works_through_installer_symlink(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             tmp_path = Path(tmp)

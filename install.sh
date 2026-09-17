@@ -82,12 +82,25 @@ if [ -d "$INSTALL_DIR/.git" ]; then
     fail "the existing installation has local changes; commit or remove them before updating"
   fi
   say "Updating existing installation..."
-  git -C "$INSTALL_DIR" fetch --prune origin "$REF"
-  if git -C "$INSTALL_DIR" show-ref --verify --quiet "refs/heads/$REF"; then
-    git -C "$INSTALL_DIR" checkout -q "$REF"
-    git -C "$INSTALL_DIR" merge --ff-only "origin/$REF"
+  if git -C "$INSTALL_DIR" ls-remote --exit-code --heads origin "refs/heads/$REF" >/dev/null 2>&1; then
+    git -C "$INSTALL_DIR" fetch --prune origin "refs/heads/$REF:refs/remotes/origin/$REF"
+    remote_oid=$(git -C "$INSTALL_DIR" rev-parse --verify "refs/remotes/origin/$REF^{commit}")
+    if git -C "$INSTALL_DIR" show-ref --verify --quiet "refs/heads/$REF"; then
+      local_oid=$(git -C "$INSTALL_DIR" rev-parse --verify "refs/heads/$REF^{commit}")
+      if [ "$local_oid" != "$remote_oid" ]           && ! git -C "$INSTALL_DIR" merge-base --is-ancestor "$local_oid" "$remote_oid"; then
+        fail "the installed $REF branch contains commits not present in origin/$REF; preserve or remove them before updating"
+      fi
+      git -C "$INSTALL_DIR" checkout -q "$REF"
+      git -C "$INSTALL_DIR" merge --ff-only "origin/$REF"
+    else
+      git -C "$INSTALL_DIR" checkout -q --track -b "$REF" "origin/$REF"
+    fi
+  elif git -C "$INSTALL_DIR" ls-remote --exit-code --tags origin "refs/tags/$REF" "refs/tags/$REF^{}" >/dev/null 2>&1; then
+    git -C "$INSTALL_DIR" fetch --no-tags origin "refs/tags/$REF"
+    tag_oid=$(git -C "$INSTALL_DIR" rev-parse --verify "FETCH_HEAD^{commit}")
+    git -C "$INSTALL_DIR" checkout -q --detach "$tag_oid"
   else
-    git -C "$INSTALL_DIR" checkout -q --track -b "$REF" "origin/$REF"
+    fail "ref '$REF' was not found as a branch or tag on origin"
   fi
 elif [ -e "$INSTALL_DIR" ]; then
   if [ -d "$INSTALL_DIR" ] && [ -z "$(ls -A "$INSTALL_DIR" 2>/dev/null)" ]; then
