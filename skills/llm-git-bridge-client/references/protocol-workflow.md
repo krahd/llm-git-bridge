@@ -16,7 +16,7 @@ The repository index is path-free. Local repository paths are intentionally not 
 
 ### 1. Discover
 
-Read `v2/meta/repos.json`. Select by stable repository ID whenever possible; use a name only when it is unambiguous.
+Read `v2/meta/repos.json`. Select by stable repository ID whenever possible; use a name only when it is unambiguous. Inspect the selected entry's effective `read`/`edit`/`push` capabilities before choosing an operation. In particular, do not request a push when `capabilities.push` is false; local root/override policy must change first, after which the client re-reads the index.
 
 ### 2. Refresh authoritative state
 
@@ -90,6 +90,6 @@ Doctor is for versions/transport/RC health/OAuth-client-presence. Diagnostics is
 
 ## Repository-index freshness
 
-The local operator approves filesystem roots, not each repository individually. The watcher periodically discovers valid Git repositories beneath those roots and republishes `v2/meta/repos.json` when membership changes. A client should normally wait/re-read the index rather than asking for a manual per-repository registration. `scan`, `add-root`, and discovery-interval configuration are local operator controls.
+The local operator approves filesystem roots, not each repository individually. The watcher periodically discovers valid Git repositories beneath those roots, and local policy changes republish `v2/meta/repos.json` with effective capabilities. A client should normally wait/re-read the index rather than asking for manual per-repository registration. Root management, root/override push policy, explicit scans, and discovery-interval configuration are local operator controls. The client never receives local root paths.
 
 An unknown-repository request does not permit the remote client to force unbounded rescanning. Discovery remains rate-limited. If a repository was replaced locally, its public ID may change so local command/push policy cannot transfer to unrelated history; re-read the index rather than assuming the old ID follows the path.

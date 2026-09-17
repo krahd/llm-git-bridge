@@ -1,4 +1,16 @@
 {
+  "version": 2,
+  "roots": [
+    {
+      "path": "/path/to/repositories",
+      "push": true
+    }
+  ],
+  "repo_overrides": {
+    "example-repo-id": {
+      "push": false
+    }
+  },
   "commands": {
     "example-repo-id": {
       "test": ["python3", "-m", "unittest", "discover", "-s", "tests", "-v"]

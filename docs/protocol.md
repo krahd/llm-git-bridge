@@ -12,7 +12,27 @@ v2/transactions/<request-id>.json
 v2/results/<request-id>.json
 ```
 
-`v2/meta/repos.json` intentionally omits local filesystem paths.
+`v2/meta/repos.json` intentionally omits local filesystem paths. Each published repository includes effective boolean capabilities so a remote client can decide what the bridge currently permits without probing by failure:
+
+```json
+{
+  "id": "example-repo-a1b2c3d4",
+  "name": "example-repo",
+  "capabilities": {
+    "read": true,
+    "edit": true,
+    "push": true
+  },
+  "head": "0123456789abcdef0123456789abcdef01234567",
+  "branch": "main",
+  "dirty": false,
+  "tracked_dirty": false,
+  "untracked": false,
+  "last_seen": "2026-09-17T12:00:00Z"
+}
+```
+
+Capabilities describe effective local authority for normal bridge operations; they do not authorize protected/default-branch promotion. The underlying filesystem roots and policy rules remain local.
 
 All requests are single JSON objects. The filename is `<transaction_id>.json`, and the `transaction_id` field must match it exactly. Transaction IDs are 1–120 ASCII letters/digits/underscore/hyphen, starting with an alphanumeric character; dots and path components are not accepted. Duplicate JSON keys and oversized request objects are rejected.
 
@@ -90,7 +110,7 @@ Required fields:
 Optional:
 
 - `commit_message`
-- `push`: boolean, default `false`. `true` is honoured only when push has been enabled locally for that repository.
+- `push`: boolean, default `false`. `true` is honoured only when effective local policy permits push for that repository. Effective policy normally comes from the most-specific configured repository root, with an optional history-bound per-repository override.
 - `publish_snapshot`: boolean, default `false`. When true, synchronously publish the post-commit branch snapshot before acknowledging the transaction.
 
 A transaction is ready when its final JSON file is visible in `v2/transactions/`. Clients should publish the object atomically where their transport permits it. Google Drive file creation becomes visible only after upload completion, which is sufficient for the current adapter.
@@ -99,7 +119,7 @@ The daemon applies the patch with `git apply --index` in an isolated worktree. O
 
 Configured command argv remain entirely local, and one transaction may request at most 16 command executions. Remote results report only each symbolic command's name, return code, and duration; stdout/stderr stay in a bounded set of recent user-private local logs. The bridge verifies staged/Git control state after each command. This does not sandbox the patched program from the user's filesystem/network; see the explicit trust boundary in `docs/security.md`.
 
-Push is two-key: it must be enabled locally for the repository and the transaction must contain `"push": true`. The remote is fixed to `origin`, the refspec is fixed to the validated transaction branch, Git hooks are disabled, and force-push is never requested. A push failure is reported as a secondary `push.status: error` while preserving the successfully tested local commit.
+Push is two-key: effective local policy must permit it and the transaction must contain `"push": true`. The public repository entry exposes the current effective `capabilities.push` boolean, but that boolean is descriptive rather than an additional authorization mechanism. The remote is fixed to `origin`, the refspec is fixed to the validated transaction branch, Git hooks are disabled, and force-push is never requested. A push failure is reported as a secondary `push.status: error` while preserving the successfully tested local commit.
 
 Bridge commits include reserved trailers containing the transaction ID and a SHA-256 hash of the complete canonical request. These trailers are internal replay metadata, not client-controlled commit-message text. If the daemon crashes after creating the commit but before persisting its result, an identical retry recovers that exact commit without reapplying the patch or rerunning configured commands; the same transaction ID paired with a changed request is rejected.
 
@@ -115,6 +135,6 @@ The remote result is the durable acknowledgement. Results carry a local-key HMAC
 
 ## Automatic repository-index refresh
 
-In RC5, `v2/meta/repos.json` is maintained automatically for repositories beneath roots that the local operator has explicitly approved. Clients should re-read the index when a repository is newly created/removed or an unknown-repository result suggests their cached index may be stale. The default watcher discovery interval is 30 seconds; exact timing is operational state rather than a protocol ordering guarantee.
+`v2/meta/repos.json` is maintained automatically for repositories beneath roots that the local operator has explicitly approved. Clients should re-read the index when a repository is newly created/removed, after the operator changes local policy, or when an unknown-repository result suggests their cached index may be stale. The default watcher discovery interval is 30 seconds; exact timing is operational state rather than a protocol ordering guarantee.
 
-The public index remains path-free. Local approved-root paths, `.git` marker identities, logical-history identities, retired repository IDs, and local command/push policy are not protocol fields. A repository ID can be retired if the local repository at that location is replaced with different history; clients must then use the freshly published ID/name resolution and must not assume policy follows a filesystem path.
+The public index remains path-free. Local approved-root paths, root precedence rules, repository overrides, `.git` marker identities, logical-history identities, retired repository IDs, and configured command argv are not protocol fields; only the resulting effective `read`/`edit`/`push` capabilities are exposed. A repository ID can be retired if the local repository at that location is replaced with different history. Per-repository overrides and configured commands do not transfer to the replacement identity. A new or replacement repository legitimately inherits any policy of the approved root that contains it, because root policy is an explicit trust decision for all repositories beneath that boundary.

@@ -91,13 +91,25 @@ Commit, stash, or otherwise resolve the local work before retrying.
 
 ## `push requested but is not enabled locally`
 
-Enable push for that repository only if desired:
+First inspect the configured roots and their inherited policy:
 
 ```bash
-bin/llm-git-bridge configure-push my-repo enable
+llm-git-bridge roots list
 ```
 
-The request must still contain `"push": true`.
+If every repository beneath a root should be able to push validated safe branches, set that root's policy explicitly:
+
+```bash
+llm-git-bridge roots add ~/repos --push enable
+```
+
+If only one repository should differ from its root, use a repository override instead:
+
+```bash
+llm-git-bridge configure-push my-repo enable
+```
+
+Run `llm-git-bridge configure-push my-repo inherit` later to remove the exception. The remote request must still contain `"push": true`. After a policy change, remote clients should re-read `v2/meta/repos.json` and confirm `capabilities.push`.
 
 ## A test/build command timed out
 

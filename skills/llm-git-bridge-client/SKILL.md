@@ -10,7 +10,7 @@ Use the bridge as a **mailbox protocol**, not as shell access and not as a subst
 ## Start every session by grounding state
 
 1. Identify the mailbox root and transport available to the current client.
-2. Read `v2/meta/repos.json` before naming repositories from memory. Re-read it when a repository was just created/cloned or an unknown-repository response suggests your cached index is stale; repositories beneath operator-approved roots are discovered automatically on a bounded interval.
+2. Read `v2/meta/repos.json` before naming repositories from memory. Treat each entry's `capabilities.read`, `capabilities.edit`, and `capabilities.push` as the current effective local authority. Re-read the index when a repository was just created/cloned, after the operator changes local policy, or when an unknown-repository response suggests your cached index is stale; repositories beneath operator-approved roots are discovered automatically on a bounded interval.
 3. If operational state matters, submit `doctor` and, when useful, `diagnostics` requests.
 4. Before preparing an edit, materialise the repository or relevant safe-prefix branch and read its fresh filtered snapshot.
 5. Treat the snapshot's Git identity as authoritative remote context. Never invent local filesystem paths.
@@ -45,12 +45,12 @@ For edit transactions additionally:
 - use a branch under the configured safe prefix (commonly `ai/`);
 - send a unified diff as `patch`;
 - request only locally configured symbolic commands in `run`;
-- treat `push` as two-key opt-in: local repository policy **and** request `"push": true`;
+- treat `push` as two-key opt-in: the selected repository's published `capabilities.push` must be true **and** the request must contain `"push": true`; if the capability is false, do not probe by submitting a doomed push request—report that local root/override policy must be changed, then re-read the index;
 - leave `publish_snapshot` false unless the next step truly requires synchronous snapshot publication.
 
 The bridge never accepts arbitrary remote shell execution, force-push, remote-triggered merge, alternate remotes/refspecs, or protected-branch mutation.
 
-Do not ask a remote client to register a newly created repository individually. If it is beneath an already approved root, allow the watcher's automatic discovery to publish it. Adding a new filesystem root, changing the discovery interval, or forcing `scan` remains a local operator action.
+Do not ask a remote client to register a newly created repository individually. If it is beneath an already approved root, allow the watcher's automatic discovery to publish it and inherit root policy. Adding/removing a filesystem root, changing root policy, changing the discovery interval, or forcing `scan` remains a local operator action. Never infer or request a local root path from the path-free public index.
 
 ## Upload and wait for the durable result
 
