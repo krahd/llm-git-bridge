@@ -123,7 +123,7 @@ if [ "$RUN_SETUP" -eq 1 ]; then
     if confirm "No rclone remotes are configured. Open rclone configuration now?" yes; then
       rclone config
     else
-      say "No rclone remote configured. Setup may ask for one; you can rerun this installer later."
+      fail "no rclone remote is configured; run 'rclone config' in a terminal, then rerun this installer"
     fi
   fi
   "$BRIDGE" setup

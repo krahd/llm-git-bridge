@@ -2695,10 +2695,10 @@ def cmd_setup(args: argparse.Namespace) -> int:
     if interactive:
         print("LLM Git Bridge setup")
         cfg["roots"] = _setup_repository_roots(cfg)
-    save_config(cfg)
     transport = transport_from_config(cfg)
     for rel in ("meta", "repos", "transactions", "results"):
         transport.ensure_dir(f"{REMOTE_ROOT}/{rel}")
+    save_config(cfg)
     registry = refresh_registry(cfg, publish=True)
     push_enabled = sum(
         1

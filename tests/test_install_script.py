@@ -46,6 +46,13 @@ class InstallerTests(unittest.TestCase):
         self.assertIn('return 1', non_tty)
         self.assertNotIn('[ "$default" = yes ]', non_tty)
 
+    def test_installer_refuses_setup_without_a_configured_rclone_remote(self) -> None:
+        text = INSTALLER.read_text(encoding="utf-8")
+        self.assertIn(
+            "fail \"no rclone remote is configured; run 'rclone config' in a terminal, then rerun this installer\"",
+            text,
+        )
+
     def test_installer_first_run_and_rerun_are_idempotent_offline(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)

@@ -2234,6 +2234,23 @@ class AppTests(unittest.TestCase):
             {"read": True, "edit": True, "push": True},
         )
 
+    def test_setup_does_not_persist_new_remote_before_transport_is_reachable(self):
+        cfg = app.default_config()
+        cfg["transport"]["remote"] = "old-remote"
+        cfg["roots"] = [{"path": str(self.tmp), "push": False}]
+        app.save_config(cfg)
+        before = app.CONFIG_FILE.read_bytes()
+        args = app.build_parser().parse_args([
+            "setup", "--non-interactive", "--remote", "new-remote"
+        ])
+
+        with patch.object(self.fake, "ensure_dir", side_effect=BridgeError("remote unavailable")):
+            with self.assertRaisesRegex(BridgeError, "remote unavailable"):
+                app.cmd_setup(args)
+
+        self.assertEqual(app.CONFIG_FILE.read_bytes(), before)
+        self.assertEqual(app.load_config()["transport"]["remote"], "old-remote")
+
     def test_interactive_setup_configures_multiple_roots_and_push_policies(self):
         other_root = self.tmp / "other-root"
         other_root.mkdir()
