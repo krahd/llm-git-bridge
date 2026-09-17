@@ -250,6 +250,26 @@ class AppTests(unittest.TestCase):
         self.assertEqual(registry["discovery"]["last_added"], 0)
         self.assertEqual(registry["discovery"]["last_removed"], 0)
 
+    def test_auto_discovery_republishes_when_effective_capabilities_change(self):
+        cfg = app.default_config()
+        cfg["transport"]["remote"] = "fake"
+        cfg["roots"] = [{"path": str(self.tmp), "push": False}]
+        cfg["registry_scan_interval"] = 5.0
+
+        app.refresh_registry_membership(cfg, publish=True)
+        self.fake.files.pop("v2/meta/repos.json", None)
+
+        cfg["roots"] = [{"path": str(self.tmp), "push": True}]
+        refreshed = app.refresh_registry_membership(cfg, publish=True)
+
+        published = json.loads(self.fake.files["v2/meta/repos.json"])
+        entry = next(item for item in published["repos"] if item["id"] == "repo")
+        self.assertTrue(entry["capabilities"]["push"])
+        self.assertTrue(refreshed["discovery"]["capabilities_hash"])
+        self.assertEqual(refreshed["discovery"]["last_added"], 0)
+        self.assertEqual(refreshed["discovery"]["last_removed"], 0)
+        self.assertEqual(refreshed["discovery"]["last_updated"], 0)
+
     def test_auto_discovery_does_not_publish_for_equivalent_canonical_path(self):
         registry = json.loads(app.REGISTRY_FILE.read_text(encoding="utf-8"))
         registry["repos"]["repo"]["path"] = str(

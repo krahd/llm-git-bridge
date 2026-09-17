@@ -541,6 +541,16 @@ def refresh_registry_membership(cfg: dict[str, Any], *, publish: bool = True) ->
     roots = _configured_root_paths(cfg)
     registry, added, removed, updated = reconcile_registry_membership(roots, previous)
     duration_s = round(time.monotonic() - started, 4)
+    capabilities_payload = _public_capabilities(cfg, registry)
+    capabilities_hash = hashlib.sha256(
+        json.dumps(capabilities_payload, sort_keys=True, separators=(",", ":")).encode("utf-8")
+    ).hexdigest()
+    previous_discovery = previous.get("discovery")
+    previous_capabilities_hash = (
+        previous_discovery.get("capabilities_hash")
+        if isinstance(previous_discovery, dict)
+        else None
+    )
     registry["discovery"] = {
         "last_scan_at": utc_now(),
         "last_scan_epoch": time.time(),
@@ -548,8 +558,17 @@ def refresh_registry_membership(cfg: dict[str, Any], *, publish: bool = True) ->
         "last_added": len(added),
         "last_removed": len(removed),
         "last_updated": len(updated),
+        "capabilities_hash": capabilities_hash,
     }
-    changed = bool(added or removed or updated) or not REGISTRY_FILE.exists()
+    capabilities_changed = (
+        previous_capabilities_hash is not None
+        and previous_capabilities_hash != capabilities_hash
+    )
+    changed = (
+        bool(added or removed or updated)
+        or not REGISTRY_FILE.exists()
+        or capabilities_changed
+    )
     if publish and changed:
         publish_registry(cfg, registry)
     save_json(REGISTRY_FILE, registry)
@@ -560,6 +579,7 @@ def refresh_registry_membership(cfg: dict[str, Any], *, publish: bool = True) ->
         "removed": len(removed),
         "updated": len(updated),
         "repositories": len(registry.get("repos", {})),
+        "capabilities_changed": capabilities_changed,
         "published": bool(publish and changed),
         "recorded_at": utc_now(),
     })
