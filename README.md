@@ -4,7 +4,7 @@
 
 It exposes a deliberately small mailbox protocol for repository discovery, filtered snapshots, patch transactions, local validation commands, commits, and optional safe-branch pushes. Google Drive through `rclone` is the first transport, but the core protocol is provider-neutral: the remote client does not need direct filesystem access, a GitHub token, or arbitrary shell access on the host.
 
-> **Status:** `1.0.0rc5` protocol-v2 release candidate, built on the released `v1.0.0-rc4` concurrency baseline. RC5 adds bounded automatic repository discovery inside explicitly approved local roots and hardens post-durable publication/cleanup error handling. Local transaction execution remains bounded and may overlap across different canonical repositories; same-repository mutation remains serial. Existing and new configurations default to `max_workers=1` unless the operator explicitly enables concurrency.
+> **Status:** `1.0.0rc6` protocol-v2 release candidate. RC6 retains the RC5 automatic-discovery and bounded-concurrency model while adding multi-root inherited policy, path-free effective capabilities, safe v1 migration, a re-runnable setup wizard, and an idempotent installer/update path. Local transaction execution may overlap across different canonical repositories; same-repository mutation remains serial. Existing and new configurations default to `max_workers=1` unless the operator explicitly enables concurrency.
 
 ## Why use it?
 

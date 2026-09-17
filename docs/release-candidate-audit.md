@@ -189,3 +189,17 @@ RC5 extends the audit surface from scheduler concurrency to repository-registry 
 The initial inode-only replacement idea was deliberately rejected during adversarial testing because a filesystem may immediately reuse a deleted `.git` inode. The accepted design additionally binds the policy ID to Git history. This favors fail-closed policy reset over accidental privilege inheritance.
 
 RC5 also broadens the RC4 post-durable publication boundary only for expected local filesystem `OSError` conditions during outbox staging, publication-marker persistence, or local acknowledgement cleanup. Those errors are normalised into the already-contained `BridgeError` recovery path after the signed local result is durable. It does not catch arbitrary exceptions and does not alter pre-durable failure semantics.
+
+
+## RC6 root-policy/setup adversarial extension
+
+RC6 extends the audit from repository membership to operator policy and installation lifecycle. The release gate now additionally proves:
+
+- v1 migration preserves existing repository push authority without granting root-wide push;
+- multiple unrelated and nested roots obey most-specific policy, with redundant same-policy roots compacted;
+- replacement repository history cannot inherit history-bound command or repository-override policy, while root policy still applies intentionally to every repository inside its approved boundary;
+- public `repos.json` contains effective boolean capabilities but no local paths, root rules, or override details, and periodic discovery republishes when effective capabilities change even if membership does not;
+- setup reruns can edit existing root push policy, handle EOF/non-interactive operation safely, and do not persist an unreachable newly selected transport over a working configuration;
+- installer optional prompts fail closed without a TTY, branch updates are fast-forward-only, tag installs are rerunnable, local-ahead/diverged installs are refused rather than reset, and external bridge configuration is not overwritten.
+
+These additions do not expand remote authority. Push still requires effective local permission and an explicit transaction request, remains restricted to the validated safe-prefix branch on `origin`, and protected/default-branch promotion stays outside the remote protocol.

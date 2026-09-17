@@ -187,3 +187,12 @@ The post-RC4 candidate adds watcher-owned automatic repository discovery beneath
 The adversarial pass found a policy-identity hazard: repository IDs key configured commands and push permission, so a different repository replacing a working tree must not inherit the old ID. RC5 binds registry IDs to local Git-history identity, retires replaced IDs, preserves IDs for the same repository moved intact, and verifies identity before repository-dependent dispatch. These local identity fields are not remotely published.
 
 The same candidate includes post-RC4 durability hardening that normalises expected raw filesystem `OSError` failures occurring only after the signed result is durably persisted into the existing `BridgeError` publication-recovery path. Pre-durable persistence failures remain fail-closed.
+
+
+## RC6 multi-root policy, capability, and setup candidate (2026-09-17)
+
+RC6 keeps the RC5 scheduler and automatic-discovery architecture but replaces flat per-repository push bookkeeping with explicit root policy. A host may configure multiple unrelated roots; the most-specific containing root supplies inherited push permission, while history-bound repository overrides provide exceptions. Version-1 configuration migrates without broadening authority: existing push-enabled repository IDs become explicit overrides and migrated roots default to push disabled. The path-free public registry now advertises effective `read`, `edit`, and `push` capabilities without exposing root paths or policy rules.
+
+The operator path is also consolidated. `setup` is a re-runnable wizard for transport, roots, and root push policy; root-management commands remain available for scripting and advanced use. A thin POSIX installer performs clean first installs and fail-closed updates, supports branch and tag refs, refuses local-ahead/diverged installations instead of resetting them, and delegates repository choices to the bridge-owned wizard. Non-interactive optional actions do not auto-consent.
+
+The RC6 adversarial pass additionally requires capability publication to remain fresh when advanced users edit configuration directly, setup to preserve an existing working configuration when a newly selected transport is unreachable, and installer reruns to preserve external bridge configuration bytes. Full configured validation, static checks, independent branch materialisation, and the protected-main promotion boundary remain release gates.

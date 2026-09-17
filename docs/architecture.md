@@ -16,7 +16,7 @@ publication/cleanup stages before any worker count is raised. See
 [scheduler-architecture.md](scheduler-architecture.md) for the staged contracts
 and worker-lifecycle rationale.
 
-Version `1.0.0rc5` retains the RC4/Phase B ownership boundary while allowing a bounded number of repository-local workers and adds watcher-owned automatic repository discovery beneath approved roots. Drive/rclone transport, registry mutation and durable result publication remain watcher-owned; the scheduler owns worker lifecycle, canonical-repository exclusion, bounded backlog admission and fairness. The complete ownership and recovery contract is documented in `scheduler-architecture.md`.
+Version `1.0.0rc6` retains the RC5 watcher/worker ownership and automatic-discovery model, and adds explicit multi-root policy inheritance plus path-free effective capability publication. Drive/rclone transport, registry mutation and durable result publication remain watcher-owned; the scheduler owns worker lifecycle, canonical-repository exclusion, bounded backlog admission and fairness. The complete ownership and recovery contract is documented in `scheduler-architecture.md`.
 
 ## Multi-repository model
 
