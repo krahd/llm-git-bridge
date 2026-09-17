@@ -13,7 +13,7 @@ import time
 from dataclasses import dataclass
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import Any, Callable, Iterable
+from typing import Any, Callable, Collection, Iterable
 
 PROTOCOL_VERSION = 2
 DEFAULT_MAX_FILE_BYTES = 1_000_000
@@ -346,6 +346,8 @@ def git_marker_identity(path: Path) -> str | None:
 def reconcile_registry_membership(
     roots: Iterable[Path],
     previous: dict[str, Any],
+    *,
+    reserved_ids: Collection[str] = (),
 ) -> tuple[dict[str, Any], tuple[str, ...], tuple[str, ...], tuple[str, ...]]:
     """Reconcile membership cheaply while preserving repository identity safely.
 
@@ -361,6 +363,7 @@ def reconcile_registry_membership(
     """
     resolved_roots = [Path(root).expanduser().resolve() for root in roots]
     available_roots = [root for root in resolved_roots if root.exists() and root.is_dir()]
+    reserved_repo_ids = {str(value) for value in reserved_ids if isinstance(value, str) and value}
     candidates = discover_repo_markers(available_roots)
 
     previous_repos = previous.get("repos", {}) if isinstance(previous, dict) else {}
@@ -554,7 +557,7 @@ def reconcile_registry_membership(
         name = path.name
         base_id = slugify(name)
         repo_id = base_id
-        unavailable = used_ids | retired_ids
+        unavailable = used_ids | retired_ids | reserved_repo_ids
         if repo_id in unavailable:
             repo_id = f"{base_id}-{path_fingerprint(path)}"
         counter = 2
@@ -639,9 +642,15 @@ def repo_state(path: Path) -> dict[str, Any]:
     }
 
 
-def build_registry(roots: Iterable[Path], previous: dict[str, Any] | None = None) -> dict[str, Any]:
+def build_registry(
+    roots: Iterable[Path],
+    previous: dict[str, Any] | None = None,
+    *,
+    reserved_ids: Collection[str] = (),
+) -> dict[str, Any]:
     resolved_roots = [Path(root).expanduser().resolve() for root in roots]
     available_roots = [root for root in resolved_roots if root.exists() and root.is_dir()]
+    reserved_repo_ids = {str(value) for value in reserved_ids if isinstance(value, str) and value}
     repos = discover_repos(available_roots)
     previous = previous or {"repos": {}}
     previous_repos = previous.get("repos", {})
@@ -661,10 +670,22 @@ def build_registry(roots: Iterable[Path], previous: dict[str, Any] | None = None
         if isinstance(identity, str) and identity:
             previous_by_identity.setdefault(identity, []).append((old_id, old_entry))
 
-    records = [
-        (path, str(path.resolve()), git_marker_identity(path), repo_identity(path))
-        for path in repos
-    ]
+    records: list[tuple[Path, str, str | None, str]] = []
+    for path in repos:
+        resolved = str(path.resolve())
+        marker = git_marker_identity(path)
+        try:
+            identity = repo_identity(path)
+        except BridgeError:
+            # A brand-new `git init` without a commit is not yet an admissible
+            # repository and must not poison a full scan of otherwise healthy
+            # roots. Identity failure for an already policy-bound location or
+            # marker remains fail-closed because it may indicate replacement or
+            # repository corruption.
+            if resolved in previous_by_path or (marker and marker in previous_by_marker):
+                raise
+            continue
+        records.append((path, resolved, marker, identity))
     matched: dict[str, str] = {}
     claimed_ids: set[str] = set()
     for path, resolved, marker, identity in records:
@@ -740,7 +761,7 @@ def build_registry(roots: Iterable[Path], previous: dict[str, Any] | None = None
         if repo_id is None:
             base_id = slugify(name)
             repo_id = base_id
-            unavailable = used_ids | claimed_ids | retired_ids
+            unavailable = used_ids | claimed_ids | retired_ids | reserved_repo_ids
             if repo_id in unavailable:
                 repo_id = f"{base_id}-{path_fingerprint(path)}"
             counter = 2
@@ -1015,8 +1036,8 @@ def validate_transaction(obj: dict[str, Any], *, safe_branch_prefix: str, max_pa
     if not isinstance(repo, str) or not repo.strip():
         raise BridgeError("missing repo")
     base_sha = obj.get("base_sha")
-    if not isinstance(base_sha, str) or not re.fullmatch(r"[0-9a-fA-F]{40}", base_sha):
-        raise BridgeError("base_sha must be a 40-character hex SHA")
+    if not isinstance(base_sha, str) or not re.fullmatch(r"(?:[0-9a-fA-F]{40}|[0-9a-fA-F]{64})", base_sha):
+        raise BridgeError("base_sha must be a 40- or 64-character hex object ID")
     branch = validate_safe_branch_name(obj.get("branch"), safe_branch_prefix)
     patch = obj.get("patch")
     if not isinstance(patch, str) or not patch.strip():

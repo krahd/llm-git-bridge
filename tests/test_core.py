@@ -345,6 +345,66 @@ class CoreTests(unittest.TestCase):
         with self.assertRaises(BridgeError):
             validate_transaction(tx, safe_branch_prefix="ai/")
 
+    def test_transaction_validation_accepts_sha256_object_id(self):
+        tx = {
+            "protocol": 2,
+            "kind": "transaction",
+            "transaction_id": "tx-sha256",
+            "repo": "demo",
+            "base_sha": "a" * 64,
+            "branch": "ai/sha256",
+            "patch": "x",
+            "run": [],
+        }
+        self.assertIs(validate_transaction(tx, safe_branch_prefix="ai/"), tx)
+
+    def test_sha256_repository_transaction_commits_successfully(self):
+        parent = Path(tempfile.mkdtemp(prefix="llmgb-sha256-"))
+        self.addCleanup(shutil.rmtree, parent, ignore_errors=True)
+        repo = parent / "sha256-repo"
+        init = subprocess.run(
+            ["git", "init", "-q", "--object-format=sha256", str(repo)],
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            text=True,
+        )
+        if init.returncode != 0:
+            self.skipTest("Git build does not support SHA-256 repositories")
+        sh(repo, "git", "config", "user.email", "test@example.invalid")
+        sh(repo, "git", "config", "user.name", "Test User")
+        (repo / "README.md").write_text("hello\n", encoding="utf-8")
+        sh(repo, "git", "add", "README.md")
+        sh(repo, "git", "commit", "-qm", "initial")
+        head = sh(repo, "git", "rev-parse", "HEAD")
+        self.assertEqual(len(head), 64)
+        tx = {
+            "protocol": 2,
+            "kind": "transaction",
+            "transaction_id": "tx-sha256-e2e",
+            "repo": "sha256-repo",
+            "base_sha": head,
+            "branch": "ai/sha256-edit",
+            "patch": (
+                "diff --git a/README.md b/README.md\n"
+                "--- a/README.md\n"
+                "+++ b/README.md\n"
+                "@@ -1 +1 @@\n"
+                "-hello\n"
+                "+hello sha256\n"
+            ),
+            "run": [],
+        }
+        outcome = process_transaction(
+            repo,
+            "sha256-repo",
+            tx,
+            state_dir=parent / "sha256-state",
+            safe_branch_prefix="ai/",
+        )
+        self.assertEqual(outcome.result["status"], "success")
+        self.assertEqual(len(outcome.result["commit"]), 64)
+        self.assertEqual(sh(repo, "git", "show", "ai/sha256-edit:README.md"), "hello sha256")
+
     def test_safe_branch_validation_matches_documented_ref_component_rules_without_git(self):
         with patch.object(core_mod, "run", side_effect=AssertionError("must not spawn Git")):
             self.assertEqual(core_mod.validate_safe_branch_name("ai/good-name", "ai/"), "ai/good-name")
@@ -1105,6 +1165,25 @@ class CoreTests(unittest.TestCase):
             self.assertEqual(updated, ())
         finally:
             shutil.rmtree(parent, ignore_errors=True)
+
+    def test_full_registry_ignores_unborn_new_repo_without_poisoning_scan(self):
+        parent = Path(tempfile.mkdtemp(prefix="llmgb-full-unborn-"))
+        self.addCleanup(shutil.rmtree, parent, ignore_errors=True)
+        known = self.clone_seed_repo(parent / "known")
+        unborn = parent / "unborn"
+        unborn.mkdir()
+        sh(unborn, "git", "init", "-q")
+        registry = build_registry([parent])
+        self.assertEqual({entry["name"] for entry in registry["repos"].values()}, {known.name})
+
+    def test_full_registry_identity_failure_for_known_repo_remains_fail_closed(self):
+        parent = Path(tempfile.mkdtemp(prefix="llmgb-full-known-identity-"))
+        self.addCleanup(shutil.rmtree, parent, ignore_errors=True)
+        self.clone_seed_repo(parent / "known")
+        previous = build_registry([parent])
+        with patch.object(core_mod, "repo_identity", side_effect=BridgeError("identity unavailable")):
+            with self.assertRaisesRegex(BridgeError, "identity unavailable"):
+                build_registry([parent], previous=previous)
 
     def test_incremental_registry_ignores_unborn_new_repo_until_it_has_history(self):
         parent = Path(tempfile.mkdtemp(prefix="llmgb-discovery-unborn-"))
