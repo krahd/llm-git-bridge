@@ -185,6 +185,8 @@ def _migrate_config(raw: dict[str, Any]) -> dict[str, Any]:
     if not isinstance(raw, dict):
         raise BridgeError("config must be a JSON object")
     version = raw.get("version", 1)
+    if isinstance(version, bool) or not isinstance(version, int):
+        raise BridgeError("unsupported config version")
     if version == 2:
         return dict(raw)
     if version != 1:
@@ -199,7 +201,9 @@ def _migrate_config(raw: dict[str, Any]) -> dict[str, Any]:
 
     migrated = dict(raw)
     migrated["version"] = 2
-    migrated["roots"] = [{"path": path, "push": False} for path in roots]
+    migrated["roots"] = _prune_redundant_roots(
+        [{"path": path, "push": False} for path in roots]
+    )
     migrated["repo_overrides"] = {
         repo_id: {"push": True} for repo_id in sorted(set(push_enabled))
     }
@@ -237,12 +241,24 @@ def _validate_registry_scan_interval(value: Any) -> float:
 
 
 def _validate_config(cfg: dict[str, Any]) -> dict[str, Any]:
-    if cfg.get("version") != 2:
+    allowed_fields = set(default_config())
+    unknown_fields = set(cfg) - allowed_fields
+    if unknown_fields:
+        raise BridgeError(
+            f"config has unknown fields: {', '.join(sorted(unknown_fields))}"
+        )
+    version = cfg.get("version")
+    if isinstance(version, bool) or not isinstance(version, int) or version != 2:
         raise BridgeError("unsupported config version")
 
     transport = cfg.get("transport")
     if not isinstance(transport, dict):
         raise BridgeError("config transport must be an object")
+    unknown_transport = set(transport) - {"type", "remote", "rc_enabled"}
+    if unknown_transport:
+        raise BridgeError(
+            f"config transport has unknown fields: {', '.join(sorted(unknown_transport))}"
+        )
     if transport.get("type") != "rclone":
         raise BridgeError("config transport type must be 'rclone'")
     remote = transport.get("remote")

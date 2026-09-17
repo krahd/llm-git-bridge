@@ -2169,6 +2169,38 @@ class AppTests(unittest.TestCase):
         self.assertTrue(app._repo_push_allowed(loaded, "repo-a", temp / "repo-a"))
         self.assertFalse(app._repo_push_allowed(loaded, "new-repo", temp / "new-repo"))
 
+    def test_v2_config_rejects_unknown_top_level_and_transport_fields(self):
+        cfg = app.default_config()
+        cfg["typo"] = True
+        with self.assertRaisesRegex(BridgeError, "unknown fields: typo"):
+            app._validate_config(cfg)
+
+        cfg = app.default_config()
+        cfg["transport"]["typo"] = True
+        with self.assertRaisesRegex(BridgeError, "transport has unknown fields: typo"):
+            app._validate_config(cfg)
+
+    def test_config_version_rejects_bool_and_float_aliases(self):
+        for version in (True, False, 1.0, 2.0):
+            with self.subTest(version=version):
+                raw = app.default_config()
+                raw["version"] = version
+                with self.assertRaisesRegex(BridgeError, "unsupported config version"):
+                    app._migrate_config(raw)
+
+    def test_v1_migration_compacts_duplicate_and_redundant_nested_roots(self):
+        temp = Path(tempfile.mkdtemp(prefix="llmgb-config-compact-"))
+        outer = temp / "repos"
+        nested = outer / "nested"
+        raw = {
+            "version": 1,
+            "transport": {"type": "rclone", "remote": "fake", "rc_enabled": True},
+            "roots": [str(outer), str(outer / "."), str(nested)],
+            "push_enabled_repos": [],
+        }
+        migrated = app._migrate_config(raw)
+        self.assertEqual(migrated["roots"], [{"path": str(outer.resolve()), "push": False}])
+
     def test_effective_push_uses_repo_override_then_most_specific_root(self):
         temp = Path(tempfile.mkdtemp(prefix="llmgb-root-policy-"))
         outer = temp / "repos"
