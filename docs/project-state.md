@@ -196,3 +196,8 @@ RC6 keeps the RC5 scheduler and automatic-discovery architecture but replaces fl
 The operator path is also consolidated. `setup` is a re-runnable wizard for transport, roots, and root push policy; root-management commands remain available for scripting and advanced use. A thin POSIX installer performs clean first installs and fail-closed updates, supports branch and tag refs, refuses local-ahead/diverged installations instead of resetting them, and delegates repository choices to the bridge-owned wizard. Non-interactive optional actions do not auto-consent.
 
 The RC6 adversarial pass additionally requires capability publication to remain fresh when advanced users edit configuration directly, setup to preserve an existing working configuration when a newly selected transport is unreachable, and installer reruns to preserve external bridge configuration bytes. Full configured validation, static checks, independent branch materialisation, and the protected-main promotion boundary remain release gates.
+
+
+## RC7 post-RC6 hardening candidate (2026-09-17)
+
+RC7 closes defects found by the post-RC6 adversarial pass: stricter version/schema validation, safer registry identity under moves/copies and unborn repositories, SHA-256 Git object-ID support, authenticated mailbox-scoped replay binding, and stronger installer/daemon rollback behaviour. Replay markers from RC6 migrate only after the current mailbox is authenticated and bound; subsequent mailbox retargeting fails closed instead of inheriting prior replay authority. Final release qualification still requires the complete configured test gate, independent materialisation, guarded main promotion, daemon reload, and live production verification.

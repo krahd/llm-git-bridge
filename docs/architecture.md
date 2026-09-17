@@ -16,7 +16,7 @@ publication/cleanup stages before any worker count is raised. See
 [scheduler-architecture.md](scheduler-architecture.md) for the staged contracts
 and worker-lifecycle rationale.
 
-Version `1.0.0rc6` retains the RC5 watcher/worker ownership and automatic-discovery model, and adds explicit multi-root policy inheritance plus path-free effective capability publication. Drive/rclone transport, registry mutation and durable result publication remain watcher-owned; the scheduler owns worker lifecycle, canonical-repository exclusion, bounded backlog admission and fairness. The complete ownership and recovery contract is documented in `scheduler-architecture.md`.
+Version `1.0.0rc7` retains the RC6 watcher/worker ownership, automatic-discovery and multi-root policy model, while hardening repository identity, strict configuration validation, SHA-256 object IDs and mailbox-scoped replay state. Drive/rclone transport, registry mutation and durable result publication remain watcher-owned; the scheduler owns worker lifecycle, canonical-repository exclusion, bounded backlog admission and fairness. The complete ownership and recovery contract is documented in `scheduler-architecture.md`.
 
 ## Multi-repository model
 

@@ -102,7 +102,7 @@ Required fields:
 - `kind`: `"transaction"`
 - `transaction_id`: safe filename token
 - `repo`: repository ID or unambiguous repository name
-- `base_sha`: full 40-character commit SHA
+- `base_sha`: full 40-character SHA-1 or 64-character SHA-256 commit object ID
 - `branch`: branch beginning with the locally configured safe prefix
 - `patch`: unified diff text
 - `run`: list of locally configured symbolic command names (safe 1–64 character tokens)

@@ -8,6 +8,17 @@ INSTALL_DIR=${LLM_GIT_BRIDGE_INSTALL_DIR:-${XDG_DATA_HOME:-$HOME/.local/share}/l
 BIN_DIR=${LLM_GIT_BRIDGE_BIN_DIR:-$HOME/.local/bin}
 RUN_SETUP=1
 RUN_DAEMON=1
+INSTALL_CREATED=0
+INSTALL_READY=0
+
+cleanup_incomplete_install() {
+  if [ "$INSTALL_CREATED" -eq 1 ] && [ "$INSTALL_READY" -eq 0 ]; then
+    rm -rf -- "$INSTALL_DIR"
+  fi
+}
+trap cleanup_incomplete_install EXIT
+trap 'exit 130' INT
+trap 'exit 143' TERM
 
 usage() {
   cat <<'USAGE'
@@ -105,18 +116,28 @@ if [ -d "$INSTALL_DIR/.git" ]; then
 elif [ -e "$INSTALL_DIR" ]; then
   if [ -d "$INSTALL_DIR" ] && [ -z "$(ls -A "$INSTALL_DIR" 2>/dev/null)" ]; then
     rmdir "$INSTALL_DIR"
+    INSTALL_CREATED=1
     git clone --branch "$REF" --single-branch "$REPO_URL" "$INSTALL_DIR"
+    INSTALL_READY=1
   else
     fail "$INSTALL_DIR exists but is not an llm-git-bridge Git checkout"
   fi
 else
   mkdir -p "$(dirname -- "$INSTALL_DIR")"
+  INSTALL_CREATED=1
   git clone --branch "$REF" --single-branch "$REPO_URL" "$INSTALL_DIR"
+  INSTALL_READY=1
 fi
 
+# Existing checkouts are already complete; only a clone created by this run needs
+# interruption cleanup.
+INSTALL_READY=1
 mkdir -p "$BIN_DIR"
-ln -sfn "$INSTALL_DIR/bin/llm-git-bridge" "$BIN_DIR/llm-git-bridge"
 BRIDGE=$BIN_DIR/llm-git-bridge
+if [ -e "$BRIDGE" ] && [ ! -L "$BRIDGE" ]; then
+  fail "$BRIDGE exists and is not a symlink; refusing to overwrite it"
+fi
+ln -sfn "$INSTALL_DIR/bin/llm-git-bridge" "$BRIDGE"
 
 if [ "$RUN_SETUP" -eq 1 ]; then
   if [ -z "$(rclone listremotes 2>/dev/null || true)" ]; then

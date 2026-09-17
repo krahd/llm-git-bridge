@@ -46,6 +46,13 @@ class InstallerTests(unittest.TestCase):
         self.assertIn('return 1', non_tty)
         self.assertNotIn('[ "$default" = yes ]', non_tty)
 
+    def test_installer_preserves_non_symlink_command_and_cleans_interrupted_clone(self) -> None:
+        text = INSTALLER.read_text(encoding="utf-8")
+        self.assertIn('exists and is not a symlink; refusing to overwrite it', text)
+        self.assertIn('trap cleanup_incomplete_install EXIT', text)
+        self.assertIn("trap 'exit 130' INT", text)
+        self.assertIn("trap 'exit 143' TERM", text)
+
     def test_installer_refuses_setup_without_a_configured_rclone_remote(self) -> None:
         text = INSTALLER.read_text(encoding="utf-8")
         self.assertIn(

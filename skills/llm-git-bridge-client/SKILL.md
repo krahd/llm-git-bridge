@@ -41,7 +41,7 @@ For every request:
 
 For edit transactions additionally:
 
-- use the exact 40-character base commit from fresh authoritative state;
+- use the exact full 40-character SHA-1 or 64-character SHA-256 base commit from fresh authoritative state;
 - use a branch under the configured safe prefix (commonly `ai/`);
 - send a unified diff as `patch`;
 - request only locally configured symbolic commands in `run`;

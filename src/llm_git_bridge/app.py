@@ -494,13 +494,71 @@ def _public_capabilities(cfg: dict[str, Any], registry: dict[str, Any]) -> dict[
     return capabilities
 
 
+def _pending_registry_publication_path() -> Path:
+    return STATE_DIR / "pending-registry-publication.json"
+
+
 def publish_registry(cfg: dict[str, Any], registry: dict[str, Any]) -> None:
+    transport = transport_from_config(cfg)
+    payload = public_registry(registry, _public_capabilities(cfg, registry))
+    pending = _pending_registry_publication_path()
+    try:
+        transport.upload_json(
+            f"{REMOTE_ROOT}/meta/repos.json",
+            payload,
+            STATE_DIR / "outbox" / "repos.json",
+        )
+    except Exception:
+        # A mutating provider timeout can be ambiguous: the remote write may have
+        # completed. Persist the exact path-free payload that must eventually win
+        # instead of guessing whether the provider committed the write.
+        save_json(pending, payload)
+        raise
+    pending.unlink(missing_ok=True)
+
+
+def _retry_pending_registry_publication(cfg: dict[str, Any]) -> bool:
+    pending = _pending_registry_publication_path()
+    if not pending.exists():
+        return False
+    payload = load_json(pending)
     transport = transport_from_config(cfg)
     transport.upload_json(
         f"{REMOTE_ROOT}/meta/repos.json",
-        public_registry(registry, _public_capabilities(cfg, registry)),
+        payload,
         STATE_DIR / "outbox" / "repos.json",
     )
+    pending.unlink(missing_ok=True)
+    _append_metric({"event": "registry-publication-retry", "recorded_at": utc_now()})
+    return True
+
+
+def _restore_json_file(path: Path, previous_text: str | None) -> None:
+    if previous_text is None:
+        path.unlink(missing_ok=True)
+    else:
+        atomic_write_text(path, previous_text)
+
+
+def _save_config_and_refresh_registry(cfg: dict[str, Any]) -> dict[str, Any]:
+    """Commit a policy/config mutation without leaving local/remote state split."""
+    old_config_text = CONFIG_FILE.read_text(encoding="utf-8") if CONFIG_FILE.exists() else None
+    old_registry_text = REGISTRY_FILE.read_text(encoding="utf-8") if REGISTRY_FILE.exists() else None
+    old_cfg = load_config() if CONFIG_FILE.exists() else default_config()
+    old_registry = load_json(REGISTRY_FILE) if REGISTRY_FILE.exists() else None
+    try:
+        save_config(cfg)
+        return refresh_registry(cfg, publish=True)
+    except Exception:
+        _restore_json_file(CONFIG_FILE, old_config_text)
+        _restore_json_file(REGISTRY_FILE, old_registry_text)
+        if old_registry is not None and old_cfg.get("transport", {}).get("remote"):
+            try:
+                publish_registry(old_cfg, old_registry)
+            except Exception:
+                # publish_registry persisted the exact old public state for retry.
+                pass
+        raise
 
 
 def refresh_registry(cfg: dict[str, Any], *, publish: bool = True) -> dict[str, Any]:
@@ -1817,7 +1875,6 @@ def reconcile_remote_results(cfg: dict[str, Any]) -> int:
     normal hot path unchanged and avoids downloading the historical result archive.
     """
     transport = transport_from_config(cfg)
-    _ensure_mailbox_scope(transport)
     pending_transactions = {
         name
         for name in transport.list_files(f"{REMOTE_ROOT}/transactions")
@@ -1835,6 +1892,10 @@ def reconcile_remote_results(cfg: dict[str, Any]) -> int:
             "recorded_at": utc_now(),
         })
         return 0
+
+    # A replay scope is only needed when there is executable/recoverable mailbox
+    # state. Avoid an extra metadata round trip on a completely idle startup.
+    _ensure_mailbox_scope(transport)
 
     started = time.monotonic()
     remote_results = {
@@ -2098,14 +2159,17 @@ def _prepare_transaction_worker_task(
     obj = request.obj
     repo_id, entry = resolve_repo(registry, obj.get("repo", ""))
     _verify_registry_entry_identity(entry)
+    repo_path = Path(entry["path"])
+    if _inherited_root_push(_configured_roots(cfg), repo_path) is None:
+        raise BridgeError("repository is no longer under a configured root")
     commands_cfg = cfg.get("commands", {}).get(repo_id, {})
     commands_json = json.dumps(commands_cfg, sort_keys=True, separators=(",", ":"), ensure_ascii=False)
     return _TransactionWorkerTask(
         filename=request.downloaded.filename,
         request_raw=request.downloaded.raw,
         repo_id=repo_id,
-        repo_path=Path(entry["path"]),
-        scheduling_key=str(Path(entry["path"]).expanduser().resolve()),
+        repo_path=repo_path,
+        scheduling_key=str(repo_path.expanduser().resolve()),
         commands_json=commands_json,
         safe_branch_prefix=str(cfg.get("safe_branch_prefix", "ai/")),
         allow_commit=bool(cfg.get("allow_commit", True)),
@@ -2470,7 +2534,8 @@ def _process_pending_concurrent(
                 seen_fair_keys.add(item.fair_key)
                 try:
                     latest_registry = load_registry()
-                    candidate = _prepare_transaction_worker_task(cfg, latest_registry, item.request)
+                    latest_cfg = load_config() if CONFIG_FILE.exists() else cfg
+                    candidate = _prepare_transaction_worker_task(latest_cfg, latest_registry, item.request)
                 except Exception as exc:
                     chosen_error = (index, exc)
                     break
@@ -2746,6 +2811,13 @@ def process_pending_once(
     scheduler: _LocalWorkerScheduler | None = None,
 ) -> int:
     """Run one synchronous mailbox cycle through explicit durable stages."""
+    # Resolve any previous ambiguous registry write before publishing newer
+    # capability state. This retry payload is path-free and watcher-owned.
+    try:
+        _retry_pending_registry_publication(cfg)
+    except (BridgeError, OSError):
+        pass
+
     # Auto-discovery is watcher-owned and rate-limited. Run it even while idle so
     # newly created repositories under approved roots become visible remotely
     # without an operator scan. Test/embedded callers that omit the new config key
@@ -2854,8 +2926,7 @@ def cmd_setup(args: argparse.Namespace) -> int:
     transport = transport_from_config(cfg)
     for rel in ("meta", "repos", "transactions", "results"):
         transport.ensure_dir(f"{REMOTE_ROOT}/{rel}")
-    save_config(cfg)
-    registry = refresh_registry(cfg, publish=True)
+    registry = _save_config_and_refresh_registry(cfg)
     push_enabled = sum(
         1
         for repo_id, entry in registry.get("repos", {}).items()
@@ -2902,8 +2973,7 @@ def cmd_roots_add(args: argparse.Namespace) -> int:
     elif args.push is not None:
         existing["push"] = args.push == "enable"
     cfg["roots"] = _prune_redundant_roots(roots)
-    save_config(cfg)
-    registry = refresh_registry(cfg, publish=True)
+    registry = _save_config_and_refresh_registry(cfg)
     retained = any(root["path"] == path for root in cfg["roots"])
     if retained:
         policy = next(root for root in cfg["roots"] if root["path"] == path)
@@ -2933,8 +3003,7 @@ def cmd_roots_remove(args: argparse.Namespace) -> int:
     if len(roots) == len(_configured_roots(cfg)):
         raise BridgeError(f"repository root is not configured: {path}")
     cfg["roots"] = _prune_redundant_roots(roots)
-    save_config(cfg)
-    registry = refresh_registry(cfg, publish=True)
+    registry = _save_config_and_refresh_registry(cfg)
     print(f"repository root removed: {path}; repositories: {len(registry.get('repos', {}))}")
     return 0
 
@@ -3157,10 +3226,35 @@ def cmd_daemon(args: argparse.Namespace) -> int:
             "StandardOutPath": str(STATE_DIR / "daemon.out.log"),
             "StandardErrorPath": str(STATE_DIR / "daemon.err.log"),
         }
-        with PLIST_PATH.open("wb") as fh:
-            plistlib.dump(plist, fh, sort_keys=True)
-        _launchctl("bootout", domain, str(PLIST_PATH), check=False)
-        _launchctl("bootstrap", domain, str(PLIST_PATH))
+        service = f"{domain}/{LABEL}"
+        previous_plist = PLIST_PATH.read_bytes() if PLIST_PATH.exists() else None
+        was_loaded = _launchctl("print", service, check=False) == 0 if previous_plist is not None else False
+        PLIST_PATH.parent.mkdir(parents=True, exist_ok=True)
+        fd, tmp_name = tempfile.mkstemp(prefix=PLIST_PATH.name + ".", dir=str(PLIST_PATH.parent))
+        tmp_path = Path(tmp_name)
+        try:
+            with os.fdopen(fd, "wb") as fh:
+                plistlib.dump(plist, fh, sort_keys=True)
+                fh.flush()
+                os.fsync(fh.fileno())
+            os.replace(tmp_path, PLIST_PATH)
+            _launchctl("bootout", domain, str(PLIST_PATH), check=False)
+            try:
+                _launchctl("bootstrap", domain, str(PLIST_PATH))
+            except Exception:
+                _launchctl("bootout", domain, str(PLIST_PATH), check=False)
+                if previous_plist is None:
+                    PLIST_PATH.unlink(missing_ok=True)
+                else:
+                    atomic_write_text(
+                        PLIST_PATH,
+                        previous_plist.decode("utf-8"),
+                    )
+                    if was_loaded:
+                        _launchctl("bootstrap", domain, str(PLIST_PATH))
+                raise
+        finally:
+            tmp_path.unlink(missing_ok=True)
         print(f"installed: {PLIST_PATH}")
         return 0
     if args.action == "uninstall":
@@ -3242,8 +3336,7 @@ def cmd_configure_push(args: argparse.Namespace) -> int:
         overrides.pop(repo_id, None)
     else:
         overrides[repo_id] = {"push": args.action == "enable"}
-    save_config(cfg)
-    publish_registry(cfg, registry)
+    registry = _save_config_and_refresh_registry(cfg)
     if args.action == "inherit":
         print(f"push policy inherited from repository root for {repo_id}")
     else:

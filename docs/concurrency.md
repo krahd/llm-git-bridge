@@ -1,6 +1,6 @@
 # Concurrency and multiple clients
 
-`llm-git-bridge` `1.0.0rc6` retains the RC5 bounded-concurrency and watcher-owned automatic-discovery design: local execution may overlap across different canonical repositories while one watcher owns mailbox/registry side effects. Root-policy and setup changes do not alter same-repository serialisation. `max_workers` still defaults to `1` as a conservative migration policy; operators can explicitly enable the recommended initial setting of two workers after qualification on their host.
+`llm-git-bridge` `1.0.0rc7` retains the RC6 bounded-concurrency and watcher-owned automatic-discovery design: local execution may overlap across different canonical repositories while one watcher owns mailbox/registry side effects. Root-policy and setup changes do not alter same-repository serialisation. `max_workers` still defaults to `1` as a conservative migration policy; operators can explicitly enable the recommended initial setting of two workers after qualification on their host.
 
 ## What is concurrent
 

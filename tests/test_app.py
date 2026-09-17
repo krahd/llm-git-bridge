@@ -803,6 +803,61 @@ class AppTests(unittest.TestCase):
         self.assertTrue(task.allow_commit)
         self.assertTrue(task.allow_push)
 
+    def test_b3_worker_task_rejects_repo_removed_from_latest_roots(self):
+        txid = "tx-b3-root-revoked"
+        downloaded = app._DownloadedRequest(
+            filename=f"{txid}.json",
+            raw=json.dumps({
+                "protocol": 2,
+                "kind": "transaction",
+                "transaction_id": txid,
+                "repo": "repo",
+                "base_sha": self._seed_head,
+                "branch": "ai/b3-root-revoked",
+                "patch": "",
+                "run": [],
+            }),
+            request_bytes_sha256="00" * 32,
+            download_s=0.0,
+            download_transport="fake",
+        )
+        request = app._ValidatedRequest(downloaded=downloaded, obj=json.loads(downloaded.raw))
+        registry = json.loads(app.REGISTRY_FILE.read_text(encoding="utf-8"))
+        revoked = {**self.cfg, "roots": []}
+        with self.assertRaisesRegex(app.BridgeError, "no longer under a configured root"):
+            app._prepare_transaction_worker_task(revoked, registry, request)
+
+    def test_b3_worker_task_uses_latest_command_and_push_policy(self):
+        txid = "tx-b3-latest-policy"
+        downloaded = app._DownloadedRequest(
+            filename=f"{txid}.json",
+            raw=json.dumps({
+                "protocol": 2,
+                "kind": "transaction",
+                "transaction_id": txid,
+                "repo": "repo",
+                "base_sha": self._seed_head,
+                "branch": "ai/b3-latest-policy",
+                "patch": "",
+                "run": [],
+            }),
+            request_bytes_sha256="00" * 32,
+            download_s=0.0,
+            download_transport="fake",
+        )
+        request = app._ValidatedRequest(downloaded=downloaded, obj=json.loads(downloaded.raw))
+        registry = json.loads(app.REGISTRY_FILE.read_text(encoding="utf-8"))
+        latest = {
+            **self.cfg,
+            "commands": {"repo": {"test": ["python3", "-c", "print('latest')"]}},
+            "roots": [{"path": str(self.tmp), "push": True}],
+            "version": 2,
+            "repo_overrides": {},
+        }
+        task = app._prepare_transaction_worker_task(latest, registry, request)
+        self.assertEqual(json.loads(task.commands_json)["test"][-1], "print('latest')")
+        self.assertTrue(task.allow_push)
+
     def test_b3_worker_task_freezes_registry_resolution_before_handoff(self):
         txid = "tx-b3-freeze-registry"
         downloaded = app._DownloadedRequest(
@@ -2201,6 +2256,34 @@ class AppTests(unittest.TestCase):
         migrated = app._migrate_config(raw)
         self.assertEqual(migrated["roots"], [{"path": str(outer.resolve()), "push": False}])
 
+    def test_registry_publication_failure_persists_path_free_retry_payload(self):
+        cfg = app.default_config()
+        cfg["transport"]["remote"] = "fake"
+        cfg["roots"] = [{"path": str(self.tmp), "push": False}]
+        registry = app.load_registry()
+        with patch.object(self.fake, "upload_json", side_effect=BridgeError("rclone rc write outcome is unknown")):
+            with self.assertRaisesRegex(BridgeError, "outcome is unknown"):
+                app.publish_registry(cfg, registry)
+        pending = app._pending_registry_publication_path()
+        self.assertTrue(pending.exists())
+        payload = json.loads(pending.read_text(encoding="utf-8"))
+        self.assertNotIn(str(self.tmp), json.dumps(payload))
+        self.assertTrue(app._retry_pending_registry_publication(cfg))
+        self.assertFalse(pending.exists())
+
+    def test_policy_mutation_rolls_back_exact_local_config_when_publication_fails(self):
+        old_cfg = app.default_config()
+        old_cfg["transport"]["remote"] = "fake"
+        old_cfg["roots"] = [{"path": str(self.tmp), "push": False}]
+        app.save_config(old_cfg)
+        before = app.CONFIG_FILE.read_text(encoding="utf-8")
+        candidate = json.loads(json.dumps(old_cfg))
+        candidate["roots"][0]["push"] = True
+        with patch.object(self.fake, "upload_json", side_effect=BridgeError("definite publication failure")):
+            with self.assertRaisesRegex(BridgeError, "definite publication failure"):
+                app._save_config_and_refresh_registry(candidate)
+        self.assertEqual(app.CONFIG_FILE.read_text(encoding="utf-8"), before)
+
     def test_effective_push_uses_repo_override_then_most_specific_root(self):
         temp = Path(tempfile.mkdtemp(prefix="llmgb-root-policy-"))
         outer = temp / "repos"
@@ -3472,6 +3555,38 @@ class WatchRcdHealthTests(unittest.TestCase):
         healthy.assert_not_called()
         stop.assert_called_once_with()
 
+
+    def test_daemon_install_failure_restores_stopped_previous_plist_without_starting_it(self):
+        from argparse import Namespace
+        old_plist = app.PLIST_PATH
+        old_state = app.STATE_DIR
+        try:
+            app.PLIST_PATH = self.tmp / "daemon.plist"
+            app.STATE_DIR = self.tmp / "state"
+            previous = b"<?xml version=\"1.0\"?><plist version=\"1.0\"><dict/></plist>\n"
+            app.PLIST_PATH.write_bytes(previous)
+            wrapper = self.tmp / "llm-git-bridge"
+            wrapper.write_text("#!/bin/sh\n", encoding="utf-8")
+            wrapper.chmod(0o755)
+            calls = []
+            def launchctl(*args, check=True):
+                calls.append((args, check))
+                if args[0] == "print":
+                    return 1
+                if args[0] == "bootstrap":
+                    raise BridgeError("bootstrap failed")
+                return 0
+            with patch.object(app.sys, "platform", "darwin"):
+                with patch.object(app.os, "getuid", return_value=501):
+                    with patch.object(app.shutil, "which", return_value="/usr/bin/rclone"):
+                        with patch.object(app, "_launchctl", side_effect=launchctl):
+                            with self.assertRaisesRegex(BridgeError, "bootstrap failed"):
+                                app.cmd_daemon(Namespace(action="install", command=str(wrapper)))
+            self.assertEqual(app.PLIST_PATH.read_bytes(), previous)
+            self.assertEqual(sum(1 for args, _ in calls if args[0] == "bootstrap"), 1)
+        finally:
+            app.PLIST_PATH = old_plist
+            app.STATE_DIR = old_state
 
     def test_daemon_restart_requests_sigterm_instead_of_force_kickstart(self):
         from argparse import Namespace
