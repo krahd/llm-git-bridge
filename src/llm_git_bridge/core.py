@@ -483,10 +483,20 @@ def reconcile_registry_membership(
                 continue
             validated_identities[resolved] = verified_identity
         identity = verified_identity
-        candidates_for_identity = [
-            item for item in previous_by_identity.get(identity, [])
-            if item[0] not in claimed_ids
-        ]
+        candidates_for_identity = []
+        for item in previous_by_identity.get(identity, []):
+            old_id, old_entry = item
+            if old_id in claimed_ids:
+                continue
+            old_path_value = old_entry.get("path")
+            if not isinstance(old_path_value, str):
+                continue
+            old_path = Path(old_path_value).expanduser().resolve()
+            # Do not let a same-history clone steal policy from a repository whose
+            # approved root is merely offline. A move is safely inferable only
+            # when the old location lies under an available root and is absent.
+            if any(within(old_path, root) for root in available_roots):
+                candidates_for_identity.append(item)
         if len(candidates_for_identity) == 1:
             claim(resolved, path, candidates_for_identity[0], identity)
 
@@ -630,11 +640,14 @@ def repo_state(path: Path) -> dict[str, Any]:
 
 
 def build_registry(roots: Iterable[Path], previous: dict[str, Any] | None = None) -> dict[str, Any]:
-    repos = discover_repos(roots)
+    resolved_roots = [Path(root).expanduser().resolve() for root in roots]
+    available_roots = [root for root in resolved_roots if root.exists() and root.is_dir()]
+    repos = discover_repos(available_roots)
     previous = previous or {"repos": {}}
     previous_repos = previous.get("repos", {})
     previous_by_path: dict[str, tuple[str, dict[str, Any]]] = {}
     previous_by_marker: dict[str, tuple[str, dict[str, Any]]] = {}
+    previous_by_identity: dict[str, list[tuple[str, dict[str, Any]]]] = {}
     for old_id, old_entry in previous_repos.items():
         if not isinstance(old_id, str) or not isinstance(old_entry, dict):
             continue
@@ -644,6 +657,9 @@ def build_registry(roots: Iterable[Path], previous: dict[str, Any] | None = None
         marker = old_entry.get("git_marker_id")
         if isinstance(marker, str) and marker and marker not in previous_by_marker:
             previous_by_marker[marker] = (old_id, old_entry)
+        identity = old_entry.get("repo_identity")
+        if isinstance(identity, str) and identity:
+            previous_by_identity.setdefault(identity, []).append((old_id, old_entry))
 
     records = [
         (path, str(path.resolve()), git_marker_identity(path), repo_identity(path))
@@ -668,17 +684,56 @@ def build_registry(roots: Iterable[Path], previous: dict[str, Any] | None = None
             matched[resolved] = match[0]
             claimed_ids.add(match[0])
 
+    def within(path: Path, root: Path) -> bool:
+        return path == root or root in path.parents
+
+    # A history identity may preserve an ID across a move only when the old
+    # location was inside an available approved root. If that root is currently
+    # unavailable, a same-history clone elsewhere is indistinguishable from a
+    # move and must not inherit repository-specific policy.
+    for _path, resolved, _marker, identity in records:
+        if resolved in matched:
+            continue
+        candidates: list[tuple[str, dict[str, Any]]] = []
+        for old_id, old_entry in previous_by_identity.get(identity, []):
+            if old_id in claimed_ids:
+                continue
+            old_path_value = old_entry.get("path")
+            if not isinstance(old_path_value, str):
+                continue
+            old_path = Path(old_path_value).expanduser().resolve()
+            if any(within(old_path, root) for root in available_roots):
+                candidates.append((old_id, old_entry))
+        if len(candidates) == 1:
+            matched[resolved] = candidates[0][0]
+            claimed_ids.add(candidates[0][0])
+
     retired_ids = {
         str(value) for value in previous.get("retired_repo_ids", [])
         if isinstance(value, str) and value
     }
-    retired_ids.update(
-        old_id for old_id in previous_repos
-        if isinstance(old_id, str) and old_id not in claimed_ids
-    )
 
     entries: dict[str, Any] = {}
     used_ids: set[str] = set()
+    for old_id, old_entry in previous_repos.items():
+        if not isinstance(old_id, str) or not isinstance(old_entry, dict) or old_id in claimed_ids:
+            continue
+        old_path_value = old_entry.get("path")
+        if not isinstance(old_path_value, str):
+            retired_ids.add(old_id)
+            continue
+        old_path = Path(old_path_value).expanduser().resolve()
+        under_configured = any(within(old_path, root) for root in resolved_roots)
+        under_available = any(within(old_path, root) for root in available_roots)
+        if under_configured and not under_available:
+            preserved = dict(old_entry)
+            preserved["id"] = old_id
+            preserved["path"] = str(old_path)
+            entries[old_id] = preserved
+            used_ids.add(old_id)
+            claimed_ids.add(old_id)
+        else:
+            retired_ids.add(old_id)
     for path, resolved, marker, identity in records:
         repo_id = matched.get(resolved)
         name = path.name

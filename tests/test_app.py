@@ -173,6 +173,49 @@ class AppTests(unittest.TestCase):
 
         self.assertEqual(app.REGISTRY_FILE.read_bytes(), before)
 
+    def test_full_refresh_publish_failure_does_not_replace_local_registry(self):
+        new_repo = self.tmp / "full-refresh-failure"
+        shutil.copytree(self._seed_repo, new_repo, symlinks=True)
+        cfg = dict(self.cfg)
+        before = app.REGISTRY_FILE.read_bytes()
+
+        with patch.object(app, "publish_registry", side_effect=BridgeError("publish failed")):
+            with self.assertRaisesRegex(BridgeError, "publish failed"):
+                app.refresh_registry(cfg, publish=True)
+
+        self.assertEqual(app.REGISTRY_FILE.read_bytes(), before)
+
+    def test_repo_refresh_publish_failure_does_not_replace_local_registry(self):
+        cfg = dict(self.cfg)
+        before = app.REGISTRY_FILE.read_bytes()
+        (self.repo / "README.md").write_text("advanced\n", encoding="utf-8")
+        sh(self.repo, "git", "add", "README.md")
+        sh(self.repo, "git", "commit", "-qm", "advance")
+
+        with patch.object(app, "publish_registry", side_effect=BridgeError("publish failed")):
+            with self.assertRaisesRegex(BridgeError, "publish failed"):
+                app.refresh_repo_entry(cfg, "repo", publish=True)
+
+        self.assertEqual(app.REGISTRY_FILE.read_bytes(), before)
+
+    def test_first_capability_hash_publishes_unchanged_registry_on_upgrade(self):
+        cfg = app.default_config()
+        cfg["transport"]["remote"] = "fake"
+        cfg["roots"] = [{"path": str(self.tmp), "push": False}]
+        cfg["registry_scan_interval"] = 5.0
+        registry = json.loads(app.REGISTRY_FILE.read_text(encoding="utf-8"))
+        registry.pop("discovery", None)
+        save_json(app.REGISTRY_FILE, registry)
+        self.fake.files.pop("v2/meta/repos.json", None)
+
+        refreshed = app.refresh_registry_membership(cfg, publish=True)
+
+        self.assertIn("v2/meta/repos.json", self.fake.files)
+        public = json.loads(self.fake.files["v2/meta/repos.json"])
+        entry = next(item for item in public["repos"] if item["id"] == "repo")
+        self.assertEqual(entry["capabilities"], {"read": True, "edit": True, "push": False})
+        self.assertTrue(refreshed["discovery"]["capabilities_hash"])
+
     def test_auto_discovery_continues_while_long_worker_is_active(self):
         registry = json.loads(app.REGISTRY_FILE.read_text(encoding="utf-8"))
         registry["discovery"] = {
@@ -2140,6 +2183,17 @@ class AppTests(unittest.TestCase):
         self.assertFalse(app._repo_push_allowed(cfg, "outer-repo", outer / "project"))
         self.assertFalse(app._repo_push_allowed(cfg, "elsewhere", temp / "elsewhere"))
 
+    def test_v2_config_rejects_and_never_honours_legacy_push_allowlist(self):
+        cfg = app.default_config()
+        cfg["push_enabled_repos"] = ["demo"]
+        with self.assertRaisesRegex(BridgeError, "legacy push_enabled_repos"):
+            app._validate_config(cfg)
+        self.assertFalse(app._repo_push_allowed(cfg, "demo", self.tmp / "demo"))
+
+    def test_legacy_in_memory_push_allowlist_remains_transitionally_supported(self):
+        cfg = {"roots": [], "push_enabled_repos": ["demo"]}
+        self.assertTrue(app._repo_push_allowed(cfg, "demo", self.tmp / "demo"))
+
     def test_v2_config_rejects_duplicate_canonical_roots_and_bad_policies(self):
         temp = Path(tempfile.mkdtemp(prefix="llmgb-root-policy-"))
         duplicate = app.default_config()
@@ -2339,6 +2393,12 @@ class AppTests(unittest.TestCase):
         public = json.loads(self.fake.files["v2/meta/repos.json"])
         entry = next(item for item in public["repos"] if item["name"] == "repo")
         self.assertFalse(entry["capabilities"]["push"])
+
+    def test_interactive_setup_allows_zero_repository_roots(self):
+        cfg = app.default_config()
+        with patch("builtins.input", return_value=""), patch("builtins.print"):
+            roots = app._setup_repository_roots(cfg)
+        self.assertEqual(roots, [])
 
     def test_interactive_setup_reports_eof_as_actionable_error(self):
         with patch("builtins.input", side_effect=EOFError):

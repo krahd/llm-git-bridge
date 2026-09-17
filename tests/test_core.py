@@ -1026,6 +1026,69 @@ class CoreTests(unittest.TestCase):
         self.assertEqual(updated, ())
         self.assertIn(repo_id, current["repos"])
 
+    def test_full_registry_preserves_entries_when_approved_root_is_unavailable(self):
+        base = Path(tempfile.mkdtemp(prefix="llmgb-full-offline-"))
+        self.addCleanup(shutil.rmtree, base, ignore_errors=True)
+        available = base / "available"
+        unavailable = base / "unavailable"
+        available.mkdir()
+        unavailable.mkdir()
+        self.clone_seed_repo(available / "one")
+        self.clone_seed_repo(unavailable / "two")
+        previous = build_registry([available, unavailable])
+        old_by_name = {entry["name"]: rid for rid, entry in previous["repos"].items()}
+        shutil.rmtree(unavailable)
+
+        current = build_registry([available, unavailable], previous=previous)
+
+        self.assertIn(old_by_name["two"], current["repos"])
+        self.assertEqual(current["repos"][old_by_name["two"]]["name"], "two")
+        self.assertNotIn(old_by_name["two"], current.get("retired_repo_ids", []))
+
+    def test_full_registry_move_uses_unique_history_identity_when_marker_changes(self):
+        parent = Path(tempfile.mkdtemp(prefix="llmgb-full-move-"))
+        self.addCleanup(shutil.rmtree, parent, ignore_errors=True)
+        old_path = self.clone_seed_repo(parent / "old-name")
+        previous = build_registry([parent])
+        old_id = next(iter(previous["repos"]))
+        previous["repos"][old_id]["git_marker_id"] = "forced-marker-mismatch"
+        new_path = parent / "new-name"
+        old_path.rename(new_path)
+
+        current = build_registry([parent], previous=previous)
+
+        by_path = {entry["path"]: rid for rid, entry in current["repos"].items()}
+        self.assertEqual(by_path[str(new_path.resolve())], old_id)
+        self.assertNotIn(old_id, current.get("retired_repo_ids", []))
+
+    def test_incremental_same_history_clone_cannot_steal_id_from_unavailable_root(self):
+        base = Path(tempfile.mkdtemp(prefix="llmgb-offline-clone-"))
+        self.addCleanup(shutil.rmtree, base, ignore_errors=True)
+        offline_root = base / "offline-root"
+        live_root = base / "live-root"
+        offline_root.mkdir()
+        live_root.mkdir()
+        self.clone_seed_repo(offline_root / "policy-repo")
+        previous = build_registry([offline_root, live_root])
+        old_id = next(iter(previous["repos"]))
+        shutil.rmtree(offline_root)
+        clone = self.clone_seed_repo(live_root / "clone")
+
+        current, added, removed, updated = reconcile_registry_membership(
+            [offline_root, live_root], previous
+        )
+
+        self.assertIn(old_id, current["repos"])
+        self.assertEqual(current["repos"][old_id]["path"], previous["repos"][old_id]["path"])
+        clone_id = next(
+            rid for rid, entry in current["repos"].items()
+            if entry["path"] == str(clone.resolve())
+        )
+        self.assertNotEqual(clone_id, old_id)
+        self.assertEqual(added, (clone_id,))
+        self.assertEqual(removed, ())
+        self.assertEqual(updated, ())
+
     def test_incremental_registry_ignores_fake_git_marker(self):
         parent = Path(tempfile.mkdtemp(prefix="llmgb-discovery-fake-"))
         try:

@@ -218,7 +218,7 @@ def _repo_push_allowed(cfg: dict[str, Any], repo_id: str, repo_path: Path) -> bo
     # Transitional runtime compatibility for callers that construct pre-v2
     # config dictionaries directly rather than loading persisted configuration.
     legacy_enabled = cfg.get("push_enabled_repos", [])
-    if isinstance(legacy_enabled, list) and repo_id in legacy_enabled:
+    if cfg.get("version") != 2 and isinstance(legacy_enabled, list) and repo_id in legacy_enabled:
         return True
 
     inherited = _inherited_root_push(_configured_roots(cfg), repo_path)
@@ -285,6 +285,8 @@ def _validate_config(cfg: dict[str, Any]) -> dict[str, Any]:
 
     if not isinstance(cfg.get("allow_commit"), bool):
         raise BridgeError("config allow_commit must be a boolean")
+    if "push_enabled_repos" in cfg:
+        raise BridgeError("config v2 must not contain legacy push_enabled_repos; migrate it first")
     repo_overrides = cfg.get("repo_overrides")
     if not isinstance(repo_overrides, dict):
         raise BridgeError("config repo_overrides must be an object keyed by repository ID")
@@ -427,12 +429,9 @@ def _setup_repository_roots(cfg: dict[str, Any]) -> list[dict[str, Any]]:
 
     add_more = not roots or _setup_yes_no("Add another repository folder?", default=False)
     while add_more:
-        raw_path = _setup_input("Repository folder: ").strip()
+        raw_path = _setup_input("Repository folder (leave blank for none/done): ").strip()
         if not raw_path:
-            if roots:
-                break
-            print("Enter a folder containing one or more Git repositories.")
-            continue
+            break
         path = Path(raw_path).expanduser().resolve()
         if not path.is_dir():
             print(f"Folder does not exist: {path}")
@@ -492,9 +491,9 @@ def refresh_registry(cfg: dict[str, Any], *, publish: bool = True) -> dict[str, 
     roots = _configured_root_paths(cfg)
     previous = load_json(REGISTRY_FILE) if REGISTRY_FILE.exists() else None
     registry = build_registry(roots, previous=previous)
-    save_json(REGISTRY_FILE, registry)
     if publish:
         publish_registry(cfg, registry)
+    save_json(REGISTRY_FILE, registry)
     return registry
 
 
@@ -560,10 +559,7 @@ def refresh_registry_membership(cfg: dict[str, Any], *, publish: bool = True) ->
         "last_updated": len(updated),
         "capabilities_hash": capabilities_hash,
     }
-    capabilities_changed = (
-        previous_capabilities_hash is not None
-        and previous_capabilities_hash != capabilities_hash
-    )
+    capabilities_changed = previous_capabilities_hash != capabilities_hash
     changed = (
         bool(added or removed or updated)
         or not REGISTRY_FILE.exists()
@@ -656,9 +652,9 @@ def refresh_repo_entry(cfg: dict[str, Any], repo_ref: str, *, publish: bool = Tr
         }
     )
     registry["generated_at"] = utc_now()
-    save_json(REGISTRY_FILE, registry)
     if publish:
         publish_registry(cfg, registry)
+    save_json(REGISTRY_FILE, registry)
     return registry, repo_id, entry
 
 
