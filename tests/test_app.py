@@ -284,6 +284,9 @@ class AppTests(unittest.TestCase):
     def test_auto_discovery_does_not_publish_when_membership_is_unchanged(self):
         cfg = dict(self.cfg)
         cfg["registry_scan_interval"] = 5.0
+        registry = app.refresh_registry_membership(cfg, publish=False)
+        registry["discovery"]["last_scan_epoch"] = 0.0
+        save_json(app.REGISTRY_FILE, registry)
 
         self.assertEqual(app.process_pending_once(cfg), 0)
 
@@ -314,13 +317,14 @@ class AppTests(unittest.TestCase):
         self.assertEqual(refreshed["discovery"]["last_updated"], 0)
 
     def test_auto_discovery_does_not_publish_for_equivalent_canonical_path(self):
-        registry = json.loads(app.REGISTRY_FILE.read_text(encoding="utf-8"))
+        cfg = dict(self.cfg)
+        cfg["registry_scan_interval"] = 5.0
+        registry = app.refresh_registry_membership(cfg, publish=False)
         registry["repos"]["repo"]["path"] = str(
             self.tmp / ".." / self.tmp.name / "repo"
         )
+        registry["discovery"]["last_scan_epoch"] = 0.0
         save_json(app.REGISTRY_FILE, registry)
-        cfg = dict(self.cfg)
-        cfg["registry_scan_interval"] = 5.0
 
         self.assertEqual(app.process_pending_once(cfg), 0)
 
