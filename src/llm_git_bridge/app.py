@@ -92,12 +92,12 @@ def _ensure_private_dirs() -> None:
 
 def default_config() -> dict[str, Any]:
     return {
-        "version": 1,
+        "version": 2,
         "transport": {"type": "rclone", "remote": None, "rc_enabled": True},
         "roots": [],
+        "repo_overrides": {},
         "safe_branch_prefix": "ai/",
         "allow_commit": True,
-        "push_enabled_repos": [],
         "poll_interval": 1.0,
         "registry_scan_interval": 30.0,
         "max_workers": 1,
@@ -117,6 +117,91 @@ def _validate_poll_interval(value: Any) -> float:
     return float(value)
 
 
+def _normalise_runtime_root(root: Any) -> dict[str, Any]:
+    """Return one root policy in the canonical in-memory shape.
+
+    Runtime callers accept legacy string roots so already-constructed configs in
+    tests/embedders keep working while persisted configuration is migrated to v2.
+    """
+    if isinstance(root, str) and root.strip():
+        return {"path": root, "push": False}
+    if not isinstance(root, dict):
+        raise BridgeError("config roots must contain root policy objects")
+    path = root.get("path")
+    if not isinstance(path, str) or not path.strip():
+        raise BridgeError("config root path must be a non-empty string")
+    extra = set(root) - {"path", "push"}
+    if extra:
+        raise BridgeError(f"config root policy has unknown fields: {', '.join(sorted(extra))}")
+    push = root.get("push", False)
+    if not isinstance(push, bool):
+        raise BridgeError("config root push policy must be a boolean")
+    return {"path": path, "push": push}
+
+
+def _configured_roots(cfg: dict[str, Any]) -> list[dict[str, Any]]:
+    roots = cfg.get("roots", [])
+    if not isinstance(roots, list):
+        raise BridgeError("config roots must be a list")
+    return [_normalise_runtime_root(root) for root in roots]
+
+
+def _configured_root_paths(cfg: dict[str, Any]) -> list[Path]:
+    return [Path(root["path"]) for root in _configured_roots(cfg)]
+
+
+def _migrate_config(raw: dict[str, Any]) -> dict[str, Any]:
+    """Migrate persisted v1 configuration without broadening permissions."""
+    if not isinstance(raw, dict):
+        raise BridgeError("config must be a JSON object")
+    version = raw.get("version", 1)
+    if version == 2:
+        return dict(raw)
+    if version != 1:
+        raise BridgeError("unsupported config version")
+
+    roots = raw.get("roots", [])
+    if not isinstance(roots, list) or not all(isinstance(x, str) and x.strip() for x in roots):
+        raise BridgeError("config roots must be a list of non-empty paths")
+    push_enabled = raw.get("push_enabled_repos", [])
+    if not isinstance(push_enabled, list) or not all(isinstance(x, str) and x for x in push_enabled):
+        raise BridgeError("config push_enabled_repos must be a list of repository IDs")
+
+    migrated = dict(raw)
+    migrated["version"] = 2
+    migrated["roots"] = [{"path": path, "push": False} for path in roots]
+    migrated["repo_overrides"] = {
+        repo_id: {"push": True} for repo_id in sorted(set(push_enabled))
+    }
+    migrated.pop("push_enabled_repos", None)
+    return migrated
+
+
+def _repo_push_allowed(cfg: dict[str, Any], repo_id: str, repo_path: Path) -> bool:
+    """Return effective push policy using repo override then most-specific root."""
+    overrides = cfg.get("repo_overrides", {})
+    if isinstance(overrides, dict):
+        override = overrides.get(repo_id)
+        if isinstance(override, dict) and isinstance(override.get("push"), bool):
+            return bool(override["push"])
+
+    # Transitional runtime compatibility for callers that construct pre-v2
+    # config dictionaries directly rather than loading persisted configuration.
+    legacy_enabled = cfg.get("push_enabled_repos", [])
+    if isinstance(legacy_enabled, list) and repo_id in legacy_enabled:
+        return True
+
+    resolved_repo = Path(repo_path).expanduser().resolve()
+    matches: list[tuple[int, str, bool]] = []
+    for root in _configured_roots(cfg):
+        resolved_root = Path(root["path"]).expanduser().resolve()
+        if resolved_repo == resolved_root or resolved_root in resolved_repo.parents:
+            matches.append((len(resolved_root.parts), str(resolved_root), bool(root["push"])))
+    if not matches:
+        return False
+    return max(matches)[2]
+
+
 def _validate_registry_scan_interval(value: Any) -> float:
     if (
         isinstance(value, bool)
@@ -129,7 +214,7 @@ def _validate_registry_scan_interval(value: Any) -> float:
 
 
 def _validate_config(cfg: dict[str, Any]) -> dict[str, Any]:
-    if cfg.get("version") != 1:
+    if cfg.get("version") != 2:
         raise BridgeError("unsupported config version")
 
     transport = cfg.get("transport")
@@ -144,8 +229,17 @@ def _validate_config(cfg: dict[str, Any]) -> dict[str, Any]:
         raise BridgeError("config transport rc_enabled must be a boolean")
 
     roots = cfg.get("roots")
-    if not isinstance(roots, list) or not all(isinstance(x, str) and x.strip() for x in roots):
-        raise BridgeError("config roots must be a list of non-empty paths")
+    if not isinstance(roots, list):
+        raise BridgeError("config roots must be a list of root policy objects")
+    seen_roots: set[str] = set()
+    for root in roots:
+        if not isinstance(root, dict):
+            raise BridgeError("config roots must contain root policy objects")
+        normalised = _normalise_runtime_root(root)
+        canonical = str(Path(normalised["path"]).expanduser().resolve())
+        if canonical in seen_roots:
+            raise BridgeError("config roots must not contain duplicate canonical paths")
+        seen_roots.add(canonical)
 
     prefix = cfg.get("safe_branch_prefix")
     if (
@@ -168,9 +262,14 @@ def _validate_config(cfg: dict[str, Any]) -> dict[str, Any]:
 
     if not isinstance(cfg.get("allow_commit"), bool):
         raise BridgeError("config allow_commit must be a boolean")
-    push_enabled = cfg.get("push_enabled_repos")
-    if not isinstance(push_enabled, list) or not all(isinstance(x, str) and x for x in push_enabled):
-        raise BridgeError("config push_enabled_repos must be a list of repository IDs")
+    repo_overrides = cfg.get("repo_overrides")
+    if not isinstance(repo_overrides, dict):
+        raise BridgeError("config repo_overrides must be an object keyed by repository ID")
+    for repo_id, policy in repo_overrides.items():
+        if not isinstance(repo_id, str) or not repo_id:
+            raise BridgeError("config override repository IDs must be non-empty strings")
+        if not isinstance(policy, dict) or set(policy) != {"push"} or not isinstance(policy.get("push"), bool):
+            raise BridgeError("config repository overrides must contain exactly one boolean push field")
 
     try:
         _validate_poll_interval(cfg.get("poll_interval"))
@@ -219,7 +318,7 @@ def _validate_config(cfg: dict[str, Any]) -> dict[str, Any]:
 def load_config() -> dict[str, Any]:
     if not CONFIG_FILE.exists():
         return default_config()
-    raw = load_json(CONFIG_FILE)
+    raw = _migrate_config(load_json(CONFIG_FILE))
     base = default_config()
     transport = raw.pop("transport", None) if "transport" in raw else None
     base.update(raw)
@@ -265,7 +364,7 @@ def publish_registry(cfg: dict[str, Any], registry: dict[str, Any]) -> None:
 
 
 def refresh_registry(cfg: dict[str, Any], *, publish: bool = True) -> dict[str, Any]:
-    roots = [Path(x) for x in cfg.get("roots", [])]
+    roots = _configured_root_paths(cfg)
     previous = load_json(REGISTRY_FILE) if REGISTRY_FILE.exists() else None
     registry = build_registry(roots, previous=previous)
     save_json(REGISTRY_FILE, registry)
@@ -314,7 +413,7 @@ def refresh_registry_membership(cfg: dict[str, Any], *, publish: bool = True) ->
         "repos": {},
     }
     started = time.monotonic()
-    roots = [Path(x) for x in cfg.get("roots", [])]
+    roots = _configured_root_paths(cfg)
     registry, added, removed, updated = reconcile_registry_membership(roots, previous)
     duration_s = round(time.monotonic() - started, 4)
     registry["discovery"] = {
@@ -1729,7 +1828,7 @@ def _prepare_transaction_worker_task(
         commands_json=commands_json,
         safe_branch_prefix=str(cfg.get("safe_branch_prefix", "ai/")),
         allow_commit=bool(cfg.get("allow_commit", True)),
-        allow_push=repo_id in {str(x) for x in cfg.get("push_enabled_repos", [])},
+        allow_push=_repo_push_allowed(cfg, repo_id, Path(entry["path"])),
     )
 
 
@@ -2469,10 +2568,11 @@ def cmd_setup(args: argparse.Namespace) -> int:
 def cmd_add_root(args: argparse.Namespace) -> int:
     cfg = load_config()
     root = str(Path(args.path).expanduser().resolve())
-    roots = [str(Path(x).expanduser().resolve()) for x in cfg.get("roots", [])]
-    if root not in roots:
-        roots.append(root)
-    cfg["roots"] = sorted(set(roots))
+    roots = _configured_roots(cfg)
+    canonical = {str(Path(item["path"]).expanduser().resolve()) for item in roots}
+    if root not in canonical:
+        roots.append({"path": root, "push": False})
+    cfg["roots"] = sorted(roots, key=lambda item: str(Path(item["path"]).expanduser().resolve()).lower())
     save_config(cfg)
     registry = refresh_registry(cfg, publish=True)
     print(f"registered roots: {len(cfg['roots'])}; repositories: {len(registry.get('repos', {}))}")
@@ -2773,12 +2873,8 @@ def cmd_configure_push(args: argparse.Namespace) -> int:
     cfg = load_config()
     registry = load_registry()
     repo_id, _entry = resolve_repo(registry, args.repo)
-    enabled = {str(x) for x in cfg.get("push_enabled_repos", [])}
-    if args.action == "enable":
-        enabled.add(repo_id)
-    else:
-        enabled.discard(repo_id)
-    cfg["push_enabled_repos"] = sorted(enabled)
+    overrides = cfg.setdefault("repo_overrides", {})
+    overrides[repo_id] = {"push": args.action == "enable"}
     save_config(cfg)
     print(f"push {'enabled' if args.action == 'enable' else 'disabled'} for {repo_id}")
     return 0

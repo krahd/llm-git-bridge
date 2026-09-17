@@ -2072,7 +2072,73 @@ class AppTests(unittest.TestCase):
         self.assertEqual(bytes.fromhex(migrated.read_text().strip()), expected)
 
     def test_push_is_disabled_by_default(self):
-        self.assertEqual(app.default_config()["push_enabled_repos"], [])
+        cfg = app.default_config()
+        self.assertEqual(cfg["version"], 2)
+        self.assertEqual(cfg["roots"], [])
+        self.assertEqual(cfg["repo_overrides"], {})
+
+    def test_v1_config_migration_preserves_push_without_broadening_root_policy(self):
+        temp = Path(tempfile.mkdtemp(prefix="llmgb-config-migrate-"))
+        old_config_file = app.CONFIG_FILE
+        app.CONFIG_FILE = temp / "config.json"
+        self.addCleanup(setattr, app, "CONFIG_FILE", old_config_file)
+        save_json(app.CONFIG_FILE, {
+            **app.default_config(),
+            "version": 1,
+            "transport": {"type": "rclone", "remote": "fake", "rc_enabled": True},
+            "roots": [str(temp)],
+            "push_enabled_repos": ["repo-b", "repo-a", "repo-a"],
+            "repo_overrides": {},
+        })
+
+        loaded = app.load_config()
+
+        self.assertEqual(loaded["version"], 2)
+        self.assertEqual(loaded["roots"], [{"path": str(temp), "push": False}])
+        self.assertEqual(
+            loaded["repo_overrides"],
+            {"repo-a": {"push": True}, "repo-b": {"push": True}},
+        )
+        self.assertTrue(app._repo_push_allowed(loaded, "repo-a", temp / "repo-a"))
+        self.assertFalse(app._repo_push_allowed(loaded, "new-repo", temp / "new-repo"))
+
+    def test_effective_push_uses_repo_override_then_most_specific_root(self):
+        temp = Path(tempfile.mkdtemp(prefix="llmgb-root-policy-"))
+        outer = temp / "repos"
+        nested = outer / "client"
+        cfg = app.default_config()
+        cfg["roots"] = [
+            {"path": str(outer), "push": True},
+            {"path": str(nested), "push": False},
+        ]
+
+        self.assertTrue(app._repo_push_allowed(cfg, "outer-repo", outer / "project"))
+        self.assertFalse(app._repo_push_allowed(cfg, "nested-repo", nested / "project"))
+        cfg["repo_overrides"]["nested-repo"] = {"push": True}
+        self.assertTrue(app._repo_push_allowed(cfg, "nested-repo", nested / "project"))
+        cfg["repo_overrides"]["outer-repo"] = {"push": False}
+        self.assertFalse(app._repo_push_allowed(cfg, "outer-repo", outer / "project"))
+        self.assertFalse(app._repo_push_allowed(cfg, "elsewhere", temp / "elsewhere"))
+
+    def test_v2_config_rejects_duplicate_canonical_roots_and_bad_policies(self):
+        temp = Path(tempfile.mkdtemp(prefix="llmgb-root-policy-"))
+        duplicate = app.default_config()
+        duplicate["roots"] = [
+            {"path": str(temp), "push": False},
+            {"path": str(temp / "."), "push": True},
+        ]
+        with self.assertRaisesRegex(BridgeError, "duplicate canonical paths"):
+            app._validate_config(duplicate)
+
+        bad_root = app.default_config()
+        bad_root["roots"] = [{"path": str(temp), "push": "yes"}]
+        with self.assertRaisesRegex(BridgeError, "push policy"):
+            app._validate_config(bad_root)
+
+        bad_override = app.default_config()
+        bad_override["repo_overrides"] = {"repo": {"push": True, "extra": False}}
+        with self.assertRaisesRegex(BridgeError, "exactly one boolean push field"):
+            app._validate_config(bad_override)
 
     def test_materialize_request_is_remote_triggerable(self):
         repo_id = next(iter(json.loads(app.REGISTRY_FILE.read_text())["repos"]))
@@ -3495,7 +3561,7 @@ class TransportTests(unittest.TestCase):
         self.addCleanup(setattr, app, "CONFIG_FILE", old_config_file)
         base = app.default_config()
         base["transport"]["remote"] = "fake"
-        base["roots"] = [str(temp)]
+        base["roots"] = [{"path": str(temp), "push": False}]
         cases = [
             {**base, "transport": "not-an-object"},
             {**base, "poll_interval": float("nan")},
@@ -3519,7 +3585,7 @@ class TransportTests(unittest.TestCase):
         self.addCleanup(setattr, app, "CONFIG_FILE", old_config_file)
         cfg = app.default_config()
         cfg["transport"]["remote"] = "fake"
-        cfg["roots"] = [str(temp)]
+        cfg["roots"] = [{"path": str(temp), "push": False}]
         cfg["commands"] = {"demo": {"test": ["python3", "-m", "unittest"]}}
         save_json(app.CONFIG_FILE, cfg)
         loaded = app.load_config()
