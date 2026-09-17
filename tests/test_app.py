@@ -2140,6 +2140,100 @@ class AppTests(unittest.TestCase):
         with self.assertRaisesRegex(BridgeError, "exactly one boolean push field"):
             app._validate_config(bad_override)
 
+    def test_root_policy_compaction_preserves_meaningful_nested_override(self):
+        temp = Path(tempfile.mkdtemp(prefix="llmgb-root-compact-"))
+        outer = temp / "repos"
+        middle = outer / "client"
+        deep = middle / "private"
+        roots = app._prune_redundant_roots([
+            {"path": str(deep), "push": True},
+            {"path": str(outer), "push": True},
+            {"path": str(middle), "push": False},
+            {"path": str(outer / "redundant"), "push": True},
+        ])
+
+        by_path = {root["path"]: root["push"] for root in roots}
+        self.assertEqual(by_path[str(outer.resolve())], True)
+        self.assertEqual(by_path[str(middle.resolve())], False)
+        self.assertEqual(by_path[str(deep.resolve())], True)
+        self.assertNotIn(str((outer / "redundant").resolve()), by_path)
+
+    def test_roots_cli_manages_multiple_roots_and_avoids_redundant_nested_root(self):
+        cfg = app.default_config()
+        cfg["transport"]["remote"] = "fake"
+        app.save_config(cfg)
+        outer = self.tmp / "managed"
+        nested = outer / "nested"
+        other = self.tmp / "other"
+        nested.mkdir(parents=True)
+        other.mkdir()
+        parser = app.build_parser()
+
+        with patch("builtins.print"):
+            self.assertEqual(
+                app.cmd_roots_add(parser.parse_args(["roots", "add", str(outer), "--push", "enable"])),
+                0,
+            )
+            self.assertEqual(
+                app.cmd_roots_add(parser.parse_args(["roots", "add", str(nested)])),
+                0,
+            )
+            self.assertEqual(
+                app.cmd_roots_add(parser.parse_args(["roots", "add", str(other)])),
+                0,
+            )
+
+        loaded = app.load_config()
+        self.assertEqual(
+            {root["path"]: root["push"] for root in loaded["roots"]},
+            {str(outer.resolve()): True, str(other.resolve()): False},
+        )
+
+        with patch("builtins.print"):
+            self.assertEqual(
+                app.cmd_roots_add(parser.parse_args(["roots", "add", str(nested), "--push", "disable"])),
+                0,
+            )
+        loaded = app.load_config()
+        self.assertEqual(
+            {root["path"]: root["push"] for root in loaded["roots"]}[str(nested.resolve())],
+            False,
+        )
+
+        with patch("builtins.print"):
+            self.assertEqual(
+                app.cmd_roots_remove(parser.parse_args(["roots", "remove", str(nested)])),
+                0,
+            )
+        self.assertNotIn(
+            str(nested.resolve()),
+            {root["path"] for root in app.load_config()["roots"]},
+        )
+
+    def test_configure_push_parser_supports_returning_to_root_inheritance(self):
+        args = app.build_parser().parse_args(["configure-push", "demo", "inherit"])
+        self.assertEqual(args.action, "inherit")
+
+    def test_configure_push_inherit_removes_override_and_republishes_capability(self):
+        cfg = app.default_config()
+        cfg["transport"]["remote"] = "fake"
+        cfg["roots"] = [{"path": str(self.tmp), "push": True}]
+        cfg["repo_overrides"] = {"repo": {"push": False}}
+        app.save_config(cfg)
+        args = app.build_parser().parse_args(["configure-push", "repo", "inherit"])
+
+        with patch("builtins.print"):
+            self.assertEqual(app.cmd_configure_push(args), 0)
+
+        loaded = app.load_config()
+        self.assertNotIn("repo", loaded["repo_overrides"])
+        public = json.loads(self.fake.files["v2/meta/repos.json"])
+        entry = next(item for item in public["repos"] if item["id"] == "repo")
+        self.assertEqual(
+            entry["capabilities"],
+            {"read": True, "edit": True, "push": True},
+        )
+
     def test_materialize_request_is_remote_triggerable(self):
         repo_id = next(iter(json.loads(app.REGISTRY_FILE.read_text())["repos"]))
         txid = "tx-materialize"

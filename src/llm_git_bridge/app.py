@@ -150,6 +150,35 @@ def _configured_root_paths(cfg: dict[str, Any]) -> list[Path]:
     return [Path(root["path"]) for root in _configured_roots(cfg)]
 
 
+def _inherited_root_push(roots: list[dict[str, Any]], repo_path: Path) -> bool | None:
+    resolved_repo = Path(repo_path).expanduser().resolve()
+    matches: list[tuple[int, str, bool]] = []
+    for root in roots:
+        resolved_root = Path(root["path"]).expanduser().resolve()
+        if resolved_repo == resolved_root or resolved_root in resolved_repo.parents:
+            matches.append((len(resolved_root.parts), str(resolved_root), bool(root["push"])))
+    if not matches:
+        return None
+    return max(matches)[2]
+
+
+def _prune_redundant_roots(roots: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    canonical: dict[str, dict[str, Any]] = {}
+    for root in roots:
+        normalised = _normalise_runtime_root(root)
+        path = str(Path(normalised["path"]).expanduser().resolve())
+        canonical[path] = {"path": path, "push": bool(normalised["push"])}
+
+    kept: list[dict[str, Any]] = []
+    ordered = sorted(canonical.values(), key=lambda item: (len(Path(item["path"]).parts), item["path"].lower()))
+    for root in ordered:
+        inherited = _inherited_root_push(kept, Path(root["path"]))
+        if inherited is not None and inherited == root["push"]:
+            continue
+        kept.append(root)
+    return kept
+
+
 def _migrate_config(raw: dict[str, Any]) -> dict[str, Any]:
     """Migrate persisted v1 configuration without broadening permissions."""
     if not isinstance(raw, dict):
@@ -191,15 +220,8 @@ def _repo_push_allowed(cfg: dict[str, Any], repo_id: str, repo_path: Path) -> bo
     if isinstance(legacy_enabled, list) and repo_id in legacy_enabled:
         return True
 
-    resolved_repo = Path(repo_path).expanduser().resolve()
-    matches: list[tuple[int, str, bool]] = []
-    for root in _configured_roots(cfg):
-        resolved_root = Path(root["path"]).expanduser().resolve()
-        if resolved_repo == resolved_root or resolved_root in resolved_repo.parents:
-            matches.append((len(resolved_root.parts), str(resolved_root), bool(root["push"])))
-    if not matches:
-        return False
-    return max(matches)[2]
+    inherited = _inherited_root_push(_configured_roots(cfg), repo_path)
+    return bool(inherited) if inherited is not None else False
 
 
 def _validate_registry_scan_interval(value: Any) -> float:
@@ -2578,17 +2600,74 @@ def cmd_setup(args: argparse.Namespace) -> int:
 
 
 def cmd_add_root(args: argparse.Namespace) -> int:
+    return cmd_roots_add(argparse.Namespace(path=args.path, push=None))
+
+
+def cmd_roots_list(args: argparse.Namespace) -> int:
     cfg = load_config()
-    root = str(Path(args.path).expanduser().resolve())
+    roots = _prune_redundant_roots(_configured_roots(cfg))
+    if not roots:
+        print("no repository roots configured")
+        return 0
+    for root in roots:
+        print(f"{root['path']}\tpush={'enabled' if root['push'] else 'disabled'}")
+    return 0
+
+
+def cmd_roots_add(args: argparse.Namespace) -> int:
+    cfg = load_config()
+    path = str(Path(args.path).expanduser().resolve())
     roots = _configured_roots(cfg)
-    canonical = {str(Path(item["path"]).expanduser().resolve()) for item in roots}
-    if root not in canonical:
-        roots.append({"path": root, "push": False})
-    cfg["roots"] = sorted(roots, key=lambda item: str(Path(item["path"]).expanduser().resolve()).lower())
+    existing = next(
+        (root for root in roots if str(Path(root["path"]).expanduser().resolve()) == path),
+        None,
+    )
+    if existing is None:
+        inherited = _inherited_root_push(roots, Path(path))
+        push = args.push == "enable" if args.push is not None else bool(inherited)
+        roots.append({"path": path, "push": push})
+    elif args.push is not None:
+        existing["push"] = args.push == "enable"
+    cfg["roots"] = _prune_redundant_roots(roots)
     save_config(cfg)
     registry = refresh_registry(cfg, publish=True)
-    print(f"registered roots: {len(cfg['roots'])}; repositories: {len(registry.get('repos', {}))}")
+    retained = any(root["path"] == path for root in cfg["roots"])
+    if retained:
+        policy = next(root for root in cfg["roots"] if root["path"] == path)
+        print(
+            f"repository root configured: {path} "
+            f"(push={'enabled' if policy['push'] else 'disabled'}); "
+            f"repositories: {len(registry.get('repos', {}))}"
+        )
+    else:
+        inherited = _inherited_root_push(cfg["roots"], Path(path))
+        print(
+            f"repository root already covered by an equivalent parent policy: {path} "
+            f"(push={'enabled' if inherited else 'disabled'}); "
+            f"repositories: {len(registry.get('repos', {}))}"
+        )
     return 0
+
+
+def cmd_roots_remove(args: argparse.Namespace) -> int:
+    cfg = load_config()
+    path = str(Path(args.path).expanduser().resolve())
+    roots = [
+        root
+        for root in _configured_roots(cfg)
+        if str(Path(root["path"]).expanduser().resolve()) != path
+    ]
+    if len(roots) == len(_configured_roots(cfg)):
+        raise BridgeError(f"repository root is not configured: {path}")
+    cfg["roots"] = _prune_redundant_roots(roots)
+    save_config(cfg)
+    registry = refresh_registry(cfg, publish=True)
+    print(f"repository root removed: {path}; repositories: {len(registry.get('repos', {}))}")
+    return 0
+
+
+def cmd_roots_scan(args: argparse.Namespace) -> int:
+    return cmd_scan(args)
 
 
 def cmd_scan(_args: argparse.Namespace) -> int:
@@ -2886,10 +2965,16 @@ def cmd_configure_push(args: argparse.Namespace) -> int:
     registry = load_registry()
     repo_id, _entry = resolve_repo(registry, args.repo)
     overrides = cfg.setdefault("repo_overrides", {})
-    overrides[repo_id] = {"push": args.action == "enable"}
+    if args.action == "inherit":
+        overrides.pop(repo_id, None)
+    else:
+        overrides[repo_id] = {"push": args.action == "enable"}
     save_config(cfg)
     publish_registry(cfg, registry)
-    print(f"push {'enabled' if args.action == 'enable' else 'disabled'} for {repo_id}")
+    if args.action == "inherit":
+        print(f"push policy inherited from repository root for {repo_id}")
+    else:
+        print(f"push {'enabled' if args.action == 'enable' else 'disabled'} for {repo_id}")
     return 0
 
 
@@ -2904,6 +2989,24 @@ def build_parser() -> argparse.ArgumentParser:
     s = sub.add_parser("add-root")
     s.add_argument("path")
     s.set_defaults(func=cmd_add_root)
+
+    s = sub.add_parser("roots")
+    roots_sub = s.add_subparsers(dest="roots_command", required=True)
+
+    roots_cmd = roots_sub.add_parser("list")
+    roots_cmd.set_defaults(func=cmd_roots_list)
+
+    roots_cmd = roots_sub.add_parser("add")
+    roots_cmd.add_argument("path")
+    roots_cmd.add_argument("--push", choices=["enable", "disable"])
+    roots_cmd.set_defaults(func=cmd_roots_add)
+
+    roots_cmd = roots_sub.add_parser("remove")
+    roots_cmd.add_argument("path")
+    roots_cmd.set_defaults(func=cmd_roots_remove)
+
+    roots_cmd = roots_sub.add_parser("scan")
+    roots_cmd.set_defaults(func=cmd_roots_scan)
 
     s = sub.add_parser("scan")
     s.set_defaults(func=cmd_scan)
@@ -2942,7 +3045,7 @@ def build_parser() -> argparse.ArgumentParser:
 
     s = sub.add_parser("configure-push")
     s.add_argument("repo")
-    s.add_argument("action", choices=["enable", "disable"])
+    s.add_argument("action", choices=["enable", "disable", "inherit"])
     s.set_defaults(func=cmd_configure_push)
 
     return p
