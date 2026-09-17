@@ -40,6 +40,7 @@ from .core import (
     retire_worktree,
     run,
     resolve_repo,
+    atomic_write_text,
     save_json,
     strict_json_loads,
     utc_now,
@@ -352,7 +353,20 @@ def load_config() -> dict[str, Any]:
 
 
 def save_config(cfg: dict[str, Any]) -> None:
-    save_json(CONFIG_FILE, _validate_config(cfg))
+    validated = _validate_config(cfg)
+    if CONFIG_FILE.exists():
+        current = load_json(CONFIG_FILE)
+        current_version = current.get("version", 1) if isinstance(current, dict) else None
+        target_version = validated.get("version")
+        if current_version == 1 and target_version == 2:
+            backup = CONFIG_FILE.with_name("config.v1-backup.json")
+            if not backup.exists():
+                atomic_write_text(backup, CONFIG_FILE.read_text(encoding="utf-8"))
+                try:
+                    os.chmod(backup, 0o600)
+                except OSError:
+                    pass
+    save_json(CONFIG_FILE, validated)
 
 
 def detect_rclone_remote() -> str:
@@ -422,6 +436,15 @@ def _setup_repository_roots(cfg: dict[str, Any]) -> list[dict[str, Any]]:
         roots = _prune_redundant_roots(roots)
         add_more = _setup_yes_no("Add another repository folder?", default=False)
     return roots
+
+
+def _print_setup_readiness() -> None:
+    print(f"git: {'available' if shutil.which('git') else 'missing'}")
+    print(f"rclone: {'available' if shutil.which('rclone') else 'missing'}")
+    if sys.platform == "darwin":
+        print(f"automatic watcher: {'installed' if PLIST_PATH.exists() else 'not installed'} (macOS LaunchAgent)")
+    else:
+        print("automatic watcher: use your operating system's process supervisor")
 
 
 def transport_from_config(cfg: dict[str, Any]) -> RcloneTransport:
@@ -2678,6 +2701,7 @@ def cmd_setup(args: argparse.Namespace) -> int:
     print(f"repository roots: {len(cfg['roots'])}")
     print(f"repositories discovered: {len(registry.get('repos', {}))}")
     print(f"repositories with inherited/effective push permission: {push_enabled}")
+    _print_setup_readiness()
     if not interactive:
         print("Run 'llm-git-bridge setup' in a terminal to configure repository roots interactively.")
     return 0

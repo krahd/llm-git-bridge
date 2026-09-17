@@ -2299,6 +2299,40 @@ class AppTests(unittest.TestCase):
         mocked_input.assert_not_called()
         self.assertEqual(app.load_config()["roots"], cfg["roots"])
 
+    def test_saving_migrated_v1_config_preserves_one_private_backup(self):
+        legacy = {
+            **app.default_config(),
+            "version": 1,
+            "roots": [str(self.tmp)],
+            "push_enabled_repos": ["repo"],
+            "repo_overrides": {},
+        }
+        save_json(app.CONFIG_FILE, legacy)
+
+        migrated = app.load_config()
+        app.save_config(migrated)
+
+        backup = app.CONFIG_FILE.with_name("config.v1-backup.json")
+        self.assertTrue(backup.exists())
+        self.assertEqual(json.loads(backup.read_text(encoding="utf-8"))["version"], 1)
+        self.assertEqual(json.loads(app.CONFIG_FILE.read_text(encoding="utf-8"))["version"], 2)
+        self.assertEqual(backup.stat().st_mode & 0o777, 0o600)
+        original_backup = backup.read_text(encoding="utf-8")
+
+        migrated["poll_interval"] = 2.0
+        app.save_config(migrated)
+        self.assertEqual(backup.read_text(encoding="utf-8"), original_backup)
+
+    def test_setup_readiness_is_platform_specific_without_side_effects(self):
+        with patch("llm_git_bridge.app.shutil.which", side_effect=lambda name: f"/usr/bin/{name}"), patch(
+            "llm_git_bridge.app.sys.platform", "darwin"
+        ), patch("llm_git_bridge.app.PLIST_PATH", self.tmp / "missing.plist"), patch("builtins.print") as mocked:
+            app._print_setup_readiness()
+        output = "\n".join(str(call.args[0]) for call in mocked.call_args_list)
+        self.assertIn("git: available", output)
+        self.assertIn("rclone: available", output)
+        self.assertIn("automatic watcher: not installed", output)
+
     def test_materialize_request_is_remote_triggerable(self):
         repo_id = next(iter(json.loads(app.REGISTRY_FILE.read_text())["repos"]))
         txid = "tx-materialize"
