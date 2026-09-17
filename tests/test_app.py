@@ -2988,6 +2988,34 @@ class AppTests(unittest.TestCase):
         self.assertEqual(app.process_pending_once(self.cfg), 1)
         self.assertTrue((app.PUBLISHED_DIR / filename).exists())
 
+    def test_mailbox_scope_is_created_bound_and_reused(self):
+        scope = app._ensure_mailbox_scope(self.fake)
+        self.assertRegex(scope, r"^[0-9a-f]{64}$")
+        self.assertEqual(app._bound_mailbox_scope(), scope)
+        remote = json.loads(self.fake.files["v2/meta/mailbox-scope.json"])
+        self.assertEqual(app._validated_mailbox_scope_document(remote), scope)
+        self.assertEqual(app._ensure_mailbox_scope(self.fake), scope)
+
+    def test_mailbox_retarget_is_rejected_after_scope_binding(self):
+        scope = app._ensure_mailbox_scope(self.fake)
+        self.assertEqual(app._bound_mailbox_scope(), scope)
+        self.fake.files.pop("v2/meta/mailbox-scope.json")
+        with self.assertRaisesRegex(BridgeError, "bound replay scope"):
+            app._ensure_mailbox_scope(self.fake)
+
+    def test_legacy_publication_marker_migrates_only_after_mailbox_binding(self):
+        filename = "tx-legacy-scope.json"
+        save_json(app._published_marker(filename), {
+            "filename": filename,
+            "published_at": "test",
+            "source": "legacy",
+        })
+        legacy = app._load_published_marker(filename)
+        self.assertNotIn("mailbox_scope", legacy)
+        scope = app._ensure_mailbox_scope(self.fake)
+        migrated = app._load_published_marker(filename)
+        self.assertEqual(migrated["mailbox_scope"], scope)
+
     def test_startup_reconciliation_prevents_replay_after_local_state_loss(self):
         txid = "tx-already"
         self.fake.files[f"v2/transactions/{txid}.json"] = json.dumps({

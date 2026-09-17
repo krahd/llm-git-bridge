@@ -241,6 +241,8 @@ def _validate_registry_scan_interval(value: Any) -> float:
 
 
 def _validate_config(cfg: dict[str, Any]) -> dict[str, Any]:
+    if "push_enabled_repos" in cfg:
+        raise BridgeError("config v2 must not contain legacy push_enabled_repos; migrate it first")
     allowed_fields = set(default_config())
     unknown_fields = set(cfg) - allowed_fields
     if unknown_fields:
@@ -301,8 +303,6 @@ def _validate_config(cfg: dict[str, Any]) -> dict[str, Any]:
 
     if not isinstance(cfg.get("allow_commit"), bool):
         raise BridgeError("config allow_commit must be a boolean")
-    if "push_enabled_repos" in cfg:
-        raise BridgeError("config v2 must not contain legacy push_enabled_repos; migrate it first")
     repo_overrides = cfg.get("repo_overrides")
     if not isinstance(repo_overrides, dict):
         raise BridgeError("config repo_overrides must be an object keyed by repository ID")
@@ -731,6 +731,7 @@ def _load_published_marker(filename: str) -> dict[str, Any] | None:
         _quarantine_corrupt_marker(filename, marker_path)
         return None
     request_bytes_sha256 = marker.get("request_bytes_sha256")
+    marker_scope = marker.get("mailbox_scope")
     if (
         marker.get("filename") != filename
         or not isinstance(marker.get("published_at"), str)
@@ -739,14 +740,30 @@ def _load_published_marker(filename: str) -> dict[str, Any] | None:
             request_bytes_sha256 is not None
             and (not isinstance(request_bytes_sha256, str) or not re.fullmatch(r"[0-9a-f]{64}", request_bytes_sha256))
         )
+        or (marker_scope is not None and (not isinstance(marker_scope, str) or not re.fullmatch(r"[0-9a-f]{64}", marker_scope)))
     ):
         _quarantine_corrupt_marker(filename, marker_path)
         return None
+
+    bound_scope = _bound_mailbox_scope()
+    if bound_scope is not None:
+        if marker_scope is None:
+            # One-time authenticated RC6 migration: only a locally trusted legacy
+            # marker may be adopted, and only after the mailbox itself has been
+            # authenticated and durably bound.
+            marker["mailbox_scope"] = bound_scope
+            save_json(marker_path, marker)
+        elif not hmac.compare_digest(marker_scope, bound_scope):
+            _quarantine_corrupt_marker(filename, marker_path)
+            return None
     return marker
 
 
 def _mark_published(filename: str, *, source: str, request_bytes_sha256: str | None = None) -> None:
     marker: dict[str, Any] = {"filename": filename, "published_at": utc_now(), "source": source}
+    scope = _bound_mailbox_scope()
+    if scope is not None:
+        marker["mailbox_scope"] = scope
     if request_bytes_sha256 is not None:
         marker["request_bytes_sha256"] = request_bytes_sha256
     save_json(_published_marker(filename), marker)
@@ -823,6 +840,112 @@ def _result_auth_key() -> bytes:
         return _publish_result_auth_key(path, _read_result_auth_key(legacy))
 
     return _publish_result_auth_key(path, secrets.token_bytes(32))
+
+
+def _mailbox_scope_path() -> Path:
+    return CONFIG_DIR / "mailbox-scope.json"
+
+
+def _mailbox_scope_tag(scope: str) -> str:
+    message = b"llm-git-bridge-mailbox-scope\x00" + scope.encode("ascii")
+    return hmac.new(_result_auth_key(), message, hashlib.sha256).hexdigest()
+
+
+def _mailbox_scope_document(scope: str) -> dict[str, Any]:
+    return {
+        "version": 1,
+        "scope": scope,
+        "bridge_auth": {"alg": RESULT_AUTH_ALG, "tag": _mailbox_scope_tag(scope)},
+    }
+
+
+def _validated_mailbox_scope_document(obj: Any) -> str:
+    if not isinstance(obj, dict) or set(obj) != {"version", "scope", "bridge_auth"}:
+        raise BridgeError("mailbox replay scope document is malformed")
+    scope = obj.get("scope")
+    auth = obj.get("bridge_auth")
+    if obj.get("version") != 1 or not isinstance(scope, str) or not re.fullmatch(r"[0-9a-f]{64}", scope):
+        raise BridgeError("mailbox replay scope document is malformed")
+    if (
+        not isinstance(auth, dict)
+        or auth.get("alg") != RESULT_AUTH_ALG
+        or not isinstance(auth.get("tag"), str)
+        or not hmac.compare_digest(auth["tag"], _mailbox_scope_tag(scope))
+    ):
+        raise BridgeError("mailbox replay scope authentication is invalid")
+    return scope
+
+
+def _bound_mailbox_scope() -> str | None:
+    path = _mailbox_scope_path()
+    if not path.exists():
+        return None
+    try:
+        obj = load_json(path)
+    except BridgeError as exc:
+        raise BridgeError("local mailbox replay scope binding is unreadable") from exc
+    return _validated_mailbox_scope_document(obj)
+
+
+def _bind_mailbox_scope(scope: str) -> None:
+    path = _mailbox_scope_path()
+    path.parent.mkdir(parents=True, exist_ok=True, mode=0o700)
+    save_json(path, _mailbox_scope_document(scope))
+    try:
+        os.chmod(path, 0o600)
+    except OSError:
+        pass
+
+
+def _remote_mailbox_scope(transport: RcloneTransport) -> str | None:
+    filename = "mailbox-scope.json"
+    matches = [entry for entry in transport.list_entries(f"{REMOTE_ROOT}/meta") if entry.name == filename]
+    if len(matches) > 1:
+        raise BridgeError("mailbox replay scope is ambiguous; duplicate metadata files exist")
+    if not matches:
+        return None
+    local = STATE_DIR / "inbox" / "mailbox-scope.json"
+    text = transport.download_text(
+        f"{REMOTE_ROOT}/meta/{filename}",
+        local,
+        max_bytes=16_384,
+    )
+    try:
+        obj = strict_json_loads(text)
+    finally:
+        local.unlink(missing_ok=True)
+    return _validated_mailbox_scope_document(obj)
+
+
+def _ensure_mailbox_scope(transport: RcloneTransport) -> str:
+    """Bind replay authority to one authenticated mailbox, including RC6 migration.
+
+    The first upgraded daemon creates or adopts an authenticated opaque scope.
+    Once a local binding exists, a missing or different remote scope is treated
+    as a mailbox retarget rather than silently reusing replay markers/results.
+    """
+    local_scope = _bound_mailbox_scope()
+    remote_scope = _remote_mailbox_scope(transport)
+    if local_scope is not None:
+        if remote_scope is None:
+            raise BridgeError("configured mailbox does not contain the bound replay scope")
+        if not hmac.compare_digest(local_scope, remote_scope):
+            raise BridgeError("configured mailbox does not match the bound replay scope")
+        return local_scope
+
+    if remote_scope is not None:
+        _bind_mailbox_scope(remote_scope)
+        return remote_scope
+
+    scope = secrets.token_hex(32)
+    document = _mailbox_scope_document(scope)
+    transport.upload_control_json(
+        f"{REMOTE_ROOT}/meta/mailbox-scope.json",
+        document,
+        STATE_DIR / "outbox" / "mailbox-scope.json",
+    )
+    _bind_mailbox_scope(scope)
+    return scope
 
 
 def _result_auth_tag(filename: str, result: dict[str, Any]) -> str:
@@ -1694,6 +1817,7 @@ def reconcile_remote_results(cfg: dict[str, Any]) -> int:
     normal hot path unchanged and avoids downloading the historical result archive.
     """
     transport = transport_from_config(cfg)
+    _ensure_mailbox_scope(transport)
     pending_transactions = {
         name
         for name in transport.list_files(f"{REMOTE_ROOT}/transactions")
