@@ -2270,7 +2270,7 @@ class AppTests(unittest.TestCase):
         cfg["roots"] = [{"path": str(self.tmp), "push": True}]
         app.save_config(cfg)
         args = app.build_parser().parse_args(["setup"])
-        answers = iter(["yes", "no"])
+        answers = iter(["yes", "no", "no"])
 
         with patch("llm_git_bridge.app._setup_is_interactive", return_value=True), patch(
             "builtins.input", side_effect=lambda _prompt: next(answers)
@@ -2281,6 +2281,27 @@ class AppTests(unittest.TestCase):
             app.load_config()["roots"],
             [{"path": str(self.tmp.resolve()), "push": True}],
         )
+
+    def test_interactive_setup_rerun_can_change_existing_root_push_policy(self):
+        cfg = app.default_config()
+        cfg["transport"]["remote"] = "fake"
+        cfg["roots"] = [{"path": str(self.tmp), "push": True}]
+        app.save_config(cfg)
+        args = app.build_parser().parse_args(["setup"])
+        answers = iter(["yes", "yes", "no", "no"])
+
+        with patch("llm_git_bridge.app._setup_is_interactive", return_value=True), patch(
+            "builtins.input", side_effect=lambda _prompt: next(answers)
+        ), patch("builtins.print"):
+            self.assertEqual(app.cmd_setup(args), 0)
+
+        self.assertEqual(
+            app.load_config()["roots"],
+            [{"path": str(self.tmp.resolve()), "push": False}],
+        )
+        public = json.loads(self.fake.files["v2/meta/repos.json"])
+        entry = next(item for item in public["repos"] if item["name"] == "repo")
+        self.assertFalse(entry["capabilities"]["push"])
 
     def test_interactive_setup_reports_eof_as_actionable_error(self):
         with patch("builtins.input", side_effect=EOFError):

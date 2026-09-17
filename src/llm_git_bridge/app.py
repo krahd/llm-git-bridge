@@ -415,6 +415,15 @@ def _setup_repository_roots(cfg: dict[str, Any]) -> list[dict[str, Any]]:
             print(f"  {root['path']} (push={'enabled' if root['push'] else 'disabled'})")
         if not _setup_yes_no("Keep these repository roots?", default=True):
             roots = []
+        elif _setup_yes_no("Review push permissions for these roots?", default=False):
+            reviewed: list[dict[str, Any]] = []
+            for root in roots:
+                allow_push = _setup_yes_no(
+                    f"Allow safe-branch push for repositories under {root['path']}?",
+                    default=bool(root["push"]),
+                )
+                reviewed.append({"path": root["path"], "push": allow_push})
+            roots = _prune_redundant_roots(reviewed)
 
     add_more = not roots or _setup_yes_no("Add another repository folder?", default=False)
     while add_more:

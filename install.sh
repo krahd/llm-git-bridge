@@ -42,8 +42,7 @@ confirm() {
   prompt=$1
   default=${2:-yes}
   if [ ! -t 0 ]; then
-    [ "$default" = yes ]
-    return
+    return 1
   fi
   if [ "$default" = yes ]; then
     suffix='[Y/n]'

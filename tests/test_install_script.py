@@ -36,6 +36,16 @@ class InstallerTests(unittest.TestCase):
         self.assertIn('[ "$OS" = Darwin ]', text)
         self.assertIn('"$BRIDGE" daemon install --command "$BRIDGE"', text)
 
+    def test_installer_non_tty_does_not_auto_confirm_optional_actions(self) -> None:
+        text = INSTALLER.read_text(encoding="utf-8")
+        confirm_start = text.index("confirm() {")
+        confirm_end = text.index("\n}\n", confirm_start)
+        confirm_body = text[confirm_start:confirm_end]
+        self.assertIn('if [ ! -t 0 ]; then', confirm_body)
+        non_tty = confirm_body.split('if [ ! -t 0 ]; then', 1)[1].split('fi', 1)[0]
+        self.assertIn('return 1', non_tty)
+        self.assertNotIn('[ "$default" = yes ]', non_tty)
+
     def test_installer_first_run_and_rerun_are_idempotent_offline(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)
