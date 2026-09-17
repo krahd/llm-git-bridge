@@ -1,19 +1,27 @@
 # Using llm-git-bridge
 
-## Repository discovery
+## Repository discovery and roots
 
-`add-root` explicitly approves a local directory as a repository-discovery trust boundary. While the watcher runs, it automatically discovers Git repositories created, cloned, removed, or moved beneath approved roots and republishes the path-free remote index only when membership changes. The default discovery interval is 30 seconds.
+A repository root explicitly approves a local directory as an ongoing discovery and policy boundary. A host may configure zero, one, or many unrelated roots. While the watcher runs, it automatically discovers Git repositories created, cloned, removed, or moved beneath them and republishes the path-free remote index when effective membership or capabilities change. The default discovery interval is 30 seconds.
+
+The interactive entry point is:
 
 ```bash
-bin/llm-git-bridge add-root ~/repos
-bin/llm-git-bridge status
-# Optional: choose another bounded interval (5–3600 seconds).
-bin/llm-git-bridge configure-discovery --interval 30
-# Optional: force an immediate full Git/state refresh.
-bin/llm-git-bridge scan
+llm-git-bridge setup
 ```
 
-A newly created repository normally appears automatically; you do not register each repository by hand. Adding a completely new filesystem root is still an explicit local operation. Automatic discovery does not scan outside approved roots. The authoritative Git repositories remain local.
+Advanced/non-interactive root management is available separately:
+
+```bash
+llm-git-bridge roots list
+llm-git-bridge roots add ~/repos --push enable
+# Optional: choose another bounded interval (5–3600 seconds).
+llm-git-bridge configure-discovery --interval 30
+# Optional: force an immediate full Git/state refresh.
+llm-git-bridge roots scan
+```
+
+New repositories inherit the policy of their most-specific containing root. A nested root with the same policy is redundant and is compacted; a nested root with a different policy is retained as an intentional exception. You do not register newly created repositories by hand. Automatic discovery never authorises directories outside configured roots. The authoritative Git repositories remain local.
 
 ## Materialising snapshots
 
@@ -85,15 +93,22 @@ The bridge records only command name, return code, and duration in the remote re
 
 ## Push policy
 
-Enable pushing per repository:
+Push permission normally comes from the repository's most-specific configured root. For example:
 
 ```bash
-bin/llm-git-bridge configure-push my-repo enable
+llm-git-bridge roots add ~/repos --push enable
 ```
 
-A transaction must also contain `"push": true`. The bridge pushes only the validated safe-prefix branch to `origin`, without force.
+That permission applies to repositories already present beneath the root and to repositories discovered there later. A repository can be an exception:
 
-Merging to a protected/default branch is intentionally outside the remote protocol. Perform promotion through your normal Git/GitHub review policy after validating the safe branch.
+```bash
+llm-git-bridge configure-push my-repo disable
+llm-git-bridge configure-push my-repo inherit
+```
+
+`inherit` removes the exception. Root permission is still only the local half of the gate: a transaction must also contain `"push": true`. The bridge pushes only the validated safe-prefix branch to `origin`, without force.
+
+The public `repos.json` advertises effective `read`, `edit`, and `push` booleans so a remote client can avoid requesting unavailable capabilities. These booleans do not widen authority: protected/default-branch promotion remains intentionally outside the remote protocol. Perform promotion through your normal Git/GitHub review policy after validating the safe branch.
 
 ## Doctor and diagnostics
 

@@ -53,46 +53,52 @@ Approved roots are an ongoing trust boundary, not a one-time import list. While 
 - Python 3.11+
 - Git
 - `rclone`
-- a configured Google Drive remote (for the current transport)
+- a Google Drive account for the current transport
 
-Clone the repository and use the bundled wrapper; installation as a Python package is optional.
+### Recommended installer
+
+Download the small bootstrap script and run it:
 
 ```bash
-git clone https://github.com/krahd/llm-git-bridge.git
-cd llm-git-bridge
+curl -fsSLO https://raw.githubusercontent.com/krahd/llm-git-bridge/main/install.sh
+sh install.sh
+```
 
-bin/llm-git-bridge setup --remote YOUR_RCLONE_REMOTE
-bin/llm-git-bridge add-root ~/repos
-bin/llm-git-bridge status
+The installer safely clones or fast-forwards the bridge, creates the `llm-git-bridge` command, opens `rclone` configuration if needed, and then runs the bridge-owned setup wizard. The wizard can add **one or many repository roots**, choose whether repositories under each root may push validated safe branches, scan them, and report readiness. On macOS it can also install the LaunchAgent.
+
+The installer is deliberately re-runnable. Running `sh install.sh` again updates a clean installation with a fast-forward only and opens the same setup flow; existing bridge configuration lives outside the source checkout and is preserved. You can also reconfigure at any time without updating:
+
+```bash
+llm-git-bridge setup
+```
+
+No repository path is compiled into the bridge or installer. Repository roots are local operator configuration. New Git repositories created beneath an approved root are discovered automatically and inherit that root's policy.
+
+For non-interactive or advanced root management:
+
+```bash
+llm-git-bridge roots list
+llm-git-bridge roots add ~/repos --push enable
+llm-git-bridge roots scan
 ```
 
 Configure symbolic validation commands per repository. Remote requests may refer to these names, but may not supply shell commands or argv themselves.
 
 ```bash
-bin/llm-git-bridge configure-command my-repo test \
+llm-git-bridge configure-command my-repo test \
   python3 -m unittest discover -s tests -v
 ```
 
-Push is disabled by default. To permit explicit transaction requests to push their validated safe branch to `origin`:
+Root-level push permission is only one half of the push gate: every remote transaction must still explicitly request `"push": true`, and the bridge still restricts pushes to validated safe-prefix branches. Per-repository exceptions are available when a repository should differ from its root:
 
 ```bash
-bin/llm-git-bridge configure-push my-repo enable
+llm-git-bridge configure-push my-repo disable
+llm-git-bridge configure-push my-repo inherit
 ```
 
-Run the watcher in the foreground:
+If you choose not to install automatic startup, run the watcher in the foreground with `llm-git-bridge watch`.
 
-```bash
-bin/llm-git-bridge watch
-```
-
-On macOS, install the bundled LaunchAgent and let it run continuously:
-
-```bash
-bin/llm-git-bridge daemon install \
-  --command "$PWD/bin/llm-git-bridge"
-```
-
-For a fuller setup guide, including Google OAuth recommendations, see [docs/installation.md](docs/installation.md).
+For the complete setup flow, manual installation, Google OAuth recommendations, and daemon details, see [docs/installation.md](docs/installation.md).
 
 ## Request example
 
