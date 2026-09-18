@@ -1,8 +1,10 @@
 from __future__ import annotations
 
+import hashlib
 import http.client
 import json
 import os
+import re
 import shutil
 import socket
 import subprocess
@@ -348,6 +350,82 @@ class RcloneTransport:
 
     def list_files(self, rel: str) -> list[str]:
         return [entry.name for entry in self.list_entries(rel)]
+
+    def download_file(
+        self,
+        rel: str,
+        local: Path,
+        *,
+        max_bytes: int | None = None,
+        expected_bytes: int | None = None,
+        expected_sha256: str | None = None,
+    ) -> tuple[int, str]:
+        """Download exact remote bytes to a private local file and verify them.
+
+        The remote path is transport-owned and must be a relative, normalized path.
+        Bytes are never decoded; size and SHA-256 are computed from the stored bytes.
+        """
+        if not isinstance(rel, str) or not rel or rel.startswith("/"):
+            raise BridgeError("unsafe remote transport path")
+        parts = Path(rel).parts
+        if any(part in {"", ".", ".."} for part in parts):
+            raise BridgeError("unsafe remote transport path")
+        if expected_bytes is not None and (isinstance(expected_bytes, bool) or expected_bytes < 0):
+            raise BridgeError("invalid expected byte count")
+        if expected_sha256 is not None:
+            if not isinstance(expected_sha256, str) or not re.fullmatch(r"[0-9a-f]{64}", expected_sha256):
+                raise BridgeError("invalid expected SHA-256")
+        local.parent.mkdir(parents=True, exist_ok=True)
+        rc_tmp = local.with_name(local.name + ".rc-part")
+        subprocess_tmp = local.with_name(local.name + ".subprocess-part")
+        local.unlink(missing_ok=True)
+        rc_tmp.unlink(missing_ok=True)
+        subprocess_tmp.unlink(missing_ok=True)
+        try:
+            try:
+                rc_obj = self._rc(
+                    "operations/copyfile",
+                    {
+                        "srcFs": f"{self.remote}:",
+                        "srcRemote": rel,
+                        "dstFs": str(rc_tmp.parent),
+                        "dstRemote": rc_tmp.name,
+                    },
+                    timeout=self.rc_download_timeout,
+                )
+                completed = rc_tmp if rc_obj is not None else subprocess_tmp
+                if rc_obj is None:
+                    self.last_mode = "subprocess"
+                    run(["rclone", "copyto", self._remote(rel), str(subprocess_tmp)], timeout=self.download_timeout)
+            except BridgeError as exc:
+                raise TransientTransportError("binary download failed; retry required") from exc
+
+            try:
+                size = completed.stat().st_size
+            except OSError as exc:
+                raise TransientTransportError("downloaded binary is not yet available; retry required") from exc
+            if max_bytes is not None and size > max_bytes:
+                raise BridgeError("remote binary exceeds maximum allowed size")
+            if expected_bytes is not None and size != expected_bytes:
+                raise BridgeError("downloaded binary byte count does not match expected value")
+            digest = hashlib.sha256()
+            try:
+                with completed.open("rb") as fh:
+                    with local.open("wb") as out:
+                        for chunk in iter(lambda: fh.read(1024 * 1024), b""):
+                            digest.update(chunk)
+                            out.write(chunk)
+            except OSError as exc:
+                local.unlink(missing_ok=True)
+                raise TransientTransportError("downloaded binary cannot be stored safely; retry required") from exc
+            actual_sha256 = digest.hexdigest()
+            if expected_sha256 is not None and actual_sha256 != expected_sha256:
+                local.unlink(missing_ok=True)
+                raise BridgeError("downloaded binary SHA-256 does not match expected value")
+            return size, actual_sha256
+        finally:
+            rc_tmp.unlink(missing_ok=True)
+            subprocess_tmp.unlink(missing_ok=True)
 
     def download_text(self, rel: str, local: Path, *, max_bytes: int | None = None) -> str:
         local.parent.mkdir(parents=True, exist_ok=True)

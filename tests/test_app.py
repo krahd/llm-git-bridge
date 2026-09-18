@@ -4162,6 +4162,67 @@ class TransportTests(unittest.TestCase):
         self.assertEqual(fake.list_calls, ["v2/transactions"])
 
 
+    def test_download_file_preserves_binary_bytes_and_reports_size_and_sha256(self):
+        import hashlib
+        with tempfile.TemporaryDirectory(prefix="llmgb-rc-file-") as tmp:
+            root = Path(tmp)
+            sock = root / "rclone.sock"
+            sock.touch()
+            transport = RcloneTransport("fake", rc_socket=sock)
+            local = root / "out" / "blob.bin"
+            payload = bytes(range(256)) + b"\x00\xff\xfe\n"
+
+            def rc_side_effect(_socket, _command, payload_map, **_kwargs):
+                dst = Path(payload_map["dstFs"]) / payload_map["dstRemote"]
+                dst.parent.mkdir(parents=True, exist_ok=True)
+                dst.write_bytes(payload)
+                return {}
+
+            digest = hashlib.sha256(payload).hexdigest()
+            with patch("llm_git_bridge.transport._rc_request", side_effect=rc_side_effect):
+                size, actual = transport.download_file(
+                    "v3/io/tx/blob.bin",
+                    local,
+                    max_bytes=4096,
+                    expected_bytes=len(payload),
+                    expected_sha256=digest,
+                )
+            self.assertEqual(size, len(payload))
+            self.assertEqual(actual, digest)
+            self.assertEqual(local.read_bytes(), payload)
+
+    def test_download_file_rejects_size_hash_limit_and_unsafe_path(self):
+        import hashlib
+        with tempfile.TemporaryDirectory(prefix="llmgb-rc-file-") as tmp:
+            root = Path(tmp)
+            sock = root / "rclone.sock"
+            sock.touch()
+            transport = RcloneTransport("fake", rc_socket=sock)
+            local = root / "blob.bin"
+            payload = b"binary\x00payload"
+
+            def rc_side_effect(_socket, _command, payload_map, **_kwargs):
+                dst = Path(payload_map["dstFs"]) / payload_map["dstRemote"]
+                dst.parent.mkdir(parents=True, exist_ok=True)
+                dst.write_bytes(payload)
+                return {}
+
+            with patch("llm_git_bridge.transport._rc_request", side_effect=rc_side_effect):
+                with self.assertRaises(BridgeError):
+                    transport.download_file("v3/io/tx/blob.bin", local, max_bytes=4)
+                with self.assertRaises(BridgeError):
+                    transport.download_file("v3/io/tx/blob.bin", local, expected_bytes=len(payload)+1)
+                with self.assertRaises(BridgeError):
+                    transport.download_file(
+                        "v3/io/tx/blob.bin",
+                        local,
+                        expected_sha256=hashlib.sha256(b"different").hexdigest(),
+                    )
+                with self.assertRaises(BridgeError):
+                    transport.download_file("../outside", local)
+                with self.assertRaises(BridgeError):
+                    transport.download_file("/absolute", local)
+
     def test_download_text_preserves_exact_utf8_bytes_including_bom_and_crlf(self):
         with tempfile.TemporaryDirectory(prefix="llmgb-rc-") as tmp:
             root = Path(tmp)
