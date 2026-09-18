@@ -13,6 +13,7 @@ import re
 import secrets
 import shutil
 import signal
+import subprocess
 import sys
 import tempfile
 import threading
@@ -55,6 +56,15 @@ from .transport import (
     start_rclone_rcd,
 )
 from . import __version__
+from .self_update import (
+    HANDOFF_PATH as SELF_UPDATE_HANDOFF_PATH,
+    HEALTH_PATH as RUNTIME_HEALTH_PATH,
+    UPDATER_LAUNCHER as SELF_UPDATE_LAUNCHER,
+    qualification_path,
+    record_qualification,
+    require_qualification,
+    write_handoff,
+)
 
 APP_NAME = "llm-git-bridge"
 CONFIG_DIR = Path.home() / ".config" / APP_NAME
@@ -100,6 +110,7 @@ def default_config() -> dict[str, Any]:
         "safe_branch_prefix": "ai/",
         "allow_commit": True,
         "allow_current_branch_write": False,
+        "allow_self_update": False,
         "poll_interval": 1.0,
         "registry_scan_interval": 30.0,
         "max_workers": 1,
@@ -306,6 +317,8 @@ def _validate_config(cfg: dict[str, Any]) -> dict[str, Any]:
         raise BridgeError("config allow_commit must be a boolean")
     if not isinstance(cfg.get("allow_current_branch_write"), bool):
         raise BridgeError("config allow_current_branch_write must be a boolean")
+    if not isinstance(cfg.get("allow_self_update"), bool):
+        raise BridgeError("config allow_self_update must be a boolean")
     repo_overrides = cfg.get("repo_overrides")
     if not isinstance(repo_overrides, dict):
         raise BridgeError("config repo_overrides must be an object keyed by repository ID")
@@ -489,6 +502,7 @@ def _public_capabilities(cfg: dict[str, Any], registry: dict[str, Any]) -> dict[
     capabilities: dict[str, dict[str, bool]] = {}
     allow_commit = bool(cfg.get("allow_commit", True))
     allow_current = bool(cfg.get("allow_current_branch_write", False))
+    allow_self_update = bool(cfg.get("allow_self_update", False))
     for repo_id, entry in registry.get("repos", {}).items():
         repo_capabilities = {
             "read": True,
@@ -497,6 +511,8 @@ def _public_capabilities(cfg: dict[str, Any], registry: dict[str, Any]) -> dict[
         }
         if allow_current:
             repo_capabilities["write_current_branch"] = allow_commit
+        if allow_self_update and Path(entry["path"]).name == "llm-git-bridge":
+            repo_capabilities["self_update"] = True
         capabilities[repo_id] = repo_capabilities
     return capabilities
 
@@ -2207,7 +2223,25 @@ def _run_transaction_worker(
         allow_current_branch_write=task.allow_current_branch_write,
         cancel_check=cancel_check,
     )
-    return _TransactionWorkerOutcome(dict(outcome.result), outcome.snapshot)
+    result = dict(outcome.result)
+    if (
+        task.repo_path.name == "llm-git-bridge"
+        and obj.get("run") == ["test"]
+        and result.get("status") == "success"
+        and isinstance(result.get("commands"), list)
+        and len(result["commands"]) == 1
+        and result["commands"][0].get("name") == "test"
+        and result["commands"][0].get("returncode") == 0
+        and isinstance(result.get("commit"), str)
+        and isinstance(result.get("branch"), str)
+    ):
+        record_qualification(
+            sha=result["commit"],
+            transaction_id=result.get("transaction_id", ""),
+            request_sha256=hashlib.sha256(task.request_raw.encode("utf-8")).hexdigest(),
+            branch=result["branch"],
+        )
+    return _TransactionWorkerOutcome(result, outcome.snapshot)
 
 
 def _publish_transaction_snapshot(
@@ -2250,7 +2284,7 @@ def _execute_validated_request(
 
     # Re-read the atomically-written registry immediately before repo-dependent
     # dispatch so a concurrent local scan cannot leave queued work using stale paths.
-    if kind in {"materialize", "transaction"}:
+    if kind in {"materialize", "transaction", "self_update"}:
         registry = load_registry()
 
     if kind == "materialize":
@@ -2264,6 +2298,8 @@ def _execute_validated_request(
         )
     elif kind == "doctor":
         result = _process_doctor_request(cfg, obj, filename)
+    elif kind == "self_update":
+        result = _process_self_update_request(cfg, registry, obj, filename)
     elif kind == "transaction":
         worker_task = _prepare_transaction_worker_task(cfg, registry, request)
         if scheduler is None:
@@ -2274,6 +2310,116 @@ def _execute_validated_request(
     else:
         raise BridgeError(f"unsupported request kind: {kind!r}")
     return result, registry
+
+
+
+def _maybe_record_full_test_qualification(
+    request: _ValidatedRequest,
+    worker_task: _TransactionWorkerTask,
+    result: dict[str, Any],
+) -> None:
+    if Path(worker_task.repo_path).name != "llm-git-bridge":
+        return
+    if request.obj.get("run") != ["test"]:
+        return
+    if result.get("status") != "success":
+        return
+    commands = result.get("commands")
+    if not isinstance(commands, list) or len(commands) != 1 or commands[0].get("name") != "test" or commands[0].get("returncode") != 0:
+        return
+    commit = result.get("commit")
+    branch = result.get("branch")
+    if not isinstance(commit, str) or not isinstance(branch, str):
+        return
+    record_qualification(
+        sha=commit,
+        transaction_id=result.get("transaction_id", ""),
+        request_sha256=request.downloaded.request_bytes_sha256,
+        branch=branch,
+    )
+
+
+def _process_self_update_request(
+    cfg: dict[str, Any], registry: dict[str, Any], obj: dict[str, Any], filename: str
+) -> dict[str, Any]:
+    txid = _validate_request_identity(obj, filename)
+    if not bool(cfg.get("allow_self_update", False)):
+        raise BridgeError("self-update is not enabled locally")
+    allowed = {"protocol", "kind", "transaction_id", "repo", "target_sha", "source_branch"}
+    extra = set(obj) - allowed
+    if extra:
+        raise BridgeError("self-update request contains unsupported fields")
+    repo_ref = obj.get("repo")
+    if not isinstance(repo_ref, str) or not repo_ref:
+        raise BridgeError("self-update request is missing repo")
+    repo_id, entry = resolve_repo(registry, repo_ref)
+    repo_path = Path(entry["path"])
+    if repo_path.name != "llm-git-bridge":
+        raise BridgeError("self-update is restricted to the llm-git-bridge repository")
+    target = obj.get("target_sha")
+    if not isinstance(target, str) or len(target) not in {40, 64} or not re.fullmatch(r"[0-9a-f]+", target):
+        raise BridgeError("self-update target_sha must be a full lowercase Git object ID")
+    source_branch = validate_safe_branch_name(obj.get("source_branch"), str(cfg.get("safe_branch_prefix", "ai/")))
+    tip = branch_tip(repo_path, source_branch)
+    if tip != target:
+        raise BridgeError("self-update source branch does not point at target_sha")
+    require_qualification(target)
+    write_handoff(
+        transaction_id=txid,
+        target_sha=target,
+        source_branch=source_branch,
+        source_repo=repo_path,
+    )
+    return {
+        "protocol": PROTOCOL_VERSION,
+        "kind": "result",
+        "operation": "self_update",
+        "transaction_id": txid,
+        "repo": repo_id,
+        "target_sha": target,
+        "status": "success",
+        "scheduled": True,
+        "processed_at": utc_now(),
+    }
+
+
+def _launch_pending_self_update() -> bool:
+    if not SELF_UPDATE_HANDOFF_PATH.exists():
+        return False
+    if not SELF_UPDATE_LAUNCHER.exists():
+        raise BridgeError("self-update launcher is not installed")
+    log_dir = STATE_DIR / "self-update"
+    log_dir.mkdir(parents=True, exist_ok=True, mode=0o700)
+    out = (log_dir / "supervisor.out.log").open("ab")
+    err = (log_dir / "supervisor.err.log").open("ab")
+    try:
+        subprocess.Popen(
+            [str(SELF_UPDATE_LAUNCHER)],
+            stdin=subprocess.DEVNULL,
+            stdout=out,
+            stderr=err,
+            start_new_session=True,
+            close_fds=True,
+        )
+    finally:
+        out.close()
+        err.close()
+    return True
+
+
+def _write_runtime_health_marker() -> None:
+    runtime_sha = os.environ.get("LLM_GIT_BRIDGE_RUNTIME_SHA")
+    if not runtime_sha:
+        return
+    save_json(
+        RUNTIME_HEALTH_PATH,
+        {
+            "version": 1,
+            "runtime_sha": runtime_sha,
+            "bridge_version": __version__,
+            "watcher_started_at": utc_now(),
+        },
+    )
 
 
 def _build_signed_result(
@@ -2392,6 +2538,8 @@ def _finalize_request_result(
         request_started=request_started,
         protected_command_log_txids=protected_command_log_txids,
     )
+    if signed.get("operation") == "self_update" and signed.get("status") == "success":
+        _launch_pending_self_update()
 
 
 def _process_pending_concurrent(
@@ -3055,6 +3203,10 @@ def cmd_status(_args: argparse.Namespace) -> int:
         "current-branch writes: "
         f"{'enabled' if cfg.get('allow_current_branch_write', False) else 'disabled'}"
     )
+    print(
+        "self-update: "
+        f"{'enabled' if cfg.get('allow_self_update', False) else 'disabled'}"
+    )
     if REGISTRY_FILE.exists():
         reg = load_registry()
         repos = reg.get("repos", {})
@@ -3138,6 +3290,7 @@ def _ensure_watch_rcd(cfg: dict[str, Any], handle: RcloneRCProcess | None) -> Rc
 
 def cmd_watch(args: argparse.Namespace) -> int:
     lock_fh = _acquire_watch_lock()
+    _write_runtime_health_marker()
     rc_handle: RcloneRCProcess | None = None
     scheduler: _LocalWorkerScheduler | None = None
     try:
@@ -3369,6 +3522,18 @@ def cmd_configure_current_branch_write(args: argparse.Namespace) -> int:
     return 0
 
 
+
+
+def cmd_configure_self_update(args: argparse.Namespace) -> int:
+    cfg = load_config()
+    cfg["allow_self_update"] = args.action == "enable"
+    if REGISTRY_FILE.exists():
+        _save_config_and_refresh_registry(cfg)
+    else:
+        save_config(cfg)
+    print(f"self-update {'enabled' if cfg['allow_self_update'] else 'disabled'}")
+    return 0
+
 def build_parser() -> argparse.ArgumentParser:
     p = argparse.ArgumentParser(prog=APP_NAME)
     sub = p.add_subparsers(dest="command", required=True)
@@ -3443,6 +3608,10 @@ def build_parser() -> argparse.ArgumentParser:
     s = sub.add_parser("configure-current-branch-write")
     s.add_argument("action", choices=["enable", "disable"])
     s.set_defaults(func=cmd_configure_current_branch_write)
+
+    s = sub.add_parser("configure-self-update")
+    s.add_argument("action", choices=["enable", "disable"])
+    s.set_defaults(func=cmd_configure_self_update)
 
     return p
 
