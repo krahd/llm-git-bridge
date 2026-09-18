@@ -347,31 +347,62 @@ After that programme reaches a stable integration boundary:
 5. test upgrade from a real existing installation;
 6. remove legacy names only after a documented deprecation period.
 
-## 19. Implementation sequence after design freeze
+## 19. Shared Reach substrate and the ConvoReach seam
+
+RepoReach must not become a generic agent bus. Instead, networking/account machinery that is genuinely domain-neutral should sit in a narrow shared substrate below the Git product.
+
+Shared substrate responsibilities:
+- endpoint identity and local credentials;
+- pairing, scoped sessions, rotation and revocation;
+- HTTPS/WSS connection, reconnect/backoff and relay wake-up;
+- outer envelope versioning, message IDs, correlation, hashes and TTLs;
+- bounded chunk transfer and acknowledgement;
+- quota/entitlement hooks based on product-reported semantic operations;
+- sanitized connectivity diagnostics.
+
+RepoReach-exclusive responsibilities:
+- repository discovery and identity;
+- snapshots/materialisation and Git protocol-v2 payloads;
+- exact-base/stale-state rules;
+- repository path and capability policy;
+- worktrees, validation, commits and push authority;
+- Git-specific replay semantics and self-update qualification.
+
+A future ConvoReach sibling should be able to reuse the shared substrate and relay service while replacing the Git domain with conversation/session adapters, room/participant/message provenance and controlled delivery between already-existing native conversations. A defining design test is: from one live ChatGPT conversation, ask ConvoReach to contact an already-existing Claude, Gemini or another ChatGPT conversation, retrieve what that conversation has done/is doing, and return the response with provenance without recreating either conversation or manually copying context.
+
+ConvoReach is not required to use API-created model instances and should not collapse distinct native conversation histories into one synthetic context. Generic agent-swarm orchestration and uncontrolled autonomous chatter are separate questions.
+
+Security namespaces are product-specific. A RepoReach credential/session must not automatically grant ConvoReach authority, and vice versa, even if both eventually use the same hosted relay deployment.
+
+Repository strategy: do not create a third shared-core repository prematurely. During the current bridge programme, keep the seam internal and testable. When a real ConvoReach prototype begins, extract only the proven shared substrate into a small versioned package/repository if two products genuinely need to depend on it. This avoids both copy-paste forks and speculative framework design.
+
+## 20. Implementation sequence after design freeze
 
 1. Reach a safe integration checkpoint in P12-P15.
-2. Confirm/extract a transport-neutral daemon adapter boundary without changing Git semantics.
-3. Add an RRR client adapter behind an explicit feature flag.
-4. Implement the minimal Worker + endpoint Durable Object relay with no billing and no R2.
+2. Confirm/extract the narrow shared Reach substrate without changing Git semantics.
+3. Add the RRR client as the standard consumer route behind an explicit feature flag during migration.
+4. Implement the minimal Worker + endpoint Durable Object relay with no billing and no R2; keep its routing/account layer domain-neutral.
 5. Implement pairing, revocation, bounded queue/payload lifecycle and hibernating daemon WebSocket.
-6. Add ordinary browser UI and WebMCP/site tools.
-7. Run a disposable-repository live canary and cross-transport duplicate test.
-8. Package roots, permissions, pairing and health verification into one guided setup.
-9. Recruit external users before building billing or paid infrastructure.
-10. Add additional adapters only where observed users need them.
-11. Perform naming/package migration when concurrent bridge work is stable.
+6. Add ordinary browser UI and WebMCP/site tools for RepoReach.
+7. Run disposable-repository live canaries, including RRR retry/reorder/duplicate delivery.
+8. Package roots, permissions, pairing and health verification into one guided `install -> pair -> connected` setup.
+9. Measure semantic-operation usage and choose a useful free RRR allowance from real dogfood data.
+10. Recruit external users before building billing or paid infrastructure.
+11. Add other transports only where observed users need them; do not build multipath arbitration speculatively.
+12. Perform naming/package migration when concurrent bridge work is stable.
+13. If ConvoReach is promoted from idea to prototype, prove it can reuse the shared substrate without importing RepoReach Git modules; extract a shared package only then.
 
-## 20. Prototype completion gate
+## 21. Prototype completion gate
 
-A production-oriented prototype must prove:
-- clean install and pairing without Drive or custom MCP;
+A production-oriented RepoReach prototype must prove:
+- clean install and RRR pairing without Drive or custom MCP;
 - local Git policy remains authoritative;
 - relay retries/reordering/duplicates preserve transaction semantics;
 - daemon reconnect and Durable Object hibernation recover;
 - session revocation works;
 - TTL cleanup actually deletes payloads;
-- quota exhaustion is safe;
+- semantic-operation quota exhaustion is safe and understandable;
 - no local paths or credentials appear in relay state/logs;
 - no fixed paid service is required;
-- RRR plus another transport cannot duplicate a Git mutation;
-- successful onboarding never requires understanding transport internals.
+- successful onboarding never requires understanding transport internals;
+- the shared substrate has no Git-specific dependencies, so a future sibling can reuse it without weakening RepoReach's Git-specific product boundary.
