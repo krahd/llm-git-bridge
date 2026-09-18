@@ -786,6 +786,7 @@ class AppTests(unittest.TestCase):
             "commands": {"repo": {"test": ["python3", "-c", "print('frozen')"]}},
             "safe_branch_prefix": "ai/",
             "allow_commit": True,
+            "allow_current_branch_write": True,
             "push_enabled_repos": ["repo"],
         }
 
@@ -793,6 +794,7 @@ class AppTests(unittest.TestCase):
         cfg["commands"]["repo"]["test"][2] = "print('mutated')"
         cfg["safe_branch_prefix"] = "changed/"
         cfg["allow_commit"] = False
+        cfg["allow_current_branch_write"] = False
         cfg["push_enabled_repos"].clear()
 
         self.assertEqual(
@@ -802,6 +804,7 @@ class AppTests(unittest.TestCase):
         self.assertEqual(task.safe_branch_prefix, "ai/")
         self.assertTrue(task.allow_commit)
         self.assertTrue(task.allow_push)
+        self.assertTrue(task.allow_current_branch_write)
 
     def test_b3_worker_task_rejects_repo_removed_from_latest_roots(self):
         txid = "tx-b3-root-revoked"
@@ -2426,6 +2429,36 @@ class AppTests(unittest.TestCase):
             entry["capabilities"],
             {"read": True, "edit": True, "push": True},
         )
+
+    def test_configure_current_branch_write_is_default_off_and_republishes_capability(self):
+        cfg = app.default_config()
+        self.assertFalse(cfg["allow_current_branch_write"])
+        cfg["transport"]["remote"] = "fake"
+        cfg["roots"] = [{"path": str(self.tmp), "push": True}]
+        app.save_config(cfg)
+
+        args = app.build_parser().parse_args(["configure-current-branch-write", "enable"])
+        with patch("builtins.print"):
+            self.assertEqual(app.cmd_configure_current_branch_write(args), 0)
+
+        loaded = app.load_config()
+        self.assertTrue(loaded["allow_current_branch_write"])
+        public = json.loads(self.fake.files["v2/meta/repos.json"])
+        entry = next(item for item in public["repos"] if item["id"] == "repo")
+        self.assertEqual(
+            entry["capabilities"],
+            {
+                "read": True,
+                "edit": True,
+                "push": True,
+                "write_current_branch": True,
+            },
+        )
+
+        args = app.build_parser().parse_args(["configure-current-branch-write", "disable"])
+        with patch("builtins.print"):
+            self.assertEqual(app.cmd_configure_current_branch_write(args), 0)
+        self.assertFalse(app.load_config()["allow_current_branch_write"])
 
     def test_setup_does_not_persist_new_remote_before_transport_is_reachable(self):
         cfg = app.default_config()

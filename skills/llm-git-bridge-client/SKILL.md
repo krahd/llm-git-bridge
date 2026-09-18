@@ -1,6 +1,6 @@
 ---
 name: llm-git-bridge-client
-description: Use llm-git-bridge as a remote LLM/agent client to discover local Git repositories through the mailbox, materialise filtered snapshots, submit protocol-v2 patch transactions, request doctor/diagnostics, interpret results, handle stale bases and crash-safe retries, coordinate multiple clients, and respect branch/push/security boundaries. Trigger whenever an LLM needs to read, edit, validate, commit, or optionally push work through llm-git-bridge rather than direct filesystem/Git access.
+description: Use llm-git-bridge as a remote LLM/agent client to discover local Git repositories through the mailbox, materialise filtered snapshots, submit protocol-v2 patch transactions, request doctor/diagnostics, interpret results, handle stale bases and crash-safe retries, coordinate multiple clients, and respect local Git authority. Trigger whenever an LLM needs to read, edit, validate, commit, or push work through llm-git-bridge rather than direct filesystem/Git access, including an explicitly authorised current/default branch such as main.
 ---
 
 # LLM Git Bridge Client
@@ -10,7 +10,7 @@ Use the bridge as a **mailbox protocol**, not as shell access and not as a subst
 ## Start every session by grounding state
 
 1. Identify the mailbox root and transport available to the current client.
-2. Read `v2/meta/repos.json` before naming repositories from memory. Treat each entry's `capabilities.read`, `capabilities.edit`, and `capabilities.push` as the current effective local authority. Re-read the index when a repository was just created/cloned, after the operator changes local policy, or when an unknown-repository response suggests your cached index is stale; repositories beneath operator-approved roots are discovered automatically on a bounded interval.
+2. Read `v2/meta/repos.json` before naming repositories from memory. Treat each entry's `capabilities.read`, `capabilities.edit`, and `capabilities.push` as current effective local authority. If `capabilities.write_current_branch` is present and true, the exact currently checked-out branch shown by the repository entry may also be used as a transaction target; absence means false. Re-read the index when a repository was just created/cloned, after the operator changes local policy, or when an unknown-repository response suggests your cached index is stale; repositories beneath operator-approved roots are discovered automatically on a bounded interval.
 3. If operational state matters, submit `doctor` and, when useful, `diagnostics` requests.
 4. Before preparing an edit, materialise the repository or relevant safe-prefix branch and read its fresh filtered snapshot.
 5. Treat the snapshot's Git identity as authoritative remote context. Never invent local filesystem paths.
@@ -23,9 +23,9 @@ Read [references/protocol-workflow.md](references/protocol-workflow.md) for exac
 - Need an already-created safe branch: submit `materialize` with that safe-prefix branch.
 - Need environment/transport health: submit `doctor`.
 - Need bounded scheduler/timing evidence: submit `diagnostics`.
-- Need to modify a repository: submit `transaction` with an exact full `base_sha`, safe branch, unified diff, symbolic command names, and optional push/snapshot flags.
+- Need to modify a repository: submit `transaction` with an exact full `base_sha`, a permitted branch target, unified diff, symbolic command names, and optional push/snapshot flags.
 
-Do **not** put a protected/default branch such as `main` in the `branch` field merely to read it. Current-checkout materialisation omits `branch`; explicit branch materialisation is for allowed safe-prefix branches.
+Do **not** put `main` or another current/default branch in a *materialise* request merely to read it. Current-checkout materialisation omits `branch`; explicit branch materialisation remains for already-created safe-prefix branches. Current/default-branch authority applies to edit transactions, not explicit branch materialisation.
 
 ## Construct requests fail-closed
 
@@ -42,13 +42,13 @@ For every request:
 For edit transactions additionally:
 
 - use the exact full 40-character SHA-1 or 64-character SHA-256 base commit from fresh authoritative state;
-- use a branch under the configured safe prefix (commonly `ai/`);
+- normally use a branch under the configured safe prefix (commonly `ai/`); if `capabilities.write_current_branch` is true, you may instead target the exact currently checked-out branch reported by the repository entry, using its exact current HEAD as `base_sha`;
 - send a unified diff as `patch`;
 - request only locally configured symbolic commands in `run`;
 - treat `push` as two-key opt-in: the selected repository's published `capabilities.push` must be true **and** the request must contain `"push": true`; if the capability is false, do not probe by submitting a doomed push request—report that local root/override policy must be changed, then re-read the index;
 - leave `publish_snapshot` false unless the next step truly requires synchronous snapshot publication.
 
-The bridge never accepts arbitrary remote shell execution, force-push, remote-triggered merge, alternate remotes/refspecs, or protected-branch mutation.
+RC8 never accepts arbitrary remote shell execution, force-push, remote-triggered merge, or alternate remotes/refspecs. It can mutate the exact currently checked-out branch only when that authority is explicitly enabled locally; do not infer authority merely because the branch is named `main`.
 
 Do not ask a remote client to register a newly created repository individually. If it is beneath an already approved root, allow the watcher's automatic discovery to publish it and inherit root policy. Adding/removing a filesystem root, changing root policy, changing the discovery interval, or forcing `scan` remains a local operator action. Never infer or request a local root path from the path-free public index.
 
@@ -104,9 +104,11 @@ Never attempt to bypass rejections involving:
 
 Treat those as safety boundaries to resolve at the source, not obstacles to route around.
 
-## Promotion and protected branches
+## Current/default branch writes
 
-A normal remote transaction ends on a validated safe branch. Merging/promoting to `main` or another protected/default branch is intentionally outside the remote protocol. Use the repository's approved human/local guarded promotion process and independently verify the result afterward.
+Safe-prefix branches remain the default. When `capabilities.write_current_branch` is true, a transaction may target the exact branch shown as current in `repos.json`, including `main`/`master`. Use the exact current `head` as `base_sha`; do not queue dependent current-branch mutations against stale state. A requested push still requires `capabilities.push: true` and `"push": true`.
+
+After a successful current-branch write with push requested, treat the result as **pushed** only if `push.status` is successful. For consequential follow-up work, re-materialise the current checkout or re-read repository state and confirm the returned commit/head before constructing the next request.
 
 ## Evidence discipline
 
@@ -117,7 +119,7 @@ Distinguish clearly among:
 - **committed** — result reports a durable local commit;
 - **pushed** — result explicitly reports successful push;
 - **materialised** — fresh snapshot/result confirms exact head;
-- **promoted** — protected branch was changed through an external/local promotion path and independently verified.
+- **current-branch updated** — result reports a successful commit on the explicitly authorised checked-out branch; if push was requested, confirm `push.status` separately.
 
 Never collapse these into “done”.
 

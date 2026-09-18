@@ -7,6 +7,7 @@ The bridge deliberately exposes less protocol surface than a shell or a general-
 - read selected tracked text working-tree files through filtered snapshots;
 - create/edit/delete regular repository files through a validated patch;
 - create/update branches under the configured safe prefix;
+- when explicitly enabled locally, update the repository's exact currently checked-out branch using an exact-base fast-forward transaction;
 - request symbolic command names that the user has explicitly configured locally;
 - request no more than 16 configured command executions in one transaction;
 - create commits.
@@ -16,7 +17,7 @@ The bridge deliberately exposes less protocol surface than a shell or a general-
 - supply arbitrary command argv or shell text;
 - push unless it has been enabled locally for that repository and explicitly requested by the transaction;
 - merge, force-push, choose a different remote/refspec, mutate repository administration settings, or export credentials;
-- branch names outside the configured safe prefix;
+- branch names outside the configured safe prefix, except the exact currently checked-out branch when current-branch writes are explicitly enabled locally;
 - patching when tracked local modifications are present;
 - applying a transaction whose base SHA is stale;
 - create, modify, or delete symlinks/submodules;
@@ -40,7 +41,9 @@ The daemon never accepts command argv from a remote request. `run` contains only
 
 Push remains a two-key operation. Effective local policy must permit push for the repository, and the individual transaction must separately request `"push": true`. Local permission normally inherits from the most-specific configured repository root; a history-bound per-repository override can enable or disable an exception. A newly discovered repository therefore inherits the policy of the root the operator explicitly trusted, without requiring another manual allow-list entry.
 
-The public path-free repository index exposes only the resulting `capabilities.push` boolean, not the root path or rule that produced it. The bridge pushes only the validated safe-prefix branch to hard-coded `origin`, with no force option, with hooks disabled, and with interactive credential prompts suppressed. Credential material and raw push diagnostics are never returned remotely.
+The public path-free repository index exposes the resulting `capabilities.push` boolean and, when enabled, `capabilities.write_current_branch: true`, not the root path or rules that produced them. The bridge normally pushes only the validated safe-prefix branch to hard-coded `origin`. RC8 can additionally push the exact currently checked-out branch when the operator has enabled that authority and the transaction satisfies the exact-base/clean-checkout checks. There is still no force option in RC8; hooks are disabled and interactive credential prompts are suppressed. Credential material and raw push diagnostics are never returned remotely.
+
+Current-branch writes are a distinct trust decision because they can advance `main`/`master` directly. They are disabled by default and configured with `llm-git-bridge configure-current-branch-write enable`. Candidate changes are built and tested in a detached worktree. Immediately before publication the daemon revalidates the authoritative current branch, exact HEAD and tracked-clean state, then uses a fast-forward-only Git update of the real checkout. If those conditions no longer hold, the transaction fails rather than overwriting local tracked work.
 
 A branch push can trigger **existing** Git hosting CI/workflows, and those workflows may execute the patched code. Blocking modifications to workflow/configuration files prevents one direct escalation path but cannot make an already-configured CI system safe for untrusted code. Enable bridge push only when the repository's existing CI policy is appropriate for remotely proposed branches.
 

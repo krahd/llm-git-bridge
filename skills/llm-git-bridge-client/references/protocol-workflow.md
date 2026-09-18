@@ -16,7 +16,7 @@ The repository index is path-free. Local repository paths are intentionally not 
 
 ### 1. Discover
 
-Read `v2/meta/repos.json`. Select by stable repository ID whenever possible; use a name only when it is unambiguous. Inspect the selected entry's effective `read`/`edit`/`push` capabilities before choosing an operation. In particular, do not request a push when `capabilities.push` is false; local root/override policy must change first, after which the client re-reads the index.
+Read `v2/meta/repos.json`. Select by stable repository ID whenever possible; use a name only when it is unambiguous. Inspect the selected entry's effective `read`/`edit`/`push` capabilities before choosing an operation. If `write_current_branch` is present and true, the exact current branch shown by the entry may also be a transaction target; absence means false. Do not request a push when `capabilities.push` is false; local root/override policy must change first, after which the client re-reads the index.
 
 ### 2. Refresh authoritative state
 
@@ -72,6 +72,10 @@ The declared `base_sha` must still equal the authoritative checkout HEAD when pr
 The branch tip must match the expected base unless the daemon is recovering the exact same already-committed transaction.
 
 The bridge deliberately does not auto-rebase or auto-merge.
+
+### Authorised current branch
+
+When `write_current_branch` is true, the transaction may name the exact current branch shown by `repos.json`, including `main`. Its `base_sha` must equal the current repository `head` when processed and the authoritative checkout must remain tracked-clean. A branch switch, tracked local edit, or HEAD advance makes the request stale/failing; regenerate from fresh state. A requested remote push still requires `capabilities.push: true` and `"push": true`.
 
 ## Concurrency semantics
 

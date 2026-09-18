@@ -106,9 +106,17 @@ llm-git-bridge configure-push my-repo disable
 llm-git-bridge configure-push my-repo inherit
 ```
 
-`inherit` removes the exception. Root permission is still only the local half of the gate: a transaction must also contain `"push": true`. The bridge pushes only the validated safe-prefix branch to `origin`, without force.
+`inherit` removes the exception. Root permission is still only the local half of the gate: a transaction must also contain `"push": true`.
 
-The public `repos.json` advertises effective `read`, `edit`, and `push` booleans so a remote client can avoid requesting unavailable capabilities. These booleans do not widen authority: protected/default-branch promotion remains intentionally outside the remote protocol. Perform promotion through your normal Git/GitHub review policy after validating the safe branch.
+Safe-prefix branches remain the default write target. To permit transactions to write the repository's exact currently checked-out branch (for example `main`), enable the additional local authority:
+
+```bash
+llm-git-bridge configure-current-branch-write enable
+```
+
+The request must still name the exact current branch and current HEAD as `base_sha`; the authoritative checkout must be tracked-clean. The bridge builds/tests the candidate in isolation, revalidates the checkout, fast-forwards the real current branch, and then performs the requested ordinary push to `origin`. No force is used.
+
+The public `repos.json` advertises effective `read`, `edit`, and `push` booleans so a remote client can avoid requesting unavailable capabilities. When current-branch writes are enabled it additionally advertises `write_current_branch: true`; absence means false.
 
 ## Doctor and diagnostics
 

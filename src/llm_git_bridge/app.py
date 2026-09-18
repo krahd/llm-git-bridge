@@ -99,6 +99,7 @@ def default_config() -> dict[str, Any]:
         "repo_overrides": {},
         "safe_branch_prefix": "ai/",
         "allow_commit": True,
+        "allow_current_branch_write": False,
         "poll_interval": 1.0,
         "registry_scan_interval": 30.0,
         "max_workers": 1,
@@ -303,6 +304,8 @@ def _validate_config(cfg: dict[str, Any]) -> dict[str, Any]:
 
     if not isinstance(cfg.get("allow_commit"), bool):
         raise BridgeError("config allow_commit must be a boolean")
+    if not isinstance(cfg.get("allow_current_branch_write"), bool):
+        raise BridgeError("config allow_current_branch_write must be a boolean")
     repo_overrides = cfg.get("repo_overrides")
     if not isinstance(repo_overrides, dict):
         raise BridgeError("config repo_overrides must be an object keyed by repository ID")
@@ -485,12 +488,16 @@ def transport_from_config(cfg: dict[str, Any]) -> RcloneTransport:
 def _public_capabilities(cfg: dict[str, Any], registry: dict[str, Any]) -> dict[str, dict[str, bool]]:
     capabilities: dict[str, dict[str, bool]] = {}
     allow_commit = bool(cfg.get("allow_commit", True))
+    allow_current = bool(cfg.get("allow_current_branch_write", False))
     for repo_id, entry in registry.get("repos", {}).items():
-        capabilities[repo_id] = {
+        repo_capabilities = {
             "read": True,
             "edit": allow_commit,
             "push": _repo_push_allowed(cfg, repo_id, Path(entry["path"])),
         }
+        if allow_current:
+            repo_capabilities["write_current_branch"] = allow_commit
+        capabilities[repo_id] = repo_capabilities
     return capabilities
 
 
@@ -1522,6 +1529,7 @@ class _TransactionWorkerTask:
     safe_branch_prefix: str
     allow_commit: bool
     allow_push: bool
+    allow_current_branch_write: bool = False
 
 
 @dataclass(frozen=True)
@@ -2174,6 +2182,7 @@ def _prepare_transaction_worker_task(
         safe_branch_prefix=str(cfg.get("safe_branch_prefix", "ai/")),
         allow_commit=bool(cfg.get("allow_commit", True)),
         allow_push=_repo_push_allowed(cfg, repo_id, Path(entry["path"])),
+        allow_current_branch_write=bool(cfg.get("allow_current_branch_write", False)),
     )
 
 
@@ -2195,6 +2204,7 @@ def _run_transaction_worker(
         commands=json.loads(task.commands_json),
         allow_commit=task.allow_commit,
         allow_push=task.allow_push,
+        allow_current_branch_write=task.allow_current_branch_write,
         cancel_check=cancel_check,
     )
     return _TransactionWorkerOutcome(dict(outcome.result), outcome.snapshot)
@@ -3041,6 +3051,10 @@ def cmd_status(_args: argparse.Namespace) -> int:
         f"{int(cfg.get('max_pending_jobs', 8))} max pending jobs"
     )
     print(f"repository auto-discovery: every {float(cfg.get('registry_scan_interval', 30.0)):.1f}s")
+    print(
+        "current-branch writes: "
+        f"{'enabled' if cfg.get('allow_current_branch_write', False) else 'disabled'}"
+    )
     if REGISTRY_FILE.exists():
         reg = load_registry()
         repos = reg.get("repos", {})
@@ -3344,6 +3358,17 @@ def cmd_configure_push(args: argparse.Namespace) -> int:
     return 0
 
 
+def cmd_configure_current_branch_write(args: argparse.Namespace) -> int:
+    cfg = load_config()
+    cfg["allow_current_branch_write"] = args.action == "enable"
+    _save_config_and_refresh_registry(cfg)
+    print(
+        "current-branch writes "
+        f"{'enabled' if args.action == 'enable' else 'disabled'}"
+    )
+    return 0
+
+
 def build_parser() -> argparse.ArgumentParser:
     p = argparse.ArgumentParser(prog=APP_NAME)
     sub = p.add_subparsers(dest="command", required=True)
@@ -3414,6 +3439,10 @@ def build_parser() -> argparse.ArgumentParser:
     s.add_argument("repo")
     s.add_argument("action", choices=["enable", "disable", "inherit"])
     s.set_defaults(func=cmd_configure_push)
+
+    s = sub.add_parser("configure-current-branch-write")
+    s.add_argument("action", choices=["enable", "disable"])
+    s.set_defaults(func=cmd_configure_current_branch_write)
 
     return p
 

@@ -12,12 +12,12 @@ This file records the failure modes the skill must continue to resist when maint
 6. **Inbox-presence misdiagnosis** — A visible request can be actively processing or awaiting cleanup. Do not resubmit solely because it remains present.
 7. **HMAC overclaim** — A remote client cannot independently verify `bridge_auth` without the private local key.
 8. **Partial-success collapse** — Preserve durable commit success when push or snapshot publication fails secondarily.
-9. **Protected-branch overreach** — Remote protocol does not merge/promote to `main`; do not fabricate a transaction that bypasses local promotion policy.
+9. **Current-branch authority overreach** — Do not target `main` merely because it exists. Direct current-branch mutation is permitted only when the selected repository advertises `write_current_branch: true`, the target exactly equals its current branch, and the request uses the exact current head. RC8 still does not expose remote merge or force-push.
 10. **Arbitrary-shell temptation** — `run` contains local symbolic names only. Never place argv/shell text in a request.
 11. **Sandbox overclaim** — Configured commands can execute patched code with local-user privileges. The bridge is not an OS sandbox.
 12. **Safety-boundary bypass** — Do not route around stale base, tracked dirt, protected paths, symlink/submodule, push-policy, or replay-identity rejections.
 13. **Concurrency overclaim** — One watcher owns transport; only local execution across different canonical repositories may overlap. Same repository remains serial.
-14. **Premature completion** — Distinguish request upload, commit, push, materialisation, and protected-branch promotion as separate evidence states.
+14. **Premature completion** — Distinguish request upload, commit, current-branch update, push, and materialisation as separate evidence states.
 15. **Version drift** — If runtime version differs from the bundled assumptions, read the deployed protocol/security/concurrency docs before mutation.
 16. **Manual-registration assumption** — Do not tell the operator to `scan` for every repository. Repositories beneath approved roots are auto-discovered; adding a new root remains local policy.
 17. **Repository-ID privilege inheritance** — If a repository is locally replaced and receives a new ID, never assume configured commands or push permission follow its name/path. Re-read the public registry.

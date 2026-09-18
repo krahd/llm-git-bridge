@@ -13,7 +13,7 @@ Replace example IDs, repository names, SHAs, branches, patches, and command name
 }
 ```
 
-Do not add `"branch": "main"` merely to read the current checkout; explicit branch materialisation is limited to safe-prefix branches.
+Do not add `"branch": "main"` merely to read the current checkout; explicit branch materialisation is limited to safe-prefix branches. Current/default-branch authority applies to edit transactions only.
 
 ## Materialise an existing bridge branch
 
@@ -69,6 +69,27 @@ Do not add `"branch": "main"` merely to read the current checkout; explicit bran
 ```
 
 `push: true` succeeds only when the operator has independently enabled push for that repository.
+
+## Edit the authorised current branch
+
+Only use this form when the repository entry advertises `"write_current_branch": true`. The branch must exactly match the entry's current `branch`, and `base_sha` must exactly match its current `head`.
+
+```json
+{
+  "protocol": 2,
+  "kind": "transaction",
+  "transaction_id": "tx-main-state-20260917-m1n2",
+  "repo": "my-repo",
+  "base_sha": "0123456789abcdef0123456789abcdef01234567",
+  "branch": "main",
+  "patch": "diff --git a/state.md b/state.md\n--- a/state.md\n+++ b/state.md\n@@ -1 +1,2 @@\n state\n+checkpoint\n",
+  "run": [],
+  "commit_message": "Persist conversation state",
+  "push": true
+}
+```
+
+This is an ordinary fast-forward current-branch update, not a merge/promotion shortcut and not a force push.
 
 ## Dependent edits
 

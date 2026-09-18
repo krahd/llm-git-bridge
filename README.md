@@ -2,9 +2,9 @@
 
 `llm-git-bridge` lets an LLM or agent work safely with Git repositories that remain on your own machine.
 
-It exposes a deliberately small mailbox protocol for repository discovery, filtered snapshots, patch transactions, local validation commands, commits, and optional safe-branch pushes. Google Drive through `rclone` is the first transport, but the core protocol is provider-neutral: the remote client does not need direct filesystem access, a GitHub token, or arbitrary shell access on the host.
+It exposes a deliberately small mailbox protocol for repository discovery, filtered snapshots, patch transactions, local validation commands, commits, and optional Git pushes. Google Drive through `rclone` is the first transport, but the core protocol is provider-neutral: the remote client does not need direct filesystem access, a GitHub token, or arbitrary shell access on the host.
 
-> **Status:** `1.0.0rc6` protocol-v2 release candidate. RC6 retains the RC5 automatic-discovery and bounded-concurrency model while adding multi-root inherited policy, path-free effective capabilities, safe v1 migration, a re-runnable setup wizard, and an idempotent installer/update path. Local transaction execution may overlap across different canonical repositories; same-repository mutation remains serial. Existing and new configurations default to `max_workers=1` unless the operator explicitly enables concurrency.
+> **Status:** `1.0.0rc8` protocol-v2 release candidate. RC8 retains RC7 automatic discovery, inherited push policy, repository-identity hardening and bounded concurrency, and adds an explicit opt-in for transactions that write the repository's currently checked-out branch (including `main`) while preserving exact-base and clean-checkout safety. Existing configurations keep this authority disabled until the local operator enables it.
 
 ## Why use it?
 
@@ -35,7 +35,7 @@ single local watcher
        +--> isolated Git worktree
        +--> apply/stage patch
        +--> run locally configured checks
-       +--> commit to safe branch
+       +--> commit to safe branch or authorised current branch
        +--> optional push to origin
        |
        v
@@ -89,7 +89,13 @@ llm-git-bridge configure-command my-repo test \
   python3 -m unittest discover -s tests -v
 ```
 
-Root-level push permission is only one half of the push gate: every remote transaction must still explicitly request `"push": true`, and the bridge still restricts pushes to validated safe-prefix branches. Per-repository exceptions are available when a repository should differ from its root:
+Root-level push permission is one half of the push gate: every remote transaction must still explicitly request `"push": true`. By default, transactions may write only validated safe-prefix branches. An operator may additionally allow writes to the repository's **currently checked-out branch** (for example `main`):
+
+```bash
+llm-git-bridge configure-current-branch-write enable
+```
+
+That setting is deliberately global and default-off in RC8. It does not bypass root/repository push permission, exact-base checks, tracked-clean checkout requirements, or remote branch protection. Per-repository push exceptions remain available:
 
 ```bash
 llm-git-bridge configure-push my-repo disable
@@ -119,7 +125,7 @@ A transaction is one JSON object containing an inline unified diff:
 }
 ```
 
-The bridge checks the repository and base SHA, creates an isolated worktree, applies and validates the patch, runs only locally configured symbolic commands, commits, optionally pushes the safe-prefix branch, then publishes an authenticated result.
+The bridge checks the repository and base SHA, creates an isolated worktree, applies and validates the patch, runs only locally configured symbolic commands, commits, optionally pushes the target branch, then publishes an authenticated result. Safe-prefix branches remain the default. When current-branch writes are explicitly enabled, the transaction may instead name the exact currently checked-out branch; the bridge revalidates that branch and base before advancing the real checkout with a fast-forward-only update.
 
 ## Multiple clients and ChatGPT sessions
 
@@ -155,7 +161,7 @@ By default it:
 - uploads only filtered tracked text content in snapshots;
 - omits `.git` history, untracked contents, common credentials, private keys, service-account material, binaries, symlinks, and oversized files;
 - rejects stale base SHAs and tracked-dirty authoritative checkouts;
-- restricts remote-created branches to a safe prefix (`ai/` by default);
+- restricts remote-created branches to a safe prefix (`ai/` by default), while allowing the exact currently checked-out branch only when that authority is explicitly enabled locally;
 - rejects symlink/submodule changes and protected CI/automation paths;
 - accepts only locally configured symbolic command names;
 - disables push unless it is locally enabled for the repository and explicitly requested by the transaction;

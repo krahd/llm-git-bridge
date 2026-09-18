@@ -804,8 +804,13 @@ def public_registry(
         capabilities = capabilities_by_repo.get(repo_id)
         if (
             not isinstance(capabilities, dict)
-            or set(capabilities) != {"read", "edit", "push"}
+            or not {"read", "edit", "push"}.issubset(capabilities)
+            or set(capabilities) - {"read", "edit", "push", "write_current_branch"}
             or not all(isinstance(capabilities[key], bool) for key in ("read", "edit", "push"))
+            or (
+                "write_current_branch" in capabilities
+                and not isinstance(capabilities["write_current_branch"], bool)
+            )
         ):
             raise BridgeError(f"missing or invalid public capabilities for repository: {repo_id}")
         public_entries.append(
@@ -1008,9 +1013,9 @@ def build_snapshot(
     }
 
 
-def validate_safe_branch_name(branch: Any, safe_branch_prefix: str) -> str:
-    if not isinstance(branch, str) or not branch.startswith(safe_branch_prefix):
-        raise BridgeError(f"branch must start with {safe_branch_prefix!r}")
+def validate_branch_name(branch: Any) -> str:
+    if not isinstance(branch, str):
+        raise BridgeError("branch must be a string")
     if not re.fullmatch(r"[A-Za-z0-9._/-]{1,200}", branch):
         raise BridgeError("branch contains unsupported characters")
     parts = branch.split("/")
@@ -1026,7 +1031,20 @@ def validate_safe_branch_name(branch: Any, safe_branch_prefix: str) -> str:
     return branch
 
 
-def validate_transaction(obj: dict[str, Any], *, safe_branch_prefix: str, max_patch_bytes: int = DEFAULT_MAX_PATCH_BYTES) -> dict[str, Any]:
+def validate_safe_branch_name(branch: Any, safe_branch_prefix: str) -> str:
+    branch = validate_branch_name(branch)
+    if not branch.startswith(safe_branch_prefix):
+        raise BridgeError(f"branch must start with {safe_branch_prefix!r}")
+    return branch
+
+
+def validate_transaction(
+    obj: dict[str, Any],
+    *,
+    safe_branch_prefix: str,
+    allowed_exact_branch: str | None = None,
+    max_patch_bytes: int = DEFAULT_MAX_PATCH_BYTES,
+) -> dict[str, Any]:
     if obj.get("protocol") != PROTOCOL_VERSION:
         raise BridgeError(f"unsupported protocol: {obj.get('protocol')!r}")
     if obj.get("kind") != "transaction":
@@ -1038,7 +1056,11 @@ def validate_transaction(obj: dict[str, Any], *, safe_branch_prefix: str, max_pa
     base_sha = obj.get("base_sha")
     if not isinstance(base_sha, str) or not re.fullmatch(r"(?:[0-9a-fA-F]{40}|[0-9a-fA-F]{64})", base_sha):
         raise BridgeError("base_sha must be a 40- or 64-character hex object ID")
-    branch = validate_safe_branch_name(obj.get("branch"), safe_branch_prefix)
+    raw_branch = obj.get("branch")
+    if allowed_exact_branch is not None and raw_branch == allowed_exact_branch:
+        branch = validate_branch_name(raw_branch)
+    else:
+        branch = validate_safe_branch_name(raw_branch, safe_branch_prefix)
     patch = obj.get("patch")
     if not isinstance(patch, str) or not patch.strip():
         raise BridgeError("patch must be a non-empty string")
@@ -1722,6 +1744,7 @@ def process_transaction(
     commands: dict[str, list[str]] | None = None,
     allow_commit: bool = True,
     allow_push: bool = False,
+    allow_current_branch_write: bool = False,
     cancel_check: Callable[[], bool] | None = None,
 ) -> TransactionOutcome:
     started = time.monotonic()
@@ -1732,13 +1755,27 @@ def process_transaction(
         timings[name] = round(now - since, 4)
         return now
 
-    tx = validate_transaction(tx, safe_branch_prefix=safe_branch_prefix)
+    repo = repo.resolve()
+    current_head = ensure_tracked_clean(repo)
+    current_branch: str | None = None
+    if allow_current_branch_write:
+        symbolic_head = git(repo, "symbolic-ref", "--quiet", "--short", "HEAD", check=False, timeout=30)
+        current_branch = symbolic_head.stdout.strip() if symbolic_head.returncode == 0 else None
+    allowed_exact_branch = current_branch if allow_current_branch_write else None
+    tx = validate_transaction(
+        tx,
+        safe_branch_prefix=safe_branch_prefix,
+        allowed_exact_branch=allowed_exact_branch,
+    )
     txid = tx["transaction_id"]
     branch = tx["branch"]
     base_sha = tx["base_sha"].lower()
     request_hash = transaction_request_sha256(tx)
-    repo = repo.resolve()
-    current_head = ensure_tracked_clean(repo)
+    direct_current_branch = bool(
+        allow_current_branch_write
+        and current_branch is not None
+        and branch == current_branch
+    )
     claim_ref = _transaction_claim_ref(txid)
     branch_ref = f"refs/heads/{branch}"
     ref_oids = _exact_direct_ref_oids(
@@ -1808,6 +1845,12 @@ def process_transaction(
         # worktree avoids interfering with a user who checked out the durable
         # bridge commit after the previous daemon died.
         add_disposable_worktree(repo, "--detach", str(wt), recovered_commit)
+        worktree_head_ref = ""
+    elif existing and direct_current_branch:
+        # A checked-out branch cannot also be attached to another worktree.
+        # Build and validate its candidate commit from a detached worktree, then
+        # fast-forward the authoritative checkout coherently after revalidation.
+        add_disposable_worktree(repo, "--detach", str(wt), base_sha)
         worktree_head_ref = ""
     elif existing:
         # Attach an existing target branch while building the transaction. Git
@@ -1940,30 +1983,128 @@ def process_transaction(
             ):
                 raise BridgeError("commit object verification failed")
 
-            # Publish the commit with a ref-level compare-and-swap. For an existing
-            # branch the old value must still be the declared base; for a new branch
-            # an empty old oid requires that the ref still not exist. This closes the
-            # validation-to-commit race without widening the trusted state surface.
-            target_ref = f"refs/heads/{branch}"
-            expected_old = base_sha if existing else ""
-            update_proc = run(
-                [
-                    "git",
-                    "-C",
-                    str(repo),
-                    "update-ref",
-                    "--no-deref",
-                    "-m",
-                    f"llm-git-bridge transaction {txid}",
-                    target_ref,
-                    commit_sha,
-                    expected_old,
-                ],
-                check=False,
-                timeout=60,
-            )
-            if update_proc.returncode != 0:
-                raise BridgeError("target branch changed before commit publication")
+            if direct_current_branch:
+                latest_head = ensure_tracked_clean(repo)
+                latest_symbolic = git(
+                    repo,
+                    "symbolic-ref",
+                    "--quiet",
+                    "--short",
+                    "HEAD",
+                    check=False,
+                    timeout=30,
+                )
+                latest_branch = latest_symbolic.stdout.strip() if latest_symbolic.returncode == 0 else None
+                if latest_branch != branch or latest_head != base_sha:
+                    raise BridgeError("current branch changed before commit publication")
+                merge_proc = run(
+                    [
+                        "git",
+                        "-C",
+                        str(repo),
+                        "-c",
+                        "core.hooksPath=/dev/null",
+                        "merge",
+                        "--ff-only",
+                        "--no-edit",
+                        commit_sha,
+                    ],
+                    check=False,
+                    timeout=120,
+                    env={**os.environ, "GIT_TERMINAL_PROMPT": "0"},
+                )
+                if merge_proc.returncode != 0:
+                    raise BridgeError("current branch changed before commit publication")
+                if ensure_tracked_clean(repo) != commit_sha:
+                    raise BridgeError("current branch did not advance to the bridge commit")
+                verify_symbolic = git(
+                    repo,
+                    "symbolic-ref",
+                    "--quiet",
+                    "--short",
+                    "HEAD",
+                    check=False,
+                    timeout=30,
+                )
+                if verify_symbolic.returncode != 0 or verify_symbolic.stdout.strip() != branch:
+                    # A human can theoretically switch branches after the final
+                    # pre-merge check but before Git acquires its own locks. If the
+                    # fast-forward landed on that other branch, repair only when the
+                    # checkout is still tracked-clean at our exact commit. Never
+                    # discard concurrent tracked user work in order to recover.
+                    wrong_branch = verify_symbolic.stdout.strip() if verify_symbolic.returncode == 0 else ""
+                    if wrong_branch and wrong_branch != branch:
+                        try:
+                            wrong_head = ensure_tracked_clean(repo)
+                        except BridgeError:
+                            wrong_head = ""
+                        if wrong_head == commit_sha:
+                            wrong_ref = f"refs/heads/{wrong_branch}"
+                            rollback_ref = run(
+                                [
+                                    "git",
+                                    "-C",
+                                    str(repo),
+                                    "update-ref",
+                                    "--no-deref",
+                                    "-m",
+                                    f"llm-git-bridge rollback {txid}",
+                                    wrong_ref,
+                                    base_sha,
+                                    commit_sha,
+                                ],
+                                check=False,
+                                timeout=60,
+                            )
+                            if rollback_ref.returncode == 0:
+                                rollback_symbolic = git(
+                                    repo,
+                                    "symbolic-ref",
+                                    "--quiet",
+                                    "--short",
+                                    "HEAD",
+                                    check=False,
+                                    timeout=30,
+                                )
+                                if (
+                                    rollback_symbolic.returncode == 0
+                                    and rollback_symbolic.stdout.strip() == wrong_branch
+                                ):
+                                    rollback_tree = run(
+                                        ["git", "-C", str(repo), "reset", "--hard", base_sha],
+                                        check=False,
+                                        timeout=60,
+                                    )
+                                    if rollback_tree.returncode != 0:
+                                        raise BridgeError(
+                                            "current branch changed during commit publication; manual inspection required"
+                                        )
+                    raise BridgeError("current branch changed during commit publication")
+            else:
+                # Publish the commit with a ref-level compare-and-swap. For an existing
+                # branch the old value must still be the declared base; for a new branch
+                # an empty old oid requires that the ref still not exist. This closes the
+                # validation-to-commit race without widening the trusted state surface.
+                target_ref = f"refs/heads/{branch}"
+                expected_old = base_sha if existing else ""
+                update_proc = run(
+                    [
+                        "git",
+                        "-C",
+                        str(repo),
+                        "update-ref",
+                        "--no-deref",
+                        "-m",
+                        f"llm-git-bridge transaction {txid}",
+                        target_ref,
+                        commit_sha,
+                        expected_old,
+                    ],
+                    check=False,
+                    timeout=60,
+                )
+                if update_proc.returncode != 0:
+                    raise BridgeError("target branch changed before commit publication")
             commit_created = True
             t = mark("commit_s", t)
 

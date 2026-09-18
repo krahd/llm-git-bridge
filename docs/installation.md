@@ -127,7 +127,13 @@ llm-git-bridge configure-push my-repo inherit
 
 `inherit` removes the repository exception and returns to root policy. Repository overrides are bound to the bridge's history-based repository identity, so replacing an unrelated repository at the same path does not inherit the old exception.
 
-Even when push is permitted, the bridge can push only the transaction's validated safe-prefix branch to `origin`; it cannot force-push or remotely merge into a protected/default branch.
+Safe-prefix branches remain the default write target. RC8 also offers a separate global, default-off authority for transactions that target the repository's exact currently checked-out branch, including `main`:
+
+```bash
+llm-git-bridge configure-current-branch-write enable
+```
+
+Ordinary repository/root push permission is still required for a requested remote push. Current-branch transactions require exact current HEAD and a tracked-clean checkout and advance the checkout only with fast-forward Git. RC8 still does not force-push or remotely merge.
 
 ## 7. Reconfigure later
 

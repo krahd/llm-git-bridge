@@ -56,6 +56,6 @@ Snapshot generation/publication is also secondary to the durable commit. By defa
 
 If result upload times out or transport fails after the local result is durable, allow the daemon's recovery logic to reconcile/republish. Avoid duplicate changed requests. In concurrent mode, post-durable publication failure must not be interpreted by the client as permission to re-execute the mutation.
 
-## Promotion boundary
+## Current-branch boundary
 
-A safe-branch transaction result does not prove protected `main` changed. Protected-branch promotion is a separate local/human operation. After promotion, independently materialise or otherwise verify the protected branch before reporting it as promoted.
+A safe-branch transaction result does not prove `main` changed. When `write_current_branch` is explicitly available, a transaction that targets the exact current branch can update it directly. Treat that branch as updated only when the terminal result reports the expected commit; if remote persistence was requested, also require successful push status. For consequential follow-up work, refresh current repository state before constructing the next dependent request.

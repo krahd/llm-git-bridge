@@ -16,7 +16,7 @@ publication/cleanup stages before any worker count is raised. See
 [scheduler-architecture.md](scheduler-architecture.md) for the staged contracts
 and worker-lifecycle rationale.
 
-Version `1.0.0rc7` retains the RC6 watcher/worker ownership, automatic-discovery and multi-root policy model, while hardening repository identity, strict configuration validation, SHA-256 object IDs and mailbox-scoped replay state. Drive/rclone transport, registry mutation and durable result publication remain watcher-owned; the scheduler owns worker lifecycle, canonical-repository exclusion, bounded backlog admission and fairness. The complete ownership and recovery contract is documented in `scheduler-architecture.md`.
+Version `1.0.0rc8` retains the RC7 watcher/worker ownership, automatic-discovery, multi-root policy and replay model, and adds a separate default-off authority for writing the repository's currently checked-out branch. Such transactions still build and validate their candidate commit in an isolated detached worktree; immediately before publication the daemon revalidates the authoritative branch, exact HEAD and tracked-clean state, then advances that checkout with fast-forward-only Git before any requested ordinary push to `origin`. Safe-prefix transactions keep the existing compare-and-swap ref path. Drive/rclone transport, registry mutation and durable result publication remain watcher-owned; the scheduler owns worker lifecycle, canonical-repository exclusion, bounded backlog admission and fairness.
 
 ## Multi-repository model
 

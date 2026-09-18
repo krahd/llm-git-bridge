@@ -21,7 +21,8 @@ v2/results/<request-id>.json
   "capabilities": {
     "read": true,
     "edit": true,
-    "push": true
+    "push": true,
+    "write_current_branch": true
   },
   "head": "0123456789abcdef0123456789abcdef01234567",
   "branch": "main",
@@ -32,7 +33,7 @@ v2/results/<request-id>.json
 }
 ```
 
-Capabilities describe effective local authority for normal bridge operations; they do not authorize protected/default-branch promotion. The underlying filesystem roots and policy rules remain local.
+Capabilities describe effective local authority. `write_current_branch` is optional and appears only when the local operator has enabled RC8 current-branch writes; absence means false. It permits a transaction to target the repository's exact currently checked-out branch in addition to the normal safe-prefix namespace. It does not itself grant remote push: `capabilities.push` and transaction `"push": true` remain separate requirements. The underlying filesystem roots and policy rules remain local.
 
 All requests are single JSON objects. The filename is `<transaction_id>.json`, and the `transaction_id` field must match it exactly. Transaction IDs are 1–120 ASCII letters/digits/underscore/hyphen, starting with an alphanumeric character; dots and path components are not accepted. Duplicate JSON keys and oversized request objects are rejected.
 
@@ -103,7 +104,7 @@ Required fields:
 - `transaction_id`: safe filename token
 - `repo`: repository ID or unambiguous repository name
 - `base_sha`: full 40-character SHA-1 or 64-character SHA-256 commit object ID
-- `branch`: branch beginning with the locally configured safe prefix
+- `branch`: normally a branch beginning with the locally configured safe prefix. When `capabilities.write_current_branch` is true, the exact currently checked-out branch reported by the repository index is also accepted.
 - `patch`: unified diff text
 - `run`: list of locally configured symbolic command names (safe 1–64 character tokens)
 
@@ -121,6 +122,8 @@ Configured command argv remain entirely local, and one transaction may request a
 
 Push is two-key: effective local policy must permit it and the transaction must contain `"push": true`. The public repository entry exposes the current effective `capabilities.push` boolean, but that boolean is descriptive rather than an additional authorization mechanism. The remote is fixed to `origin`, the refspec is fixed to the validated transaction branch, Git hooks are disabled, and force-push is never requested. A push failure is reported as a secondary `push.status: error` while preserving the successfully tested local commit.
 
+When the transaction targets the explicitly authorised current branch, the candidate commit is still constructed and checked in an isolated detached worktree. Immediately before publication the daemon re-checks the authoritative checkout's current branch, exact HEAD and tracked-clean state. It then advances the real checkout with a fast-forward-only Git operation before any requested push. This keeps the branch ref, index and working tree coherent instead of moving the checked-out ref behind the user's working tree. A stale HEAD, branch switch or tracked local edit causes the transaction to fail rather than overwrite local work.
+
 Bridge commits include reserved trailers containing the transaction ID and a SHA-256 hash of the complete canonical request. These trailers are internal replay metadata, not client-controlled commit-message text. If the daemon crashes after creating the commit but before persisting its result, an identical retry recovers that exact commit without reapplying the patch or rerunning configured commands; the same transaction ID paired with a changed request is rejected.
 
 Branch snapshot construction and publication are deferred by default so neither local snapshot generation nor a slow mailbox upload delays the transaction result. The result then contains `snapshot_deferred: true`; the client can issue a branch materialisation request when it needs a fresh remote snapshot. `publish_snapshot: true` retains synchronous publication for clients that explicitly require it. A post-commit snapshot-generation or publication failure is reported as a secondary `snapshot_error` and does not erase the already-created commit.
@@ -137,4 +140,4 @@ The remote result is the durable acknowledgement. Results carry a local-key HMAC
 
 `v2/meta/repos.json` is maintained automatically for repositories beneath roots that the local operator has explicitly approved. Clients should re-read the index when a repository is newly created/removed, after the operator changes local policy, or when an unknown-repository result suggests their cached index may be stale. The default watcher discovery interval is 30 seconds; exact timing is operational state rather than a protocol ordering guarantee.
 
-The public index remains path-free. Local approved-root paths, root precedence rules, repository overrides, `.git` marker identities, logical-history identities, retired repository IDs, and configured command argv are not protocol fields; only the resulting effective `read`/`edit`/`push` capabilities are exposed. A repository ID can be retired if the local repository at that location is replaced with different history. Per-repository overrides and configured commands do not transfer to the replacement identity. A new or replacement repository legitimately inherits any policy of the approved root that contains it, because root policy is an explicit trust decision for all repositories beneath that boundary.
+The public index remains path-free. Local approved-root paths, root precedence rules, repository overrides, `.git` marker identities, logical-history identities, retired repository IDs, and configured command argv are not protocol fields; only the resulting effective capabilities are exposed. RC8 repositories may additionally advertise `write_current_branch: true`. A repository ID can be retired if the local repository at that location is replaced with different history. Per-repository overrides and configured commands do not transfer to the replacement identity. A new or replacement repository legitimately inherits any policy of the approved root that contains it, because root policy is an explicit trust decision for all repositories beneath that boundary.

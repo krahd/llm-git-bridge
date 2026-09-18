@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "llm-git-bridge"
-version = "1.0.0rc7"
+version = "1.0.0rc8"
 description = "Provider-agnostic bridge between LLM agents and local Git repositories"
 readme = "README.md"
 requires-python = ">=3.11"
