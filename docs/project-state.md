@@ -201,3 +201,8 @@ The RC6 adversarial pass additionally requires capability publication to remain 
 ## RC7 post-RC6 hardening candidate (2026-09-17)
 
 RC7 closes defects found by the post-RC6 adversarial pass: stricter version/schema validation, safer registry identity under moves/copies and unborn repositories, SHA-256 Git object-ID support, authenticated mailbox-scoped replay binding, and stronger installer/daemon rollback behaviour. Replay markers from RC6 migrate only after the current mailbox is authenticated and bound; subsequent mailbox retargeting fails closed instead of inheriting prior replay authority. Final release qualification still requires the complete configured test gate, independent materialisation, guarded main promotion, daemon reload, and live production verification.
+
+
+## RC9 structured self-update live canary (2026-09-18)
+
+This entry is intentionally harmless release-state evidence used to qualify and exercise the structured `self_update` path end to end. The candidate must pass the normal configured full test gate on a safe branch before the running bridge may promote and activate its exact commit through the stable updater.
