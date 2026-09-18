@@ -68,19 +68,21 @@ RRR is the normal consumer route. The core keeps a transport boundary so an adva
 
 ## 4. Core and relay protocols
 
-RR should preserve the existing protocol-v2 Git request semantics until a core change genuinely requires a new protocol version. RRR adds an outer envelope rather than rewriting Git semantics.
+RR preserves the existing protocol-v2 Git request semantics until a Git-core change genuinely requires a new version. The relay adds a small domain-neutral outer Reach envelope rather than rewriting Git semantics.
 
-A relay envelope carries:
-- RRR protocol version;
+The outer envelope carries at minimum:
+- Reach envelope version;
+- product namespace (for example `repo`);
 - globally unique message ID;
 - opaque endpoint ID;
-- SHA-256 of canonical core request bytes;
+- message kind and optional correlation ID;
+- SHA-256 of canonical product payload bytes;
 - explicit expiry;
-- the existing core request.
+- bounded product payload.
 
-The local daemon independently canonicalises and hashes the core request. If the same transaction ID arrives with different bytes, it is rejected as an identity conflict. If identical bytes arrive again, including through another transport, the local replay system returns or republishes the durable result rather than executing the mutation again.
+For RepoReach, the product payload is the existing protocol-v2 Git request/result. The local daemon independently canonicalises and hashes that request. If the same transaction ID arrives with different bytes, it is rejected as an identity conflict. If identical bytes arrive again, the local replay system returns or republishes the durable result rather than executing the mutation again.
 
-This is the basis for transparent multipath delivery: RRR, MCP and mailbox paths can all feed the same local transaction registry.
+The outer envelope deliberately contains no repository, Git or conversation semantics beyond a product namespace. This is the seam that a future ConvoReach sibling can reuse.
 
 ## 5. Transport adapter contract
 
