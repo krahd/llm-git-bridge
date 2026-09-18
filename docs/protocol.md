@@ -22,7 +22,8 @@ v2/results/<request-id>.json
     "read": true,
     "edit": true,
     "push": true,
-    "write_current_branch": true
+    "write_current_branch": true,
+    "self_update": true
   },
   "head": "0123456789abcdef0123456789abcdef01234567",
   "branch": "main",
@@ -33,7 +34,24 @@ v2/results/<request-id>.json
 }
 ```
 
-Capabilities describe effective local authority. `write_current_branch` is optional and appears only when the local operator has enabled RC8 current-branch writes; absence means false. It permits a transaction to target the repository's exact currently checked-out branch in addition to the normal safe-prefix namespace. It does not itself grant remote push: `capabilities.push` and transaction `"push": true` remain separate requirements. The underlying filesystem roots and policy rules remain local.
+Capabilities describe effective local authority. `write_current_branch` is optional and appears only when the local operator has enabled current-branch writes; absence means false. `self_update` is optional, appears only for the bridge repository when RC9 self-update is locally enabled, and means that a qualified bridge commit may be handed to the local updater. Neither capability grants ordinary push by itself: `capabilities.push` and transaction `"push": true` remain separate requirements. The underlying filesystem roots and policy rules remain local.
+
+## Self-update request
+
+RC9 adds a deliberately narrow bridge-only update request. The target must already have a local full-test qualification receipt and the named safe source branch must point exactly at that commit:
+
+```json
+{
+  "protocol": 2,
+  "kind": "self_update",
+  "transaction_id": "tx-example-self-update",
+  "repo": "llm-git-bridge",
+  "target_sha": "0123456789abcdef0123456789abcdef01234567",
+  "source_branch": "ai/example-qualified-update"
+}
+```
+
+The request contains no command or executable path. When accepted, the watcher writes a bounded local handoff for the installed updater, which materialises the exact qualified commit, performs guarded fast-forward promotion, switches the immutable runtime pointer and requires the watcher health marker for the exact target. Self-update is disabled by default and can be enabled only by the local operator.
 
 All requests are single JSON objects. The filename is `<transaction_id>.json`, and the `transaction_id` field must match it exactly. Transaction IDs are 1–120 ASCII letters/digits/underscore/hyphen, starting with an alphanumeric character; dots and path components are not accepted. Duplicate JSON keys and oversized request objects are rejected.
 
@@ -140,4 +158,4 @@ The remote result is the durable acknowledgement. Results carry a local-key HMAC
 
 `v2/meta/repos.json` is maintained automatically for repositories beneath roots that the local operator has explicitly approved. Clients should re-read the index when a repository is newly created/removed, after the operator changes local policy, or when an unknown-repository result suggests their cached index may be stale. The default watcher discovery interval is 30 seconds; exact timing is operational state rather than a protocol ordering guarantee.
 
-The public index remains path-free. Local approved-root paths, root precedence rules, repository overrides, `.git` marker identities, logical-history identities, retired repository IDs, and configured command argv are not protocol fields; only the resulting effective capabilities are exposed. RC8 repositories may additionally advertise `write_current_branch: true`. A repository ID can be retired if the local repository at that location is replaced with different history. Per-repository overrides and configured commands do not transfer to the replacement identity. A new or replacement repository legitimately inherits any policy of the approved root that contains it, because root policy is an explicit trust decision for all repositories beneath that boundary.
+The public index remains path-free. Local approved-root paths, root precedence rules, repository overrides, `.git` marker identities, logical-history identities, retired repository IDs, and configured command argv are not protocol fields; only the resulting effective capabilities are exposed. Repositories may advertise `write_current_branch: true` when that local authority is enabled; only the bridge repository may advertise `self_update: true`. A repository ID can be retired if the local repository at that location is replaced with different history. Per-repository overrides and configured commands do not transfer to the replacement identity. A new or replacement repository legitimately inherits any policy of the approved root that contains it, because root policy is an explicit trust decision for all repositories beneath that boundary.

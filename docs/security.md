@@ -8,6 +8,7 @@ The bridge deliberately exposes less protocol surface than a shell or a general-
 - create/edit/delete regular repository files through a validated patch;
 - create/update branches under the configured safe prefix;
 - when explicitly enabled locally, update the repository's exact currently checked-out branch using an exact-base fast-forward transaction;
+- when separately enabled locally, request a bridge self-update only to an exact commit that already has a local full-test qualification receipt and is the tip of the named safe source branch;
 - request symbolic command names that the user has explicitly configured locally;
 - request no more than 16 configured command executions in one transaction;
 - create commits.
@@ -16,7 +17,7 @@ The bridge deliberately exposes less protocol surface than a shell or a general-
 
 - supply arbitrary command argv or shell text;
 - push unless it has been enabled locally for that repository and explicitly requested by the transaction;
-- merge, force-push, choose a different remote/refspec, mutate repository administration settings, or export credentials;
+- merge, force-push, choose a different remote/refspec, mutate repository administration settings, export credentials, or supply arbitrary updater commands/paths;
 - branch names outside the configured safe prefix, except the exact currently checked-out branch when current-branch writes are explicitly enabled locally;
 - patching when tracked local modifications are present;
 - applying a transaction whose base SHA is stale;
@@ -41,7 +42,7 @@ The daemon never accepts command argv from a remote request. `run` contains only
 
 Push remains a two-key operation. Effective local policy must permit push for the repository, and the individual transaction must separately request `"push": true`. Local permission normally inherits from the most-specific configured repository root; a history-bound per-repository override can enable or disable an exception. A newly discovered repository therefore inherits the policy of the root the operator explicitly trusted, without requiring another manual allow-list entry.
 
-The public path-free repository index exposes the resulting `capabilities.push` boolean and, when enabled, `capabilities.write_current_branch: true`, not the root path or rules that produced them. The bridge normally pushes only the validated safe-prefix branch to hard-coded `origin`. RC8 can additionally push the exact currently checked-out branch when the operator has enabled that authority and the transaction satisfies the exact-base/clean-checkout checks. There is still no force option in RC8; hooks are disabled and interactive credential prompts are suppressed. Credential material and raw push diagnostics are never returned remotely.
+The public path-free repository index exposes the resulting `capabilities.push` boolean and, when enabled, `capabilities.write_current_branch: true`; RC9 may also expose `capabilities.self_update: true` only for the bridge repository. The index does not expose the root path or rules that produced those authorities. The bridge normally pushes only the validated safe-prefix branch to hard-coded `origin`. RC9 can additionally push the exact currently checked-out branch when the operator has enabled that authority and the transaction satisfies the exact-base/clean-checkout checks. Self-update is a separate local opt-in and accepts only an exact locally qualified safe-branch tip. There is still no force option; hooks are disabled and interactive credential prompts are suppressed. Credential material and raw push diagnostics are never returned remotely.
 
 Current-branch writes are a distinct trust decision because they can advance `main`/`master` directly. They are disabled by default and configured with `llm-git-bridge configure-current-branch-write enable`. Candidate changes are built and tested in a detached worktree. Immediately before publication the daemon revalidates the authoritative current branch, exact HEAD and tracked-clean state, then uses a fast-forward-only Git update of the real checkout. If those conditions no longer hold, the transaction fails rather than overwriting local tracked work.
 

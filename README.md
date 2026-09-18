@@ -4,7 +4,7 @@
 
 It exposes a deliberately small mailbox protocol for repository discovery, filtered snapshots, patch transactions, local validation commands, commits, and optional Git pushes. Google Drive through `rclone` is the first transport, but the core protocol is provider-neutral: the remote client does not need direct filesystem access, a GitHub token, or arbitrary shell access on the host.
 
-> **Status:** `1.0.0rc8` protocol-v2 release candidate. RC8 retains RC7 automatic discovery, inherited push policy, repository-identity hardening and bounded concurrency, and adds an explicit opt-in for transactions that write the repository's currently checked-out branch (including `main`) while preserving exact-base and clean-checkout safety. Existing configurations keep this authority disabled until the local operator enables it.
+> **Status:** `1.0.0rc9` protocol-v2 release candidate. RC9 retains RC8 direct current-branch authority and adds a separate default-off, qualification-gated self-update path for the bridge itself. Existing configurations keep both authorities disabled until the local operator enables them.
 
 ## Why use it?
 
@@ -95,7 +95,13 @@ Root-level push permission is one half of the push gate: every remote transactio
 llm-git-bridge configure-current-branch-write enable
 ```
 
-That setting is deliberately global and default-off in RC8. It does not bypass root/repository push permission, exact-base checks, tracked-clean checkout requirements, or remote branch protection. Per-repository push exceptions remain available:
+That setting is deliberately global and default-off. It does not bypass root/repository push permission, exact-base checks, tracked-clean checkout requirements, or remote branch protection. RC9 also exposes a separate default-off self-update authority for the bridge itself:
+
+```bash
+llm-git-bridge configure-self-update enable
+```
+
+Self-update accepts only an exact qualified bridge commit on a safe source branch; it does not expose arbitrary remote command execution. Per-repository push exceptions remain available:
 
 ```bash
 llm-git-bridge configure-push my-repo disable

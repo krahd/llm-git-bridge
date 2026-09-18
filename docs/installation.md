@@ -127,13 +127,21 @@ llm-git-bridge configure-push my-repo inherit
 
 `inherit` removes the repository exception and returns to root policy. Repository overrides are bound to the bridge's history-based repository identity, so replacing an unrelated repository at the same path does not inherit the old exception.
 
-Safe-prefix branches remain the default write target. RC8 also offers a separate global, default-off authority for transactions that target the repository's exact currently checked-out branch, including `main`:
+Safe-prefix branches remain the default write target. RC9 retains the separate global, default-off authority for transactions that target the repository's exact currently checked-out branch, including `main`:
 
 ```bash
 llm-git-bridge configure-current-branch-write enable
 ```
 
-Ordinary repository/root push permission is still required for a requested remote push. Current-branch transactions require exact current HEAD and a tracked-clean checkout and advance the checkout only with fast-forward Git. RC8 still does not force-push or remotely merge.
+Ordinary repository/root push permission is still required for a requested remote push. Current-branch transactions require exact current HEAD and a tracked-clean checkout and advance the checkout only with fast-forward Git. RC9 still does not force-push or remotely merge.
+
+RC9 also provides a separate bridge-only self-update authority. It is disabled by default and should be enabled only after the stable runtime/updater launchers have been installed:
+
+```bash
+llm-git-bridge configure-self-update enable
+```
+
+The remote protocol cannot supply updater commands or paths. A self-update target must already have a local full-test qualification receipt and must be the exact tip of its named safe source branch.
 
 ## 7. Reconfigure later
 

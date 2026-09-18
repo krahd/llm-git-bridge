@@ -188,6 +188,27 @@ class AppSelfUpdateTests(unittest.TestCase):
         self.assertTrue(caps["bridge"]["self_update"])
         self.assertNotIn("self_update", caps["other"])
 
+    def test_self_update_public_capabilities_are_accepted_by_public_registry(self):
+        cfg = app.default_config()
+        cfg["allow_self_update"] = True
+        local_registry = {
+            "repos": {
+                "bridge": {
+                    "id": "bridge",
+                    "name": "llm-git-bridge",
+                    "path": "/tmp/llm-git-bridge",
+                    "head": "a" * 40,
+                    "branch": "main",
+                    "dirty": False,
+                    "tracked_dirty": False,
+                    "untracked": False,
+                    "last_seen": "2026-09-18T00:00:00Z",
+                }
+            }
+        }
+        public = app.public_registry(local_registry, app._public_capabilities(cfg, local_registry))
+        self.assertTrue(public["repos"][0]["capabilities"]["self_update"])
+
 
 if __name__ == "__main__":
     unittest.main()

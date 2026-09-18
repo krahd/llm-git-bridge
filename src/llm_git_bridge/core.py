@@ -805,11 +805,15 @@ def public_registry(
         if (
             not isinstance(capabilities, dict)
             or not {"read", "edit", "push"}.issubset(capabilities)
-            or set(capabilities) - {"read", "edit", "push", "write_current_branch"}
+            or set(capabilities) - {"read", "edit", "push", "write_current_branch", "self_update"}
             or not all(isinstance(capabilities[key], bool) for key in ("read", "edit", "push"))
             or (
                 "write_current_branch" in capabilities
                 and not isinstance(capabilities["write_current_branch"], bool)
+            )
+            or (
+                "self_update" in capabilities
+                and not isinstance(capabilities["self_update"], bool)
             )
         ):
             raise BridgeError(f"missing or invalid public capabilities for repository: {repo_id}")

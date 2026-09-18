@@ -107,6 +107,14 @@ class CoreTests(unittest.TestCase):
             public_registry(local, {})
         with self.assertRaisesRegex(BridgeError, "public capabilities"):
             public_registry(local, {repo_id: {"read": True, "edit": True, "push": "yes"}})
+        with self.assertRaisesRegex(BridgeError, "public capabilities"):
+            public_registry(local, {repo_id: {"read": True, "edit": True, "push": False, "self_update": "yes"}})
+
+        public = public_registry(
+            local,
+            {repo_id: {"read": True, "edit": True, "push": False, "self_update": True}},
+        )
+        self.assertTrue(public["repos"][0]["capabilities"]["self_update"])
 
     def test_snapshot_excludes_sensitive_and_binary(self):
         repo = self.make_repo()
