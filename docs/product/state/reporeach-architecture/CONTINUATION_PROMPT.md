@@ -1,43 +1,39 @@
 # RepoReach Product Architecture Programme — CONTINUATION PROMPT
 
-Resume the RepoReach / RepoReach Relay product-architecture programme from actual repository reality.
+This architecture programme is COMPLETE. Do not restart its research or branch-migration work merely because older checkpoints contain in-progress instructions.
 
-Read in order:
-1. STATUS.md
-2. PLAN.md
-3. latest WORKLOG.md
-4. this file
-5. docs/product-and-managed-service-strategy.md if present
-6. actual current materialised branch
+Canonical branch:
+ai/reporeach-product-architecture-20260918
 
-Canonical integration branch:
-ai/reporeach-product-architecture-20260918, created from main 93608ec63566a7296abc6888134a9cf435e52481.
+Canonical documents:
+- docs/product-and-managed-service-strategy.md
+- docs/product/reporeach-architecture.md
+- docs/product/reporeach-validation.md
+- docs/product/state/reporeach-architecture/PLAN.md
+- STATUS.md / WORKLOG.md / this file in the same state directory
 
-Do not resume the older ai/product-strategy-checkpoint-20260917 branch as canonical. It is historical evidence.
-
-Frozen requirements:
-- RepoReach / RR; RepoReach Relay / RRR.
-- Git repositories wherever they live; not generic machine control.
-- Provider/model and transport agnostic.
-- Successful ordinary use hides transport choice.
-- Multipath adapters may coexist and converge on one transaction core.
+Frozen product decisions:
+- RepoReach (RR) is Git-specific, provider/model agnostic and transport agnostic.
+- RepoReach Relay (RRR) is optional hosted convenience, never a Git host or source of truth.
+- Multipath transports converge on one canonical replay-safe transaction core.
 - Local Git repositories and local RR policy remain authoritative.
-- RRR is never a Git host or mandatory dependency.
-- Zero initial cash investment.
-- Complete open-source/self-managed RR.
-- Paid value is managed convenience/reliability/support only after validation.
+- Ordinary successful use hides transport choice.
+- Complete open-source/self-managed RR remains available.
+- Zero initial cash investment remains the pre-revenue infrastructure rule.
 - About $2,500/month recurring revenue is already a successful commercial target.
+- RRR is within the remote-request trust boundary: compromise can attempt operations inside granted local authority, though it cannot bypass stricter local RR policy.
 
-Current architecture direction:
-- RRR MVP: Workers Free + SQLite Durable Objects + static assets on a provider domain.
-- Local RR makes outbound HTTPS/WSS connections; hibernating WebSockets provide wake-up.
-- Bounded short-lived relay state and chunked payloads live in Durable Objects; R2 is not required for MVP.
-- Pairing uses a local device identity plus short-lived single-use confirmation; no external auth vendor is required initially.
-- LLM-facing surfaces may include REST/API, MCP adapters, WebMCP/site tools and an interactive browser interface.
-- Search-only browsing is not sufficient for authenticated bidirectional repository work.
+Do not immediately rename repository/package/config/daemon identifiers while the independent P12-P15 Git-parity programme is active.
 
-Exact next action after state verification:
-Draft docs/product/reporeach-architecture.md, docs/product/reporeach-validation.md and docs/product-and-managed-service-strategy.md; adversarially audit them against PLAN; commit/push in bounded documentation transactions; independently materialise/read back; repair if needed.
+Next separate implementation programme:
+1. resume P12-P15 from their own canonical state until a safe integration checkpoint;
+2. extract/confirm a transport-neutral daemon adapter;
+3. add cross-transport canonical deduplication tests;
+4. implement a local mock relay;
+5. implement Workers Free + SQLite Durable Object RRR with hibernating WebSocket, no R2/billing/domain dependency;
+6. implement pairing/revocation/TTL/quota controls;
+7. add browser/WebMCP and MCP adapters;
+8. prove disposable-repository read/edit and simultaneous duplicate-delivery canaries;
+9. then package/naming migration and external alpha validation.
 
-Completion gate:
-Final exact branch materialisation proves all canonical documents and state; adversarial audit finds no material architecture defect; STATUS says COMPLETE; continuation records implementation/prototype work as a separate next programme.
+Before implementation, re-check dated vendor limits/capabilities. Preserve timeout-safe micro-steps and inspect reality before retrying ambiguous mutations.

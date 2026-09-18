@@ -271,6 +271,17 @@ Before public beta:
 
 A compromised relay must still not acquire arbitrary shell authority or the ability to bypass stricter local Git policy.
 
+### Relay trust boundary
+
+RRR is nevertheless inside the remote-request trust boundary. If RRR or an authenticated RRR session is compromised, an attacker could attempt any structured request that the local RR installation would ordinarily accept from that remote client. Local policy, exact-base checks, configured-command restrictions and push/current-branch gates bound that authority, but they do not prove that the human intended each request.
+
+Therefore:
+- documentation must not describe RRR as zero-trust or imply that a relay compromise is harmless;
+- high-impact authorities remain explicit and default-off where the existing core already treats them that way;
+- browser/session scopes should expose the minimum operation classes needed;
+- revocation must stop future relay delivery promptly;
+- a future optional local-confirmation mode for selected high-impact operations can further reduce relay/session compromise risk without changing the core transaction protocol.
+
 ## 14. Transparent multipath UX
 
 "Transparent" means the user chooses repositories and semantic capabilities, not networking plumbing.

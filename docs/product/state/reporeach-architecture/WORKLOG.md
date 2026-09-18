@@ -38,3 +38,10 @@ Architecture decisions:
 
 ## 2026-09-18 — branch migration
 A first persistent state checkpoint was written to the pre-existing ai/product-strategy-checkpoint-20260917 branch. Adversarial review then found that branch to be older than current RC9 main. Continuing there would create avoidable integration debt and a stale product specification. The programme therefore migrates canonically to ai/reporeach-product-architecture-20260918 from exact current main. The older branch is historical evidence only.
+## 2026-09-18 — canonical documents and final adversarial audit
+- Migrated the programme from the stale historical product branch to ai/reporeach-product-architecture-20260918 based on exact current main.
+- Canonical strategy, architecture and validation documents committed and pushed at afe93194932bdb2ad63500b5621b7ebf8d2bef81; independent materialisation matched that exact head.
+- Re-checked current OpenAI browser/site-tool facts and Cloudflare Workers/Durable Object limits. R2 remains deliberately outside the strict zero-cash MVP.
+- Adversarially audited hidden plugin/MCP dependency, browser availability, multipath replay, server cost, data retention, auth/pairing, scope creep, naming migration and commercial falsifiers.
+- Found and repaired the relay-trust wording gap: RRR compromise cannot exceed local RR policy but can attempt operations inside granted remote authority; the product must not call this zero-trust.
+- No remaining material design defect blocks architecture freeze. Implementation/prototype work is now a separate programme.
