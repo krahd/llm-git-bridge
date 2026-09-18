@@ -45,3 +45,26 @@ A first persistent state checkpoint was written to the pre-existing ai/product-s
 - Adversarially audited hidden plugin/MCP dependency, browser availability, multipath replay, server cost, data retention, auth/pairing, scope creep, naming migration and commercial falsifiers.
 - Found and repaired the relay-trust wording gap: RRR compromise cannot exceed local RR policy but can attempt operations inside granted remote authority; the product must not call this zero-trust.
 - No remaining material design defect blocks architecture freeze. Implementation/prototype work is now a separate programme.
+
+## 2026-09-18 — RRR-first revision and ConvoReach seam
+
+New user decisions reopened the completed architecture programme:
+- do not spend MVP effort on multipath if RRR can be the standard connection path;
+- keep the existing Drive/rclone transport in the codebase, but decide later whether exposing/supporting it publicly would undermine the hosted service;
+- provide a useful free RRR allowance and charge for heavier semantic-operation usage rather than gating Git capabilities;
+- design RepoReach so a future ConvoReach can be a minimal sibling.
+
+Reconciled a separate live Work Ecosystem Management & Interfaces programme for `tom-work-admin`. It already specifies the missing ideas entity: stable idea IDs, lifecycle `inbox -> exploring -> developing -> promoted | parked | retired`, provenance, fork/convergence relations, `registry/ideas.yaml`, and temporary unowned content under `ideas/inbox`. Its live tree did not yet contain those files, so this programme did not duplicate that implementation or promote ConvoReach prematurely.
+
+The defining ConvoReach use case was clarified by the user: “use ConvoReach and see what the other convo has done/is doing” describes desired future behaviour, not a request to use an existing tool. The architecture now treats an already-existing native conversation as an addressable participant whose own history/project/tools remain authoritative.
+
+Architecture repair:
+1. Changed RepoReach from multipath-first to RRR-first externally / transport-neutral internally.
+2. Removed multipath arbitration, automatic failover and cross-transport duplicate delivery from MVP gates.
+3. Retained Drive/rclone as proven internal/compatibility code while leaving public exposure/support undecided.
+4. Changed the commercial boundary to full local Git capability plus a useful free RRR semantic-operation allowance, with paid higher use/service convenience.
+5. Added `docs/product/reach-shared-substrate.md` defining reusable endpoint identity, pairing, sessions, relay envelope, reconnect, bounded payloads, quota hooks and diagnostics.
+6. Kept all Git semantics exclusively inside RepoReach and defined future ConvoReach-only conversation/session/provenance semantics.
+7. Explicitly rejected a premature third `reach-core` repository; extraction occurs only after two real products prove the seam.
+
+One broad hand-constructed patch failed cleanly at `git apply`; authoritative branch state showed no mutation. It was replaced by smaller exact-base documentation patches, each inspected through durable bridge results.

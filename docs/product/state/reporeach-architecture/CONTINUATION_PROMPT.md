@@ -1,39 +1,45 @@
 # RepoReach Product Architecture Programme — CONTINUATION PROMPT
 
-This architecture programme is COMPLETE. Do not restart its research or branch-migration work merely because older checkpoints contain in-progress instructions.
+This architecture programme is COMPLETE after the 2026-09-18 RRR-first/ConvoReach revision. Do not restart the older multipath design because historical checkpoints contain it.
 
 Canonical branch:
-ai/reporeach-product-architecture-20260918
+`ai/reporeach-product-architecture-20260918`
 
-Canonical documents:
-- docs/product-and-managed-service-strategy.md
-- docs/product/reporeach-architecture.md
-- docs/product/reporeach-validation.md
-- docs/product/state/reporeach-architecture/PLAN.md
-- STATUS.md / WORKLOG.md / this file in the same state directory
+Read actual repository state before relying on any recorded SHA. Canonical documents:
+- `docs/product-and-managed-service-strategy.md`
+- `docs/product/reporeach-architecture.md`
+- `docs/product/reporeach-validation.md`
+- `docs/product/reach-shared-substrate.md`
+- state files in `docs/product/state/reporeach-architecture/`
 
 Frozen product decisions:
-- RepoReach (RR) is Git-specific, provider/model agnostic and transport agnostic.
-- RepoReach Relay (RRR) is optional hosted convenience, never a Git host or source of truth.
-- Multipath transports converge on one canonical replay-safe transaction core.
-- Local Git repositories and local RR policy remain authoritative.
-- Ordinary successful use hides transport choice.
-- Complete open-source/self-managed RR remains available.
-- Zero initial cash investment remains the pre-revenue infrastructure rule.
+- RepoReach (RR) remains Git-specific.
+- RepoReach Relay (RRR) is the standard consumer connection route. Normal UX is install -> pair -> connected.
+- Keep the Git engine transport-neutral internally, but do not build multipath arbitration/failover/route scoring for MVP.
+- The existing Drive/rclone mechanism remains proven code; public exposure/support is intentionally undecided.
+- Local repositories and local RR policy remain authoritative; RRR is not a Git host.
+- Free and paid users have the same local Git capabilities. Hosted RRR has a useful free semantic-operation allowance; higher relay use/service convenience may be paid. Do not expose raw HTTP/WebSocket/chunk counts as the user-facing meter.
+- Zero initial cash remains the pre-revenue infrastructure constraint.
 - About $2,500/month recurring revenue is already a successful commercial target.
-- RRR is within the remote-request trust boundary: compromise can attempt operations inside granted local authority, though it cannot bypass stricter local RR policy.
 
-Do not immediately rename repository/package/config/daemon identifiers while the independent P12-P15 Git-parity programme is active.
+Shared Reach seam:
+- reusable: endpoint identity, pairing, product-scoped sessions, authenticated relay envelope, reconnect/backoff, correlation/acknowledgement, expiry, bounded payload transfer, semantic quota hooks and sanitized diagnostics;
+- RepoReach-only: all repository/Git semantics;
+- future ConvoReach-only: native conversation identity/adapters, participants/rooms, addressed turns, reply/correlation provenance and bounded turn policy.
+- product credentials/authorities must stay isolated; do not create a generic remote-execution API.
+- do not create a separate `reach-core` repository until a real ConvoReach prototype proves extraction worthwhile.
+
+ConvoReach is currently an idea, not a promoted project. The separate `tom-work-admin` ecosystem-management programme already designs the first-class ideas registry but had not yet implemented `registry/ideas.yaml`/`ideas/inbox` at the last inspection. Do not create a competing registry. Once available, ConvoReach should be captured there with the defining use case: one existing AI conversation can address another existing conversation and retrieve its current work/state with provenance without recreating either as an API model instance.
 
 Next separate implementation programme:
-1. resume P12-P15 from their own canonical state until a safe integration checkpoint;
-2. extract/confirm a transport-neutral daemon adapter;
-3. add cross-transport canonical deduplication tests;
-4. implement a local mock relay;
-5. implement Workers Free + SQLite Durable Object RRR with hibernating WebSocket, no R2/billing/domain dependency;
-6. implement pairing/revocation/TTL/quota controls;
-7. add browser/WebMCP and MCP adapters;
-8. prove disposable-repository read/edit and simultaneous duplicate-delivery canaries;
-9. then package/naming migration and external alpha validation.
+1. resume P12-P15 from their own canonical state to a safe integration checkpoint;
+2. extract/confirm the internal domain-neutral Reach seam;
+3. build the smallest zero-cash RRR service as the normal consumer route;
+4. implement pairing/revocation/TTL/quota controls and semantic-operation metering;
+5. prove RRR retry/idempotency and Git read/edit flows;
+6. ship install -> pair -> connected onboarding;
+7. measure real free-tier usage before choosing X operations/month;
+8. add/expose alternate transports only in response to concrete evidence;
+9. perform RepoReach naming/package/repository migration at a safe engineering checkpoint.
 
-Before implementation, re-check dated vendor limits/capabilities. Preserve timeout-safe micro-steps and inspect reality before retrying ambiguous mutations.
+Preserve timeout-safe micro-steps and inspect reality before retrying ambiguous mutations.
