@@ -47,29 +47,24 @@ Product sentence:
 ## 3. Logical system
 
 ~~~
-AI / agent surfaces
+AI / agent surface
         |
-client and transport adapters
+RepoReach web / tool adapter
         |
-+-------+-------------------+
-|                           |
-RepoReach Relay          direct transports
-(RRR)                    (MCP, mailbox, future)
-|                           |
-+-------------+-------------+
-              |
-        RepoReach daemon
-              |
-    canonical transaction core
-              |
-discovery -> policy -> exact base -> isolated worktree
-              |
-validation -> commit -> optional push
-              |
-      authoritative Git repos
+RepoReach Relay (RRR)
+        |
+shared Reach substrate
+(identity, pairing, envelope, reconnect,
+ quotas, diagnostics, bounded payloads)
+        |
+RepoReach Git domain
+(discovery, policy, exact base, worktrees,
+ validation, commit, optional push)
+        |
+authoritative Git repositories
 ~~~
 
-The same core transaction has the same semantics regardless of how it arrived.
+RRR is the normal consumer route. The core keeps a transport boundary so an advanced or future adapter can be added without changing Git semantics, but simultaneous route arbitration, automatic failover, health scoring and cross-transport duplicate campaigns are not MVP requirements.
 
 ## 4. Core and relay protocols
 
