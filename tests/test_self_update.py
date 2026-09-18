@@ -98,7 +98,7 @@ class SelfUpdateTests(unittest.TestCase):
             if args[:2] == ("symbolic-ref", "--quiet"):
                 p.stdout = "main\n"
             elif args[:2] == ("rev-parse", "HEAD"):
-                p.stdout = previous_sha + "\n" if not any(c[:2] == ("merge", "--ff-only") for c in calls) else target + "\n"
+                p.stdout = previous_sha + "\n" if not any("merge" in c for c in calls) else target + "\n"
             elif args[:2] == ("rev-parse", "refs/heads/ai/rc9"):
                 p.stdout = target + "\n"
             elif args[:2] == ("ls-remote", "--heads"):
@@ -107,7 +107,7 @@ class SelfUpdateTests(unittest.TestCase):
         with patch.object(su, "_git", side_effect=fake_git), patch.object(su, "_tracked_clean", return_value=True), patch.object(su, "_install_runtime", return_value=runtime), patch.object(su, "_restart_daemon") as restart, patch.object(su, "_wait_health", return_value=True):
             self.assertEqual(su.run_supervisor(), 0)
         self.assertTrue(any(c[:2] == ("push", "origin") for c in calls))
-        self.assertTrue(any(c[:2] == ("merge", "--ff-only") for c in calls))
+        self.assertTrue(any("merge" in c for c in calls))
         restart.assert_called_once_with()
         self.assertEqual(json.loads(su.ACTIVE_RUNTIME.read_text())["sha"], target)
         self.assertFalse(su.HANDOFF_PATH.exists())
@@ -132,13 +132,43 @@ class SelfUpdateTests(unittest.TestCase):
             elif args[:2] == ("rev-parse", "HEAD"): p.stdout=(target if merged["done"] else previous_sha)+"\n"
             elif args[:2] == ("rev-parse", "refs/heads/ai/rc9"): p.stdout=target+"\n"
             elif args[:2] == ("ls-remote", "--heads"): p.stdout=target+"\trefs/heads/main\n"
-            elif args[:2] == ("merge", "--ff-only"): merged["done"]=True
+            elif "merge" in args: merged["done"]=True
             return p
         with patch.object(su, "_git", side_effect=fake_git), patch.object(su, "_tracked_clean", return_value=True), patch.object(su, "_install_runtime", return_value=runtime), patch.object(su, "_restart_daemon"), patch.object(su, "_wait_health", side_effect=[False, True]):
             with self.assertRaisesRegex(BridgeError, "previous runtime restored"):
                 su.run_supervisor()
         self.assertEqual(json.loads(su.ACTIVE_RUNTIME.read_text())["sha"], previous_sha)
         self.assertEqual(json.loads(su.JOURNAL_PATH.read_text())["status"], "rolled-back")
+
+
+    def test_local_promotion_repairs_branch_switch_race_without_assuming_branch_base(self):
+        target = "2" * 40
+        main_base = "1" * 40
+        wrong_base = "3" * 40
+        repo = self.tmp / "repo"; repo.mkdir()
+        state = {"branch": "main", "head": main_base, "rolled": False}
+        def fake_git(_repo, *args, **kwargs):
+            class P: returncode=0; stdout=""
+            p=P()
+            if args[:2] == ("symbolic-ref", "--quiet"):
+                p.stdout=state["branch"]+"\n"
+            elif args[:2] == ("rev-parse", "HEAD"):
+                p.stdout=state["head"]+"\n"
+            elif "merge" in args:
+                state["branch"]="other"; state["head"]=target
+            elif args[:2] == ("reflog", "show"):
+                p.stdout=target+"\n"+wrong_base+"\n"
+            elif args[:2] == ("update-ref", "--no-deref"):
+                state["head"]=wrong_base; state["rolled"]=True
+            elif args[:2] == ("reset", "--hard"):
+                state["head"]=wrong_base
+            return p
+        with patch.object(su, "_git", side_effect=fake_git), patch.object(su, "_tracked_clean", return_value=True):
+            with self.assertRaisesRegex(BridgeError, "current branch changed"):
+                su._promote_local_main(repo, target, main_base, "tx-race")
+        self.assertTrue(state["rolled"])
+        self.assertEqual(state["head"], wrong_base)
+
 
 
 class AppSelfUpdateTests(unittest.TestCase):

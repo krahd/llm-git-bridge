@@ -167,6 +167,37 @@ def _launchctl(*args: str, check: bool = True) -> int:
     return proc.returncode
 
 
+
+def _promote_local_main(repo: Path, target: str, expected_head: str, transaction_id: str) -> None:
+    if _branch(repo) != "main" or _head(repo) != expected_head or not _tracked_clean(repo):
+        raise BridgeError("self-update source repository changed before local promotion")
+    merge = _git(repo, "-c", "core.hooksPath=/dev/null", "merge", "--ff-only", "--no-edit", target, check=False, timeout=120)
+    if merge.returncode != 0:
+        raise BridgeError("self-update could not fast-forward local main")
+    current_branch = _branch(repo)
+    current_head = _head(repo)
+    if current_branch == "main" and current_head == target and _tracked_clean(repo):
+        return
+    # If a human switched branches in the narrow pre-merge/Git-lock race, the
+    # merge may have fast-forwarded that other branch. Repair only the exact
+    # target commit and only while the checkout is still tracked-clean. Use the
+    # branch reflog to recover its actual previous tip rather than assuming it
+    # shared main's base.
+    if current_branch != "main" and current_head == target and _tracked_clean(repo):
+        reflog = _git(repo, "reflog", "show", "--format=%H", "-2", f"refs/heads/{current_branch}", check=False, timeout=30)
+        tips = [line.strip() for line in reflog.stdout.splitlines() if line.strip()]
+        if reflog.returncode == 0 and len(tips) >= 2 and tips[0] == target:
+            previous = tips[1]
+            rollback = _git(
+                repo, "update-ref", "--no-deref", "-m", f"llm-git-bridge rollback {transaction_id}",
+                f"refs/heads/{current_branch}", previous, target, check=False, timeout=60,
+            )
+            if rollback.returncode == 0 and _branch(repo) == current_branch:
+                reset = _git(repo, "reset", "--hard", previous, check=False, timeout=60)
+                if reset.returncode != 0:
+                    raise BridgeError("self-update branch-switch rollback requires manual inspection")
+    raise BridgeError("self-update current branch changed during local promotion")
+
 def _restart_daemon() -> None:
     if not PLIST_PATH.exists():
         raise BridgeError("self-update requires the installed macOS LaunchAgent")
@@ -253,9 +284,7 @@ def run_supervisor(handoff_path: Path | None = None) -> int:
         _journal(remote_promoted=True)
 
         if _head(source_repo) != target:
-            ff = _git(source_repo, "merge", "--ff-only", target, check=False, timeout=60)
-            if ff.returncode != 0 or _head(source_repo) != target:
-                raise BridgeError("self-update could not fast-forward local main")
+            _promote_local_main(source_repo, target, local_head, str(handoff.get("transaction_id") or "self-update"))
         _journal(local_promoted=True)
 
         _write_active(target, runtime)
