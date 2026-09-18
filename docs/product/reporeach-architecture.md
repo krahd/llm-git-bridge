@@ -275,7 +275,7 @@ Therefore:
 - revocation must stop future relay delivery promptly;
 - a future optional local-confirmation mode for selected high-impact operations can further reduce relay/session compromise risk without changing the core transaction protocol.
 
-## 14. Transparent multipath UX
+## 14. Transport-transparent RRR-first UX
 
 "Transparent" means the user chooses repositories and semantic capabilities, not networking plumbing.
 
@@ -289,13 +289,7 @@ Edit/commit: enabled
 Push: enabled for approved roots
 ~~~
 
-Advanced diagnostics may show:
-
-~~~
-Routes: Relay connected; MCP available; mailbox healthy
-~~~
-
-Normal setup should not ask users to choose "Drive vs MCP vs RRR" unless automatic connection fails.
+Normal setup has one connection concept: RepoReach Relay. Legacy/advanced transport details are developer diagnostics, not consumer choices.
 
 ## 15. First-release experience
 
@@ -303,42 +297,43 @@ Normal setup should not ask users to choose "Drive vs MCP vs RRR" unless automat
 2. Choose one or more repository roots.
 3. Choose semantic permissions: read, edit/commit and push; direct-current-branch authority remains advanced and explicit.
 4. RR discovers repositories recursively and publishes path-free identities.
-5. Enable RepoReach Relay and pair a browser once.
-6. RR performs a safe round-trip verification.
+5. Pair RepoReach Relay once.
+6. RR performs a safe RRR round-trip verification.
 7. UI reports Connected and repository count.
-8. The user works from the AI surface; route details stay in diagnostics.
-
-Direct transports can be enabled in addition to RRR when detected.
+8. The user works from the AI surface without learning transport internals.
 
 ## 16. Failure semantics
 
-- RRR unavailable: direct transports remain usable; local Git is unaffected.
+- RRR unavailable: RepoReach reports a clear disconnected/degraded state; local Git remains unaffected.
 - Local daemon offline: only bounded expiring requests are retained; RRR never claims execution.
-- Duplicate path delivery: exact duplicate reuses durable result; conflicting bytes under one transaction ID are rejected.
+- Duplicate RRR delivery: exact duplicate reuses the durable result; conflicting bytes under one transaction ID are rejected.
 - Stale base: local core rejects; relay does not rebase.
 - Push failure after commit: durable local commit is preserved and push is reported separately.
 - Free-tier quota exhausted: RRR fails clearly and closed, with no automatic paid spillover.
 - Browser session lost: re-pair; repository state remains local.
 - Suspected credential compromise: revoke/rotate sessions and endpoint credential without reinstalling repositories.
 
+An explicitly configured legacy/development transport may continue to function during an RRR outage, but automatic failover is not an initial product promise.
+
 ## 17. Open-source and hosted boundary
 
-Free/self-managed RR remains complete:
+The local RepoReach code does not change Git capability by subscription tier:
 - repository discovery;
 - local transaction core and Git policy;
 - validation commands;
 - commit/push where locally enabled;
 - protocol and diagnostics;
-- self-managed/direct transports;
-- no mandatory account or telemetry.
+- no mandatory source-content telemetry.
 
-Hosted RRR sells managed convenience:
-- zero-configuration relay operation;
-- browser/site-tool surface;
+The consumer service is RRR with a useful free allowance. Payment buys additional hosted relay capacity and service convenience, for example:
+- higher semantic-operation quota;
+- multiple paired endpoints if validated;
 - managed service reliability;
-- later higher quotas, multiple endpoints, support or retained service-level audit metadata if users request them.
+- support or longer service-level recovery metadata if users request it.
 
-RRR-specific code may itself remain open source. Payment buys operation/convenience, not a secret protocol or crippled local edition.
+Meter semantic RepoReach operations, not HTTP requests, WebSocket frames or payload chunks. The exact free allowance is deliberately deferred until dogfood measurements show what ordinary monthly use looks like.
+
+The existing Drive transport remains in source as an engineering asset. Whether to document/support it as a public self-managed alternative is a later commercial/product decision.
 
 ## 18. Naming migration
 
