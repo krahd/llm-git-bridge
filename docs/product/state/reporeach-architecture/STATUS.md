@@ -4,16 +4,17 @@ State: COMPLETE
 Date: 2026-09-18
 
 ## Last verified checkpoint
-- Canonical branch: ai/reporeach-product-architecture-20260918, created from production main 93608ec63566a7296abc6888134a9cf435e52481.
-- Canonical product documents were committed/pushed at afe93194932bdb2ad63500b5621b7ebf8d2bef81 and independently materialised at that exact head.
-- Final adversarial audit checked transport independence, optional-SaaS property, local Git authority, replay/deduplication, relay trust, data minimisation, zero-cash hosting, free/paid boundary, naming migration and commercial falsifiers.
-- The final audit found one material wording risk: a compromised relay can attempt requests within locally granted remote authority even though it cannot bypass stricter local policy. The architecture now states this explicitly.
+- Canonical branch: `ai/reporeach-product-architecture-20260918`.
+- The original architecture freeze at `751c4fdd5bc3020230bd396747e1ee9cca8596b0` was reopened after two user decisions: make RRR the standard consumer route rather than investing in multipath, and preserve a minimal reusable seam for a future ConvoReach sibling.
+- RRR-first architecture, shared Reach substrate, strategy and validation documents have been committed/pushed in bounded transactions.
+- `docs/product/reach-shared-substrate.md` defines the product-neutral seam and explicitly prevents Git semantics from leaking into a future ConvoReach.
+- The `tom-work-admin` Work Ecosystem Management & Interfaces programme was reconciled: its ideas registry is designed but was not yet present in the current materialised tree, so no competing registry or ConvoReach project was created here.
 
 ## Current phase/task
-P6 — final audit and completion.
+Final verification of revised architecture.
 
 ## Blocking issues
 none
 
 ## Exact next action
-COMPLETE. Implementation is a separate programme: continue the existing P12-P15 Git-parity work to a safe integration checkpoint, then implement the transport-neutral adapter boundary and zero-cash RRR prototype defined in docs/product/reporeach-architecture.md.
+COMPLETE after independent materialisation confirms this state and the canonical design documents at the final branch head. Implementation remains a separate programme: finish P12-P15 to a safe integration checkpoint, then extract the internal Reach seam and build the zero-cash RRR-first prototype.

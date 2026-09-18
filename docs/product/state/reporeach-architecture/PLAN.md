@@ -1,87 +1,84 @@
 # RepoReach Product Architecture Programme — PLAN
 
-Status: active
+Status: COMPLETE — revised 2026-09-18
 Date: 2026-09-18
 
 ## Objective
-Define and freeze the product architecture for RepoReach (RR) and RepoReach Relay (RRR) on top of the current bridge implementation, without disrupting the independent Git-parity roadmap.
+Define and freeze the product architecture for RepoReach (RR) and RepoReach Relay (RRR) on top of the current bridge implementation, while preserving a deliberately narrow shared connection substrate that a future ConvoReach sibling can reuse without importing Git semantics.
 
 Completion requires repository-canonical specifications for:
-- RR core and transport boundaries;
-- RRR protocol, authentication, pairing and data lifecycle;
-- transparent multipath transport selection;
+- RR Git-domain boundaries;
+- RRR-first consumer connectivity;
+- relay authentication, pairing, data lifecycle and semantic-operation quotas;
 - zero-initial-cash deployment;
-- open-source versus hosted responsibilities;
 - first-release user experience;
 - naming/migration sequencing;
-- commercial validation and objective triggers for paid infrastructure.
+- commercial validation;
+- the minimal reusable Reach substrate and its product isolation rules.
 
 ## Frozen requirements
 - Product: RepoReach (RR).
 - Hosted relay: RepoReach Relay (RRR).
 - Scope: Git repositories wherever they live; not generic computer control.
-- Provider/model agnostic and transport agnostic.
-- A normal successful workflow must not require the user to understand Drive, MCP, WebMCP, or relay mechanics.
+- Provider/model agnostic.
+- **RRR-first externally, transport-neutral internally.** Normal consumer onboarding is install -> pair -> connected, not a transport chooser.
+- Do not invest MVP effort in multipath arbitration, automatic failover, route scoring or simultaneous cross-transport delivery.
+- The existing Drive/rclone mechanism remains proven code and an engineering/compatibility asset. Whether it is publicly exposed as a supported free route is deliberately undecided.
 - Local repositories and local RR policy remain authoritative.
-- RRR must not become a Git host or mandatory SaaS dependency.
+- RRR must not become a Git host.
 - Initial cash investment remains $0.
-- The self-managed/open-source product remains complete.
-- Paid value, if validated, is managed convenience, reliability and support.
+- Local Git capabilities are not tier-gated. Hosted RRR begins with a useful free allowance and may charge for substantially higher semantic-operation usage and service convenience.
+- Meter product-level semantic operations, not HTTP requests, WebSocket frames or payload chunks.
 - Approximately $2,500/month recurring revenue is already a successful commercial outcome.
 - Product-facing language describes capabilities rather than centring institutional restrictions.
+- A future ConvoReach must be able to reuse connection infrastructure without RepoReach acquiring conversation/room semantics.
+
+## Shared Reach substrate
+The reusable seam is intentionally small: endpoint identity, pairing, product-scoped sessions, authenticated relay envelopes, reconnect/backoff, bounded payload transfer, correlation/acknowledgement, expiry, quota hooks and sanitized connectivity diagnostics.
+
+RepoReach alone owns repository identity, Git request/result semantics, snapshots/materialisation, exact-base checks, worktrees, validation, commit/push authority, Git replay/recovery and self-update semantics.
+
+A future ConvoReach sibling would own native-conversation identity, provider/session adapters, room/participant membership, addressed turns, reply/correlation provenance and bounded conversation-turn policy. Product credentials/authority must remain isolated.
+
+Do not create a speculative third `reach-core` repository now. Keep the seam internal until two real products demonstrate enough shared code to justify extraction.
 
 ## Canonical locations
 - Repository: llm-git-bridge / public product identity RepoReach.
 - Integration branch: ai/reporeach-product-architecture-20260918.
-- Integration base at programme migration: main 93608ec63566a7296abc6888134a9cf435e52481.
 - Programme state: docs/product/state/reporeach-architecture/.
-- Final documents:
+- Canonical design documents:
   - docs/product/reporeach-architecture.md
   - docs/product/reporeach-validation.md
+  - docs/product/reach-shared-substrate.md
   - docs/product-and-managed-service-strategy.md
 
-Historical product branch ai/product-strategy-checkpoint-20260917 and its state are evidence only after this migration; they are not the canonical continuation base.
+## Related idea-management programme
+A separate Work Ecosystem Management & Interfaces programme in `tom-work-admin` has already designed a first-class ideas registry with stable IDs, lifecycle, provenance, fork/convergence relations and temporary `ideas/inbox` storage. The live materialised tree inspected on 2026-09-18 did not yet contain `registry/ideas.yaml` or `ideas/inbox`; implementation remains with that programme. ConvoReach therefore remains an unpromoted idea rather than being turned into a project/repository here.
+
+The defining ConvoReach use case to capture when that registry exists is: from one existing AI conversation, address another already-existing ChatGPT/Claude/Gemini conversation, ask what it has done/is doing, and bring the response back with provenance without recreating either conversation as an API model instance.
 
 ## In scope
-Product architecture, transport contract, RRR relay design, auth/pairing/revocation, data minimisation/retention, security boundaries, zero-cash hosting, onboarding, commercial boundary, validation metrics and migration sequencing.
+Product architecture, RRR-first relay design, auth/pairing/revocation, data minimisation/retention, security boundaries, zero-cash hosting, onboarding, semantic quotas, commercial boundary, validation metrics, migration sequencing and the shared Reach seam.
 
 ## Out of scope
-Production RRR deployment, billing implementation, domain purchase, repository/package/CLI rename, P12-P15 Git-parity implementation, general machine control, formal trademark clearance.
+Production RRR deployment, billing implementation, domain purchase, repository/package/CLI rename, P12-P15 Git-parity implementation, public Drive support decision, ConvoReach implementation, a generic agent bus, general machine control, formal trademark clearance.
 
-## External implementation inputs checked 2026-09-18
-- ChatGPT desktop site tools can expose WebMCP tools without a separately installed connector where the browser/account supports them.
-- Browser capability is separately governable from installed apps/plugins.
-- Cloudflare Workers Free currently includes 100,000 Worker requests/day.
-- SQLite Durable Objects are available on Workers Free and support hibernating WebSockets.
-- Durable Object values/rows have a 2 MB ceiling, requiring bounded chunking for larger payloads.
-- R2 has a useful free allowance but activation uses a subscription/checkout flow; it is therefore excluded as an MVP dependency under the strict zero-initial-cash constraint.
-- Static assets can be served without a separate paid hosting product.
-
-These are dated vendor facts, not permanent product guarantees.
-
-## Phases
-P0 recover repository and prior strategy state.
-P1 refresh time-sensitive platform/hosting evidence to saturation.
-P2 design RR/RRR architecture and first-release UX.
-P3 adversarially audit architecture against access, auth, replay, privacy, cost, vendor lock-in, scope creep and migration failure.
-P4 persist canonical execution state on a fresh branch from current main.
-P5 write canonical architecture/validation/strategy documents in bounded documentation transactions.
-P6 independently materialise and inspect final branch, repair any material defect, then mark state COMPLETE.
-
-## Non-negotiable architecture checks
+## Completion checks
 The design must not:
-- require RRR for self-managed RR;
-- require MCP, a plugin, or Drive specifically;
+- require users to configure or understand multiple transports in ordinary use;
+- make multipath a release gate;
 - confuse web search/retrieval with authenticated bidirectional tool access;
 - make server-side RRR policy capable of overriding stricter local RR policy;
-- depend on FIFO transport delivery;
 - expose local filesystem paths or Git credentials;
 - retain source snapshots indefinitely;
 - create unbounded storage/compute cost;
-- promise end-to-end encryption on surfaces where the server necessarily sees plaintext;
-- require a paid plan, custom domain, R2, or external identity provider for MVP;
-- broaden RR beyond Git;
+- meter low-level relay implementation details as user-visible usage;
+- promise end-to-end encryption where not technically true;
+- require paid infrastructure before revenue;
+- broaden RepoReach beyond Git;
+- make ConvoReach import Git-domain modules;
+- prematurely extract a generic framework solely for hypothetical reuse;
 - rename the live package/repository while P12-P15 are active.
 
 ## Recovery and timeout discipline
-Use exact fresh bases, safe branches, small documentation-only transactions, durable-result inspection, and independent materialisation. After an ambiguous mutation, inspect actual branch/result state before retry. Do not mutate protected main for this architecture programme.
+Use exact fresh bases, safe branches, small documentation transactions, durable-result inspection and independent materialisation. After an ambiguous mutation, inspect actual branch/result state before retry. Do not mutate protected main for this architecture programme.
