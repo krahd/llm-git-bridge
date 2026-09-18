@@ -9,7 +9,7 @@ This document supersedes the 2026-09-17 product checkpoint. The implementation r
 
 RepoReach gives AI systems controlled access to Git repositories wherever those repositories live.
 
-It is not a generic GitHub connector and not a general remote-computer agent. Its durable value is the combination of authoritative local/private Git, provider-neutral AI clients, replaceable concurrent routes, exact-base transactions, local validation and policy, durable replay/recovery, path-free repository identity, and controlled commit/push authority.
+It is not a generic GitHub connector and not a general remote-computer agent. Its durable value is the combination of authoritative local/private Git, provider-neutral AI clients, an RRR-first connection experience over a transport-neutral core, exact-base transactions, local validation and policy, durable replay/recovery, path-free repository identity, and controlled commit/push authority.
 
 Google Drive remains a useful proven transport, not the product definition.
 
@@ -21,7 +21,7 @@ The product story need not enumerate those causes:
 
 > RepoReach lets your AI work with your Git repositories, wherever they are.
 
-Users choose repositories and semantic capabilities. RepoReach uses whichever available route can carry the work.
+Users choose repositories and semantic capabilities. The first consumer product uses RepoReach Relay as the standard route; transport alternatives remain an internal/advanced concern unless later evidence justifies exposing them.
 
 ## 3. Scope
 
@@ -33,13 +33,13 @@ Generic filesystem, desktop, database and machine control are out of scope.
 
 ## 4. RepoReach Relay
 
-RRR is an optional hosted HTTPS/WSS rendezvous and delivery layer whose job is to make connection setup boring.
+RRR is the standard hosted HTTPS/WSS rendezvous and delivery layer for the first consumer product. Its job is to make connection setup boring: install, pair, connected.
 
 RRR does not run Git or become source of truth. Local RR owns discovery, repository identity, exact-base checks, worktrees, validation commands, commits, push policy and replay.
 
 RRR supplies pairing, browser/WebMCP and API surfaces, short-lived queue/result state, endpoint wake-up over an outbound connection, and later managed-service convenience if users value it.
 
-RRR, direct MCP and mailbox paths may coexist. The local transaction layer deduplicates them. The normal user sees RepoReach: Connected, not a transport selector.
+The Git core remains transport-neutral internally, but RepoReach will not spend MVP effort on simultaneous multipath delivery, automatic failover or route scoring. The existing Drive transport remains in the codebase as a proven development/compatibility path; whether it is exposed as a supported free consumer route is deliberately undecided.
 
 ## 5. Zero-cash deployment
 
@@ -65,11 +65,13 @@ A conventional user/account layer arrives only when paid service or multi-device
 
 ## 7. Open-source and paid boundary
 
-The local product stays complete and self-manageable. Payment buys hosted operation and convenience rather than withheld Git functionality.
+The local Git capabilities do not change by subscription tier. Payment buys hosted relay capacity and convenience rather than withheld Git functionality.
 
-Free/self-managed RR includes discovery, transaction engine, local policy, validation, commit/push where enabled, protocol documentation and self-managed transports.
+RRR begins with a useful free semantic-operation allowance so users can experience the normal product path. Paid service can provide a much larger allowance plus validated conveniences such as multiple endpoints, easier recovery and support.
 
-Hosted RRR begins as a bounded free beta. Later paid value may include higher quotas, multiple endpoints, easier recovery, support and other convenience demonstrated by real users.
+Meter user-comprehensible RepoReach operations, not HTTP requests, WebSocket frames or payload chunks. Choose the free allowance only after dogfood data shows ordinary monthly usage.
+
+The existing Drive implementation stays in source as engineering/provenance. Publicly exposing or supporting it as a free alternative is a later product decision, not an MVP commitment.
 
 ## 8. Commercial objective
 
@@ -104,15 +106,11 @@ Defensibility, if it develops, comes from reliable compatibility across fragment
 
 ## 11. Transport strategy
 
-No permanent transport winner is required. Concurrent adapters may include:
-- RepoReach Relay;
-- direct/local MCP;
-- vendor tunnels reaching an RR MCP adapter;
-- the existing Drive/rclone mailbox;
-- other writable shared stores only when user evidence justifies them;
-- browser/WebMCP surfaces through RRR.
+Externally, RepoReach is RRR-first. The normal installer and documentation should not ask users to choose Drive, MCP or a relay.
 
-There is a hard boundary: an AI environment exposing no usable browser/tool surface, MCP/app capability, local execution channel, writable shared service or other bidirectional mechanism cannot autonomously reach RR. RepoReach reports that condition rather than abusing public search or side-effecting URLs.
+Internally, the core remains transport-neutral. The existing Drive/rclone implementation is retained as a development/compatibility asset; direct MCP and other routes can be added later if concrete environments demand them. Automatic multipath arbitration, failover and cross-transport deduplication are deferred because RRR is intended to cover the ordinary product path.
+
+There is a hard boundary: an AI environment exposing no usable browser/tool/API surface capable of communicating with RRR cannot autonomously reach RR. RepoReach reports that condition rather than abusing public search or side-effecting URLs.
 
 ## 12. Trust and data
 
@@ -140,20 +138,30 @@ Use RepoReach/RR and RRR in new product documentation now.
 
 Do not rename live repository/package/config/daemon identifiers during the separate P12-P15 programme. When it reaches a stable integration point, perform a tested migration that introduces reporeach as the primary CLI, migrates existing state safely, preserves bounded compatibility, and updates the client skill and protocol docs coherently.
 
-## 15. Next implementation programme
+## 15. Shared substrate and future ConvoReach sibling
+
+RepoReach should preserve a narrow domain-neutral substrate for endpoint identity, pairing, scoped sessions, relay envelopes, reconnect/backoff, bounded payloads, quotas and connectivity diagnostics. Git discovery, policy, worktrees, validation, commits and push remain strictly RepoReach-specific.
+
+This seam is intentionally designed so a future ConvoReach product can be a minimal sibling rather than a copy-paste fork. ConvoReach's defining test case is communication between already-existing native conversations — for example, asking from a ChatGPT thread what an existing Claude/Gemini/other ChatGPT thread has done or is doing — while preserving each conversation's own history, tools and provider context.
+
+Do not create a generic framework or a third shared repository before a ConvoReach prototype exists. Keep the seam internal and testable; extract a tiny shared package only when two real products need it.
+
+## 16. Next implementation programme
 
 After this design freeze:
 1. preserve current Git-core semantics;
-2. confirm/extract a transport-neutral daemon boundary;
-3. build the smallest zero-cash RRR Worker/Durable Object service;
+2. confirm/extract the narrow shared Reach substrate without Git-specific dependencies;
+3. build the smallest zero-cash RRR Worker/Durable Object service with a domain-neutral routing/account layer;
 4. pair one local endpoint;
 5. expose one browser/WebMCP surface;
 6. materialise and edit a disposable repository through RRR;
-7. prove duplicate RRR/direct delivery cannot duplicate mutation;
-8. package the guided setup;
-9. recruit external alpha users;
-10. defer billing and paid infrastructure until validation thresholds are met.
+7. prove RRR retry/reorder/duplicate delivery cannot duplicate mutation;
+8. package the guided `install -> pair -> connected` setup;
+9. measure semantic operation usage and set the free allowance from evidence;
+10. recruit external alpha users;
+11. defer billing, paid infrastructure and additional transports until evidence requires them.
 
 Canonical detail:
 - docs/product/reporeach-architecture.md
 - docs/product/reporeach-validation.md
+- docs/product/reach-shared-substrate.md
