@@ -68,3 +68,12 @@ Architecture repair:
 7. Explicitly rejected a premature third `reach-core` repository; extraction occurs only after two real products prove the seam.
 
 One broad hand-constructed patch failed cleanly at `git apply`; authoritative branch state showed no mutation. It was replaced by smaller exact-base documentation patches, each inspected through durable bridge results.
+
+## 2026-09-18 — final canonisation closure
+
+- Re-materialised `ai/reporeach-product-architecture-20260918`; the branch was clean at `8934e56a36aebf02bd565be1cc15212b8cfc1500` before closure.
+- Reconciled the contemporaneous Work Ecosystem Management & Interfaces plan in `tom-work-admin`; that programme now deliberately reduces the ideas design to a minimal `registry/ideas.yaml` plus a direct-YAML `work` command, but implementation remains owned there. RepoReach therefore does not create a competing ideas registry or promote ConvoReach prematurely.
+- Removed the final stale multipath-era product wording: RRR is the standard hosted consumer transport, not an optional managed transport.
+- Reframed the commercial falsifier around free-RRR users' willingness to pay for heavier relay usage rather than self-managed-versus-managed adoption.
+- Marked the architecture and validation documents frozen rather than design-freeze candidates.
+- Final completion gate: rematerialise the resulting branch and verify clean state plus absence of contradictory active product wording.

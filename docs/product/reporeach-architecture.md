@@ -1,6 +1,6 @@
 # RepoReach architecture
 
-Status: design freeze candidate
+Status: frozen architecture
 Date: 2026-09-18
 
 RepoReach (RR) gives AI systems controlled access to Git repositories wherever those repositories live. RepoReach Relay (RRR) is the standard hosted route between supported AI surfaces and the local RepoReach daemon. The Git core remains transport-neutral internally, but the first consumer product deliberately standardises on RRR rather than asking users to choose or combine transports.
@@ -16,8 +16,8 @@ In scope:
 - authoritative local working copies, including unpushed state;
 - recursive discovery beneath operator-approved roots;
 - read/materialise, edit, validate, commit, branch and policy-controlled push operations;
-- multiple transport adapters terminating at one local transaction engine;
-- RepoReach Relay as an optional managed transport.
+- a transport-neutral local transaction engine behind the product boundary;
+- RepoReach Relay as the standard hosted consumer transport.
 
 Out of scope:
 - general remote desktop or arbitrary computer control;

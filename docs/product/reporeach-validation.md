@@ -1,6 +1,6 @@
 # RepoReach validation and commercial plan
 
-Status: design freeze candidate
+Status: frozen validation plan
 Date: 2026-09-18
 
 RepoReach is already justified as infrastructure by real internal use. Commercial validation therefore has a deliberately modest standard: determine whether external users value managed reach and reliability enough to help fund maintenance. It does not require venture-scale market evidence.
@@ -21,7 +21,7 @@ H5 — A subset of users who become useful on the free RRR allowance will pay a 
 
 Material negative evidence includes:
 - external users consistently solve the problem with native features and do not need RR;
-- self-managed RR gets adoption but managed RRR gets no demand;
+- users exhaust or approach the free RRR allowance but show no willingness to pay for heavier RRR usage or managed convenience;
 - RRR setup remains as complex as existing transport configuration;
 - browser/vendor compatibility labour exceeds plausible subscription revenue;
 - infrastructure cost grows materially faster than revenue;
