@@ -3,7 +3,7 @@
 Status: design freeze candidate
 Date: 2026-09-18
 
-RepoReach (RR) gives AI systems controlled access to Git repositories wherever those repositories live. RepoReach Relay (RRR) is an optional hosted relay that can provide one route between an AI surface and the local RepoReach daemon. Neither the product nor the protocol is defined by a particular model vendor, repository host, cloud-storage provider, or transport.
+RepoReach (RR) gives AI systems controlled access to Git repositories wherever those repositories live. RepoReach Relay (RRR) is the standard hosted route between supported AI surfaces and the local RepoReach daemon. The Git core remains transport-neutral internally, but the first consumer product deliberately standardises on RRR rather than asking users to choose or combine transports.
 
 The existing llm-git-bridge implementation is the engineering predecessor of RepoReach. Its repository discovery, path-free public identity, exact-base transactions, constrained validation commands, controlled commits and pushes, replay handling, concurrency rules, current-branch authority, and structured self-update remain the foundation.
 
@@ -33,15 +33,16 @@ Product sentence:
 ## 2. Architectural invariants
 
 1. Local Git remains authoritative.
-2. Local RR policy is final; a transport requests authority but cannot grant it.
-3. Transports are replaceable and provider details stay outside the core.
-4. Transports may coexist. RR is multipath rather than choosing one permanent transport.
-5. Correctness never depends on FIFO delivery, filename order, upload order or arrival time.
-6. Duplicate delivery is expected. Transaction identity plus canonical request bytes make retries and cross-transport duplicates idempotent.
-7. Local filesystem paths and Git credentials never enter the public repository registry.
-8. Hosted RRR remains optional; self-managed RR stays complete.
+2. Local RR policy is final; the relay requests authority but cannot grant it.
+3. The local domain engine is transport-neutral and provider details stay outside Git semantics.
+4. The first consumer product is RRR-first: one standard hosted route, not automatic multipath.
+5. Correctness never depends on FIFO delivery, upload order or arrival time.
+6. Duplicate RRR delivery is expected. Transaction identity plus canonical request bytes make retry/recovery idempotent.
+7. Local filesystem paths and Git credentials never enter the public repository registry or relay account state.
+8. The proven Drive/rclone transport remains in the codebase as a development/compatibility asset; whether it is exposed as a supported free consumer route is a later product decision.
 9. Initial hosted deployment must require zero incremental cash and fail closed on free-tier exhaustion rather than create surprise billing.
-10. A transport failure after a local commit is a publication failure, not a vanished commit.
+10. A relay failure after a local commit is a publication failure, not a vanished commit.
+11. Shared relay plumbing must remain domain-neutral enough that a conversation product can reuse it without importing Git semantics.
 
 ## 3. Logical system
 
