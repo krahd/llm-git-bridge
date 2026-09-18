@@ -3271,23 +3271,39 @@ class AppTests(unittest.TestCase):
         self.fake.files[f"v2/transactions/{txid}.json"] = json.dumps({
             "protocol": 2, "kind": "doctor", "transaction_id": txid
         })
-        with patch("llm_git_bridge.app._version_line", side_effect=["git version 2.51.0", "rclone v1.72.0"]):
-            with patch("llm_git_bridge.app._rclone_remote_summary", return_value={
-                "remote_type": "drive",
-                "custom_drive_client_id_configured": True,
-                "config_inspected": True,
-            }):
-                with patch("llm_git_bridge.app.RcloneRCProcess.healthy", return_value=True):
-                    self.assertEqual(app.process_pending_once(self.cfg), 1)
+        runtime_sha = "a" * 40
+        with patch.dict(os.environ, {"LLM_GIT_BRIDGE_RUNTIME_SHA": runtime_sha}):
+            with patch("llm_git_bridge.app._version_line", side_effect=["git version 2.51.0", "rclone v1.72.0"]):
+                with patch("llm_git_bridge.app._rclone_remote_summary", return_value={
+                    "remote_type": "drive",
+                    "custom_drive_client_id_configured": True,
+                    "config_inspected": True,
+                }):
+                    with patch("llm_git_bridge.app.RcloneRCProcess.healthy", return_value=True):
+                        self.assertEqual(app.process_pending_once(self.cfg), 1)
         result = json.loads(self.fake.files[f"v2/results/{txid}.json"] )
         self.assertEqual(result["operation"], "doctor")
         self.assertEqual(result["doctor"]["remote_type"], "drive")
         self.assertTrue(result["doctor"]["custom_drive_client_id_configured"])
         self.assertTrue(result["doctor"]["rc_socket_healthy"])
+        self.assertEqual(result["doctor"]["runtime_sha"], runtime_sha)
         blob = json.dumps(result)
         self.assertNotIn("client_secret", blob)
         self.assertNotIn("token", blob)
         self.assertNotIn("/Users/", blob)
+
+    def test_doctor_ignores_invalid_runtime_sha_environment(self):
+        with patch.dict(os.environ, {"LLM_GIT_BRIDGE_RUNTIME_SHA": "/Users/tom/not-a-sha"}):
+            with patch("llm_git_bridge.app._version_line", return_value="version"):
+                with patch("llm_git_bridge.app._rclone_remote_summary", return_value={
+                    "remote_type": "drive", "custom_drive_client_id_configured": False, "config_inspected": True
+                }):
+                    result = app._process_doctor_request(
+                        self.cfg, {"protocol": 2, "kind": "doctor", "transaction_id": "tx-doctor-runtime"},
+                        "tx-doctor-runtime.json",
+                    )
+        self.assertIsNone(result["doctor"]["runtime_sha"])
+        self.assertNotIn("/Users/tom/not-a-sha", json.dumps(result))
 
     def test_diagnostics_limit_is_bounded(self):
         txid = "tx-diagnostics-bad"

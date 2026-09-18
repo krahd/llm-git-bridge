@@ -1243,6 +1243,9 @@ def _process_doctor_request(cfg: dict[str, Any], obj: dict[str, Any], filename: 
     rc_healthy = False
     if rc_enabled:
         rc_healthy = RcloneRCProcess(RCLONE_RC_SOCKET, None).healthy(timeout=0.25)
+    runtime_sha = os.environ.get("LLM_GIT_BRIDGE_RUNTIME_SHA")
+    if runtime_sha is not None and not re.fullmatch(r"(?:[0-9a-f]{40}|[0-9a-f]{64})", runtime_sha):
+        runtime_sha = None
     return {
         "protocol": PROTOCOL_VERSION,
         "kind": "result",
@@ -1251,6 +1254,7 @@ def _process_doctor_request(cfg: dict[str, Any], obj: dict[str, Any], filename: 
         "status": "success",
         "doctor": {
             "bridge_version": __version__,
+            "runtime_sha": runtime_sha,
             "python_version": f"{sys.version_info.major}.{sys.version_info.minor}.{sys.version_info.micro}",
             "git_version": _version_line(["git", "--version"]),
             "rclone_version": _version_line(["rclone", "version"]),

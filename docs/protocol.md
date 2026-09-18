@@ -111,7 +111,7 @@ A client can request a deliberately small, sanitized environment report:
 }
 ```
 
-The report exposes only bridge/Python/Git/rclone version strings, transport type, persistent-RC health, the rclone backend type, and whether a Google Drive remote has an explicit custom OAuth client ID. It never returns the rclone configuration path, OAuth client ID value, client secret, refresh token, credentials, repository paths, or command output.
+The report exposes only bridge/Python/Git/rclone version strings, the exact active immutable runtime Git SHA when launched through the stable runtime pointer, transport type, persistent-RC health, the rclone backend type, and whether a Google Drive remote has an explicit custom OAuth client ID. `runtime_sha` is `null` when the process was not started through an installed versioned runtime or when the environment value is malformed. It never returns the rclone configuration path, OAuth client ID value, client secret, refresh token, credentials, repository paths, or command output.
 
 ## Edit transaction
 
