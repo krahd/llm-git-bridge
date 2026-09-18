@@ -84,32 +84,27 @@ For RepoReach, the product payload is the existing protocol-v2 Git request/resul
 
 The outer envelope deliberately contains no repository, Git or conversation semantics beyond a product namespace. This is the seam that a future ConvoReach sibling can reuse.
 
-## 5. Transport adapter contract
+## 5. Transport boundary and RRR-first product policy
 
-A transport adapter must:
-- advertise or discover availability;
-- receive bounded request envelopes;
-- preserve transaction identity exactly;
-- publish durable results;
-- carry bounded snapshot/blob payloads where required;
-- expose health diagnostics;
-- never reinterpret Git policy.
+The local core preserves a narrow transport interface so networking code does not leak into Git policy. A transport implementation must preserve message identity, carry bounded payloads/results, expose health, and never reinterpret product-domain authority.
 
-The core distinguishes request state from transport state.
+### RepoReach Relay
 
-### Direct MCP
+RRR is the default and initially the only transport presented in normal consumer onboarding. The installer should produce the experience `install -> pair -> connected`, not a transport chooser.
 
-Where a client can reach a local or tunneled MCP service, an RR MCP adapter maps a constrained tool surface onto the core. MCP is a useful low-friction route when available, not a prerequisite.
+### Existing Drive/rclone mailbox
 
-### Mailbox transports
+The current Drive/rclone path remains proven code, useful for development, recovery, compatibility and architectural verification. It should not appear in the default installer, onboarding, pricing page or consumer documentation unless a later product decision finds that exposing it helps more than it competes with the hosted relay. Retaining the code is not a promise to productise or support the route publicly.
 
-The current Google Drive/rclone mailbox remains a proven asynchronous route and compatibility path. It becomes one adapter among several rather than the product's installation model.
+### Direct MCP and other routes
+
+Direct MCP or future transports remain possible because the core boundary is neutral, but they are deferred until concrete user or deployment evidence justifies them. RR should not spend MVP effort on automatic transport discovery, multipath arbitration or failover.
 
 ### Browser and site-tool surfaces
 
 RRR can expose a normal authenticated web interface and, where supported, WebMCP site tools. Current ChatGPT desktop site tools can be discovered from an open webpage without a separately installed connector.
 
-This does not imply universal reach. If an AI environment exposes no usable browser/tool surface, MCP/app capability, local execution channel, writable shared service or other bidirectional mechanism, there is no autonomous route to RR. Search-only public web retrieval is not a transaction transport.
+This does not imply universal reach. If an AI environment exposes no usable browser/tool/API surface capable of communicating with RRR, there is no autonomous route to RR. Search-only public web retrieval is not a transaction transport.
 
 Current OpenAI reference:
 https://help.openai.com/en/articles/20001423-using-site-tools-in-the-chatgpt-desktop-app
