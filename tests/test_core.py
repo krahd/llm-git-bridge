@@ -1611,7 +1611,7 @@ class CoreTests(unittest.TestCase):
 
         def race_before_merge(args, **kwargs):
             nonlocal switched
-            if not switched and args[:3] == ["git", "-C", str(repo)] and "merge" in args:
+            if not switched and args[:2] == ["git", "-C"] and Path(args[2]).resolve() == repo.resolve() and "merge" in args:
                 switched = True
                 subprocess.run(
                     ["git", "-C", str(repo), "switch", "-q", "-c", "human-race", base],

@@ -2219,7 +2219,7 @@ class AppTests(unittest.TestCase):
         loaded = app.load_config()
 
         self.assertEqual(loaded["version"], 2)
-        self.assertEqual(loaded["roots"], [{"path": str(temp), "push": False}])
+        self.assertEqual(loaded["roots"], [{"path": str(temp.resolve()), "push": False}])
         self.assertEqual(
             loaded["repo_overrides"],
             {"repo-a": {"push": True}, "repo-b": {"push": True}},

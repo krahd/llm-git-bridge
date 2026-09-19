@@ -223,6 +223,7 @@ class OAuthHelperTests(unittest.TestCase):
                  patch.object(helper, "PLIST_PATH", nonexistent_plist), \
                  patch.object(helper, "bridge_remote", return_value="chatgpt-git-bridge"), \
                  patch.object(helper, "rclone_config_path", return_value=config), \
+                 patch.object(helper, "_prepared_project_id", return_value=None), \
                  patch.object(helper, "_assert_watcher_stopped"), \
                  patch.object(helper, "validate_mailbox"), \
                  patch.object(helper, "obscure_rclone_secret", return_value="obscured-secret"), \

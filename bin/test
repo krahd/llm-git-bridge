@@ -16,4 +16,5 @@ if [ -n "${PYTHONPATH:-}" ]; then
 else
   export PYTHONPATH="$ROOT/src"
 fi
-exec "$PYTHON" "$ROOT/scripts/run_tests.py"
+"$PYTHON" "$ROOT/scripts/run_tests.py"
+"$PYTHON" -m unittest discover -v -s "$ROOT/shell_bridge/tests"
