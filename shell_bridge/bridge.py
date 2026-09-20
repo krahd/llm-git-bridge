@@ -3,12 +3,14 @@ from __future__ import annotations
 
 import argparse
 import base64
+import http.client
 import fcntl
 import hashlib
 import json
 import os
 import re
 import signal
+import socket
 import subprocess
 import sys
 import tempfile
@@ -34,6 +36,70 @@ _TRANSPORT_LOCK = threading.RLock()
 _ACTIVE_LOCK = threading.RLock()
 _ACTIVE: dict[str, dict] = {}
 _SHUTDOWN = threading.Event()
+
+
+class _RcloneRCUnavailable(RuntimeError):
+    """RC socket connection failed before an operation was submitted."""
+
+
+class _UnixHTTPConnection(http.client.HTTPConnection):
+    def __init__(self, socket_path: Path, *, timeout: float):
+        super().__init__("localhost", timeout=timeout)
+        self.socket_path = str(socket_path)
+
+    def connect(self) -> None:
+        sock = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
+        sock.settimeout(self.timeout)
+        sock.connect(self.socket_path)
+        self.sock = sock
+
+
+def _rc_socket_path(cfg: dict) -> Path:
+    return Path(cfg["state_dir"]).expanduser() / "rclone-rc.sock"
+
+
+def _rc_request(socket_path: Path, command: str, payload: dict, *, timeout: float) -> dict:
+    conn = _UnixHTTPConnection(socket_path, timeout=timeout)
+    try:
+        try:
+            conn.connect()
+        except OSError as exc:
+            raise _RcloneRCUnavailable("rclone rc socket is unavailable") from exc
+        body = json.dumps(payload).encode("utf-8")
+        conn.request(
+            "POST", "/" + command.lstrip("/"), body=body,
+            headers={"Content-Type": "application/json", "Content-Length": str(len(body))},
+        )
+        response = conn.getresponse()
+        raw = response.read().decode("utf-8", errors="replace")
+        if response.status >= 400:
+            raise RuntimeError(f"rclone rc {command} failed ({response.status}): {raw.strip() or response.reason}")
+        if not raw.strip():
+            return {}
+        obj = json.loads(raw)
+        if not isinstance(obj, dict):
+            raise RuntimeError(f"rclone rc {command} returned a non-object response")
+        return obj
+    except _RcloneRCUnavailable:
+        raise
+    except (OSError, http.client.HTTPException, json.JSONDecodeError) as exc:
+        raise RuntimeError(f"rclone rc {command} failed: {exc}") from exc
+    finally:
+        conn.close()
+
+
+def _rc_call(cfg: dict, command: str, payload: dict, *, timeout: float, mutating: bool = False):
+    socket_path = _rc_socket_path(cfg)
+    if not socket_path.exists():
+        return None
+    try:
+        return _rc_request(socket_path, command, payload, timeout=timeout)
+    except _RcloneRCUnavailable:
+        return None
+    except Exception as exc:
+        if mutating:
+            raise RuntimeError("rclone rc write outcome is unknown; retry required") from exc
+        return None
 
 
 def sha256_bytes(data: bytes) -> str:
@@ -311,8 +377,9 @@ def rclone_target(remote: str, base: str, leaf: str = "", root_pinned: bool = Fa
     return remote + "/".join(parts)
 
 
-def run_rclone(args, cfg: dict | None = None, check=True, capture=True):
-    timeout = int((cfg or {}).get("rclone_timeout_seconds", DEFAULT_RCLONE_TIMEOUT))
+def run_rclone(args, cfg: dict | None = None, check=True, capture=True, timeout_override: float | None = None):
+    general_timeout = float((cfg or {}).get("rclone_timeout_seconds", DEFAULT_RCLONE_TIMEOUT))
+    timeout = general_timeout if timeout_override is None else max(0.5, min(float(timeout_override), general_timeout))
     argv = ["rclone", *_rclone_prefix(cfg or {}), *args]
     try:
         with _TRANSPORT_LOCK:
@@ -323,7 +390,7 @@ def run_rclone(args, cfg: dict | None = None, check=True, capture=True):
                 timeout=timeout,
             )
     except subprocess.TimeoutExpired as exc:
-        raise RuntimeError(f"rclone command timed out after {timeout}s") from exc
+        raise RuntimeError(f"rclone command timed out after {timeout:g}s") from exc
     if check and cp.returncode != 0:
         err = cp.stderr.decode("utf-8", errors="replace") if cp.stderr else ""
         raise RuntimeError(f"rclone command failed rc={cp.returncode}: {err}")
@@ -342,12 +409,38 @@ def ensure_remote_dirs(cfg: dict) -> None:
         run_rclone(["mkdir", _target(cfg, leaf)], cfg)
 
 
+def _list_remote_names_cfg(cfg: dict, leaf: str) -> list[str]:
+    general = float(cfg.get("rclone_timeout_seconds", DEFAULT_RCLONE_TIMEOUT))
+    obj = _rc_call(
+        cfg, "operations/list",
+        {"fs": cfg["remote"].rstrip(":") + ":", "remote": leaf.lstrip("/"), "opt": {"filesOnly": True}},
+        timeout=max(0.5, min(3.0, general)),
+    )
+    if obj is not None:
+        listing = obj.get("list", [])
+        if not isinstance(listing, list):
+            raise RuntimeError("rclone rc list returned malformed response")
+        names = []
+        for item in listing:
+            if not isinstance(item, dict) or item.get("IsDir"):
+                continue
+            name = item.get("Name")
+            if not isinstance(name, str) or not name:
+                path = item.get("Path")
+                name = Path(path).name if isinstance(path, str) and path else None
+            if isinstance(name, str) and name and "/" not in name:
+                names.append(name)
+        if len(names) != len(set(names)):
+            raise RuntimeError("duplicate filenames in remote directory")
+        return sorted(names)
+    cp = run_rclone(["lsf", _target(cfg, leaf), "--files-only"], cfg, timeout_override=5)
+    return sorted(line.strip() for line in cp.stdout.decode("utf-8", errors="strict").splitlines() if line.strip() and "/" not in line.strip())
+
+
 def list_requests_cfg(cfg: dict):
-    cp = run_rclone(["lsf", _target(cfg, "requests"), "--files-only"], cfg)
     names = []
-    for line in cp.stdout.decode("utf-8", errors="strict").splitlines():
-        name = line.strip()
-        if not name.endswith(".json") or "/" in name:
+    for name in _list_remote_names_cfg(cfg, "requests"):
+        if not name.endswith(".json"):
             continue
         try:
             validate_request_name(name)
@@ -363,15 +456,58 @@ def list_requests(remote: str, base: str):
 
 
 def copy_from_remote_cfg(cfg: dict, leaf: str, local: Path) -> None:
-    run_rclone(["copyto", _target(cfg, leaf), str(local)], cfg)
+    local.parent.mkdir(parents=True, exist_ok=True)
+    rc_tmp = local.with_name(local.name + ".rc-part")
+    subprocess_tmp = local.with_name(local.name + ".subprocess-part")
+    rc_tmp.unlink(missing_ok=True)
+    subprocess_tmp.unlink(missing_ok=True)
+    try:
+        obj = _rc_call(
+            cfg, "operations/copyfile",
+            {"srcFs": cfg["remote"].rstrip(":") + ":", "srcRemote": leaf.lstrip("/"),
+             "dstFs": str(rc_tmp.parent), "dstRemote": rc_tmp.name},
+            timeout=max(0.5, min(5.0, float(cfg.get("rclone_timeout_seconds", DEFAULT_RCLONE_TIMEOUT)))),
+        )
+        if obj is not None:
+            completed = rc_tmp
+        else:
+            run_rclone(["copyto", _target(cfg, leaf), str(subprocess_tmp)], cfg, timeout_override=8)
+            completed = subprocess_tmp
+        os.replace(completed, local)
+    finally:
+        rc_tmp.unlink(missing_ok=True)
+        subprocess_tmp.unlink(missing_ok=True)
 
 
 def copy_to_remote_cfg(local: Path, cfg: dict, leaf: str) -> None:
-    run_rclone(["copyto", str(local), _target(cfg, leaf)], cfg)
+    obj = _rc_call(
+        cfg, "operations/copyfile",
+        {"srcFs": str(local.parent), "srcRemote": local.name,
+         "dstFs": cfg["remote"].rstrip(":") + ":", "dstRemote": leaf.lstrip("/")},
+        timeout=max(0.5, min(6.0, float(cfg.get("rclone_timeout_seconds", DEFAULT_RCLONE_TIMEOUT)))),
+        mutating=True,
+    )
+    if obj is None:
+        run_rclone(["copyto", str(local), _target(cfg, leaf)], cfg, timeout_override=10)
 
 
 def delete_remote_cfg(cfg: dict, leaf: str) -> None:
-    run_rclone(["deletefile", _target(cfg, leaf)], cfg)
+    obj = _rc_call(
+        cfg, "operations/deletefile",
+        {"fs": cfg["remote"].rstrip(":") + ":", "remote": leaf.lstrip("/")},
+        timeout=max(0.5, min(2.0, float(cfg.get("rclone_timeout_seconds", DEFAULT_RCLONE_TIMEOUT)))),
+        mutating=True,
+    )
+    if obj is None:
+        run_rclone(["deletefile", _target(cfg, leaf)], cfg, timeout_override=3)
+
+
+def _remote_leaf_exists_cfg(cfg: dict, leaf: str) -> bool:
+    clean = leaf.strip("/")
+    parent, sep, name = clean.rpartition("/")
+    if not sep or not name:
+        raise ValueError("remote leaf must include parent/name")
+    return name in _list_remote_names_cfg(cfg, parent)
 
 
 def copy_from_remote(remote: str, base: str, leaf: str, local: Path) -> None:
@@ -442,6 +578,9 @@ def _copy_request(cfg: dict, leaf: str, local: Path) -> None:
 
 def _publish_stored(local_result: Path, name: str, cfg: dict) -> None:
     if cfg.get("drive_root_folder_id"):
+        if _remote_leaf_exists_cfg(cfg, f"results/{name}"):
+            delete_remote_cfg(cfg, f"requests/{name}")
+            return
         copy_to_remote_cfg(local_result, cfg, f"results/{name}")
         delete_remote_cfg(cfg, f"requests/{name}")
     else:
