@@ -456,6 +456,10 @@ def copy_from_remote_cfg(cfg: dict, leaf: str, local: Path) -> None:
 
 
 def copy_to_remote_cfg(local: Path, cfg: dict, leaf: str, *, priority=TRANSPORT_PRIORITY_DATA, timeout_seconds=None, op_name="upload") -> None:
+    if leaf == "health.json" and priority == TRANSPORT_PRIORITY_DATA and timeout_seconds is None and op_name == "upload":
+        priority = TRANSPORT_PRIORITY_HEALTH
+        timeout_seconds = min(5, int(cfg.get("rclone_timeout_seconds", DEFAULT_RCLONE_TIMEOUT)))
+        op_name = "health-publish"
     run_rclone(["copyto", str(local), _target(cfg, leaf)], cfg, priority=priority, timeout_seconds=timeout_seconds if timeout_seconds is not None else cfg.get("rclone_transfer_timeout_seconds", 12), op_name=op_name)
 
 
@@ -620,7 +624,7 @@ def process_one(name: str, cfg: dict) -> None:
             "message": "daemon previously recorded STARTED without FINISHED; active process was contained if still present; request was not re-executed",
         })
         _set_phase(name, "publishing")
-    _persist_then_publish(result, local_result, finished_marker, name, cfg)
+        _persist_then_publish(result, local_result, finished_marker, name, cfg)
         return
 
     atomic_write(local_request, raw)
@@ -674,6 +678,7 @@ def process_one(name: str, cfg: dict) -> None:
         active_marker.unlink(missing_ok=True)
         with _ACTIVE_LOCK:
             _ACTIVE.pop(v["id"], None)
+    _set_phase(name, "publishing")
     _persist_then_publish(result, local_result, finished_marker, name, cfg)
 
 
@@ -806,7 +811,7 @@ def publish_health(cfg: dict) -> None:
         health_cfg = dict(cfg)
         health_cfg["rclone_timeout_seconds"] = min(5, int(cfg.get("rclone_timeout_seconds", DEFAULT_RCLONE_TIMEOUT)))
         if cfg.get("drive_root_folder_id"):
-            copy_to_remote_cfg(local, health_cfg, "health.json", priority=TRANSPORT_PRIORITY_HEALTH, timeout_seconds=5, op_name="health-publish")
+            copy_to_remote_cfg(local, health_cfg, "health.json")
         else:
             # Legacy helper has no cfg timeout override; v5 installations pin root ID.
             copy_to_remote(local, cfg["remote"], cfg["base_path"], "health.json")
