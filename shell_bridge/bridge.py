@@ -6,6 +6,7 @@ import base64
 import fcntl
 import hashlib
 import json
+import heapq
 import os
 import re
 import signal
@@ -13,6 +14,7 @@ import subprocess
 import sys
 import tempfile
 import threading
+from contextlib import contextmanager
 import time
 from pathlib import Path
 
@@ -30,10 +32,95 @@ DEFAULT_MAX_OUTPUT_BYTES = 16 * 1024 * 1024
 DEFAULT_MAX_ACTIVE_CAP = 32
 ID_RE = re.compile(r"[a-z0-9][a-z0-9._-]{0,127}\Z")
 
-_TRANSPORT_LOCK = threading.RLock()
+TRANSPORT_PRIORITY_CONTROL = 0
+TRANSPORT_PRIORITY_HEALTH = 1
+TRANSPORT_PRIORITY_DATA = 10
+
+class TransportGate:
+    def __init__(self) -> None:
+        self._cond = threading.Condition()
+        self._waiters = []
+        self._seq = 0
+        self._owner = None
+        self._last_success_at = None
+        self._last_error_at = None
+        self._last_error = None
+        self._last_duration_seconds = None
+        self._consecutive_failures = 0
+
+    @contextmanager
+    def hold(self, priority: int, op: str):
+        token = object()
+        joined = time.monotonic()
+        with self._cond:
+            seq = self._seq
+            self._seq += 1
+            heapq.heappush(self._waiters, (priority, seq, token, op, joined))
+            while self._owner is not None or self._waiters[0][2] is not token:
+                self._cond.wait()
+            heapq.heappop(self._waiters)
+            self._owner = {
+                "op": op, "priority": priority, "started_at_monotonic": time.monotonic(),
+                "wait_seconds": time.monotonic() - joined,
+            }
+        started = time.monotonic()
+        try:
+            yield
+        except Exception as exc:
+            with self._cond:
+                self._last_error_at = time.time()
+                self._last_error = f"{type(exc).__name__}: {exc}"
+                self._last_duration_seconds = time.monotonic() - started
+                self._consecutive_failures += 1
+            raise
+        else:
+            with self._cond:
+                self._last_success_at = time.time()
+                self._last_error = None
+                self._last_duration_seconds = time.monotonic() - started
+                self._consecutive_failures = 0
+        finally:
+            with self._cond:
+                self._owner = None
+                self._cond.notify_all()
+
+    def snapshot(self) -> dict:
+        with self._cond:
+            owner = dict(self._owner) if self._owner is not None else None
+            waiters = [
+                {"priority": p, "op": op, "wait_seconds": max(0.0, time.monotonic() - joined)}
+                for p, _seq, _token, op, joined in self._waiters
+            ]
+            return {
+                "owner": owner, "waiters": waiters, "waiter_count": len(waiters),
+                "last_success_at": self._last_success_at, "last_error_at": self._last_error_at,
+                "last_error": self._last_error, "last_duration_seconds": self._last_duration_seconds,
+                "consecutive_failures": self._consecutive_failures,
+            }
+
+_TRANSPORT = TransportGate()
 _ACTIVE_LOCK = threading.RLock()
 _ACTIVE: dict[str, dict] = {}
+_PHASE_LOCK = threading.RLock()
+_REQUEST_PHASES: dict[str, str] = {}
+_PROGRESS_LOCK = threading.RLock()
+_PROGRESS: dict[str, object] = {}
 _SHUTDOWN = threading.Event()
+
+def _set_phase(name: str, phase: str | None) -> None:
+    with _PHASE_LOCK:
+        if phase is None:
+            _REQUEST_PHASES.pop(name, None)
+        else:
+            _REQUEST_PHASES[name] = phase
+
+def _set_progress(**values) -> None:
+    with _PROGRESS_LOCK:
+        _PROGRESS.update(values)
+
+def _progress_snapshot() -> dict:
+    with _PROGRESS_LOCK:
+        return dict(_PROGRESS)
 
 
 def sha256_bytes(data: bytes) -> str:
@@ -311,11 +398,13 @@ def rclone_target(remote: str, base: str, leaf: str = "", root_pinned: bool = Fa
     return remote + "/".join(parts)
 
 
-def run_rclone(args, cfg: dict | None = None, check=True, capture=True):
-    timeout = int((cfg or {}).get("rclone_timeout_seconds", DEFAULT_RCLONE_TIMEOUT))
+def run_rclone(args, cfg: dict | None = None, check=True, capture=True, *, priority=TRANSPORT_PRIORITY_DATA, timeout_seconds=None, op_name=None):
+    general_timeout = int((cfg or {}).get("rclone_timeout_seconds", DEFAULT_RCLONE_TIMEOUT))
+    timeout = general_timeout if timeout_seconds is None else min(general_timeout, max(1, int(timeout_seconds)))
     argv = ["rclone", *_rclone_prefix(cfg or {}), *args]
+    op = op_name or (str(args[0]) if args else "rclone")
     try:
-        with _TRANSPORT_LOCK:
+        with _TRANSPORT.hold(priority, op):
             cp = subprocess.run(
                 argv,
                 stdout=subprocess.PIPE if capture else None,
@@ -343,7 +432,7 @@ def ensure_remote_dirs(cfg: dict) -> None:
 
 
 def list_requests_cfg(cfg: dict):
-    cp = run_rclone(["lsf", _target(cfg, "requests"), "--files-only"], cfg)
+    cp = run_rclone(["lsf", _target(cfg, "requests"), "--files-only"], cfg, priority=TRANSPORT_PRIORITY_CONTROL, timeout_seconds=cfg.get("rclone_poll_timeout_seconds", 5), op_name="poll-list")
     names = []
     for line in cp.stdout.decode("utf-8", errors="strict").splitlines():
         name = line.strip()
@@ -363,15 +452,15 @@ def list_requests(remote: str, base: str):
 
 
 def copy_from_remote_cfg(cfg: dict, leaf: str, local: Path) -> None:
-    run_rclone(["copyto", _target(cfg, leaf), str(local)], cfg)
+    run_rclone(["copyto", _target(cfg, leaf), str(local)], cfg, timeout_seconds=cfg.get("rclone_transfer_timeout_seconds", 12), op_name="download")
 
 
-def copy_to_remote_cfg(local: Path, cfg: dict, leaf: str) -> None:
-    run_rclone(["copyto", str(local), _target(cfg, leaf)], cfg)
+def copy_to_remote_cfg(local: Path, cfg: dict, leaf: str, *, priority=TRANSPORT_PRIORITY_DATA, timeout_seconds=None, op_name="upload") -> None:
+    run_rclone(["copyto", str(local), _target(cfg, leaf)], cfg, priority=priority, timeout_seconds=timeout_seconds if timeout_seconds is not None else cfg.get("rclone_transfer_timeout_seconds", 12), op_name=op_name)
 
 
 def delete_remote_cfg(cfg: dict, leaf: str) -> None:
-    run_rclone(["deletefile", _target(cfg, leaf)], cfg)
+    run_rclone(["deletefile", _target(cfg, leaf)], cfg, timeout_seconds=cfg.get("rclone_delete_timeout_seconds", 5), op_name="delete")
 
 
 def copy_from_remote(remote: str, base: str, leaf: str, local: Path) -> None:
@@ -497,6 +586,7 @@ def process_one(name: str, cfg: dict) -> None:
     os.close(fd)
     tmp_path = Path(tmp)
     try:
+        _set_phase(name, "downloading")
         _copy_request(cfg, f"requests/{name}", tmp_path)
         if tmp_path.stat().st_size > max_request_bytes:
             request_sha = sha256_file(tmp_path)
@@ -529,10 +619,12 @@ def process_one(name: str, cfg: dict) -> None:
         result = result_envelope(rid_guess, request_sha, "indeterminate", {
             "message": "daemon previously recorded STARTED without FINISHED; active process was contained if still present; request was not re-executed",
         })
-        _persist_then_publish(result, local_result, finished_marker, name, cfg)
+        _set_phase(name, "publishing")
+    _persist_then_publish(result, local_result, finished_marker, name, cfg)
         return
 
     atomic_write(local_request, raw)
+    _set_phase(name, "validating")
     try:
         req = load_json_bytes(raw)
         v = validate_request(req, name, allowed_root, max_timeout, max_command_bytes, max_stdin_bytes)
@@ -556,6 +648,7 @@ def process_one(name: str, cfg: dict) -> None:
         with _ACTIVE_LOCK:
             _ACTIVE[v["id"]] = {"pgid": pgid, "started_at": spawned_at, "name": name}
 
+    _set_phase(name, "executing")
     try:
         exec_result = run_shell(
             v["cwd"], v["command"], v["stdin"], v["timeout"],
@@ -617,6 +710,9 @@ def load_config(path: Path) -> dict:
     for key, default in [
         ("max_timeout_seconds", DEFAULT_MAX_TIMEOUT),
         ("rclone_timeout_seconds", DEFAULT_RCLONE_TIMEOUT),
+        ("rclone_poll_timeout_seconds", 5),
+        ("rclone_transfer_timeout_seconds", 12),
+        ("rclone_delete_timeout_seconds", 5),
         ("max_request_bytes", DEFAULT_MAX_REQUEST_BYTES),
         ("max_command_bytes", DEFAULT_MAX_COMMAND_BYTES),
         ("max_stdin_bytes", DEFAULT_MAX_STDIN_BYTES),
@@ -675,6 +771,10 @@ def doctor(cfg: dict, *, probe_transport: bool = True) -> dict:
     }
     with _ACTIVE_LOCK:
         info["active_requests"] = sorted(_ACTIVE)
+    with _PHASE_LOCK:
+        info["request_phases"] = dict(sorted(_REQUEST_PHASES.items()))
+    info["transport"] = _TRANSPORT.snapshot()
+    info["progress"] = _progress_snapshot()
     if probe_transport:
         try:
             cp = run_rclone(["version"], cfg, check=False)
@@ -706,7 +806,7 @@ def publish_health(cfg: dict) -> None:
         health_cfg = dict(cfg)
         health_cfg["rclone_timeout_seconds"] = min(5, int(cfg.get("rclone_timeout_seconds", DEFAULT_RCLONE_TIMEOUT)))
         if cfg.get("drive_root_folder_id"):
-            copy_to_remote_cfg(local, health_cfg, "health.json")
+            copy_to_remote_cfg(local, health_cfg, "health.json", priority=TRANSPORT_PRIORITY_HEALTH, timeout_seconds=5, op_name="health-publish")
         else:
             # Legacy helper has no cfg timeout override; v5 installations pin root ID.
             copy_to_remote(local, cfg["remote"], cfg["base_path"], "health.json")
@@ -736,11 +836,13 @@ def sweep_incomplete_processes(cfg: dict) -> int:
 
 
 def _worker(name: str, cfg: dict, active_names: set[str], active_lock: threading.Lock) -> None:
+    _set_phase(name, "admitted")
     try:
         process_one(name, cfg)
     except Exception as exc:
         print(f"request {name}: {type(exc).__name__}: {exc}", flush=True)
     finally:
+        _set_phase(name, None)
         with active_lock:
             active_names.discard(name)
 
@@ -768,14 +870,17 @@ def daemon(config_path: Path) -> None:
     threads: set[threading.Thread] = set()
     last_health = 0.0
     _SHUTDOWN.clear()
+    _set_progress(pid=os.getpid(), daemon_started_at=time.time(), last_loop_at=time.time(), last_poll_success_at=None, last_poll_error=None)
     old_handlers = {}
     for sig in (signal.SIGTERM, signal.SIGINT):
         old_handlers[sig] = signal.signal(sig, _signal_shutdown)
     try:
         while not _SHUTDOWN.is_set():
+            _set_progress(last_loop_at=time.time())
             threads = {t for t in threads if t.is_alive()}
             try:
                 names = list_requests_cfg(cfg)
+                _set_progress(last_poll_success_at=time.time(), last_poll_error=None, last_seen_request_count=len(names))
                 for name in names:
                     if _SHUTDOWN.is_set():
                         break
@@ -789,6 +894,7 @@ def daemon(config_path: Path) -> None:
                     threads.add(t)
                     t.start()
             except Exception as exc:
+                _set_progress(last_poll_error=f"{type(exc).__name__}: {exc}", last_poll_error_at=time.time())
                 print(f"poll error: {type(exc).__name__}: {exc}", flush=True)
             now = time.monotonic()
             if now - last_health >= health_seconds:
