@@ -1,0 +1,3 @@
+interface:
+  display_name: "Mac Git Bridge"
+  short_description: "Raw Git and shell access to Tomas's Mac through Google Drive"
