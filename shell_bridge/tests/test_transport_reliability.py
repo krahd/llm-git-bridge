@@ -84,3 +84,100 @@ class ShellBridgeTransportReliabilityTests(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class ShellBridgeRcloneLifecycleTests(unittest.TestCase):
+    def _cfg(self, td: str) -> dict:
+        root = Path(td) / "root"
+        root.mkdir(exist_ok=True)
+        return {
+            "remote": "x:",
+            "base_path": "Bridge",
+            "drive_root_folder_id": "root123",
+            "allowed_root": str(root),
+            "state_dir": str(Path(td) / "state"),
+            "shell": b.DEFAULT_SHELL,
+            "rclone_timeout_seconds": 30,
+            "poll_seconds": 0.01,
+            "health_seconds": 60,
+        }
+
+    def test_start_rcd_preserves_drive_root_pin_and_uses_unix_socket(self):
+        class Proc:
+            def poll(self): return None
+            def terminate(self): pass
+            def wait(self, timeout=None): return 0
+            def kill(self): pass
+        seen = []
+        def fake_popen(argv, **kwargs):
+            seen.append(argv)
+            addr = argv[argv.index("--rc-addr") + 1]
+            Path(addr.removeprefix("unix://")).touch()
+            return Proc()
+        with tempfile.TemporaryDirectory() as td:
+            cfg = self._cfg(td)
+            with patch.object(b.shutil, "which", return_value="/usr/local/bin/rclone"), \
+                 patch.object(b, "_retire_existing_rcd", lambda *a, **k: None), \
+                 patch.object(b, "_rc_ready", return_value=True), \
+                 patch.object(b.subprocess, "Popen", fake_popen):
+                rcd = b.start_rclone_rcd(cfg, startup_timeout=0.2)
+            self.assertIsNotNone(rcd)
+            self.assertIn("--drive-root-folder-id", seen[0])
+            self.assertEqual(seen[0][seen[0].index("--drive-root-folder-id") + 1], "root123")
+            self.assertIn("rcd", seen[0])
+            self.assertTrue(any(x.startswith("unix://") for x in seen[0]))
+
+    def test_daemon_starts_and_stops_owned_rcd(self):
+        class Lock:
+            def close(self): pass
+        class Rcd:
+            health_failures = 0
+            def healthy(self, timeout=0.25): return True
+            def stop(self): self.stopped = True
+        with tempfile.TemporaryDirectory() as td:
+            cfg = self._cfg(td)
+            rcd = Rcd(); rcd.stopped = False
+            def one_poll(_cfg):
+                b._SHUTDOWN.set()
+                return []
+            with patch.object(b, "load_config", return_value=cfg), \
+                 patch.object(b, "acquire_instance_lock", return_value=Lock()), \
+                 patch.object(b, "ensure_remote_dirs"), \
+                 patch.object(b, "sweep_incomplete_processes", return_value=0), \
+                 patch.object(b, "start_rclone_rcd", return_value=rcd) as start, \
+                 patch.object(b, "list_requests_cfg", side_effect=one_poll), \
+                 patch.object(b, "publish_health"):
+                b.daemon(Path(td) / "config.json")
+            start.assert_called_once_with(cfg)
+            self.assertTrue(rcd.stopped)
+
+    def test_two_rc_health_misses_restart_rcd(self):
+        class Lock:
+            def close(self): pass
+        class Rcd:
+            def __init__(self, health): self.health=list(health); self.stopped=False
+            def healthy(self, timeout=0.25): return self.health.pop(0) if self.health else True
+            def stop(self): self.stopped=True
+        with tempfile.TemporaryDirectory() as td:
+            cfg = self._cfg(td)
+            cfg["rc_health_seconds"] = 0.01
+            first = Rcd([False, False])
+            second = Rcd([True])
+            starts = [first, second]
+            polls = {"n": 0}
+            def list_once(_cfg):
+                polls["n"] += 1
+                if polls["n"] >= 4:
+                    b._SHUTDOWN.set()
+                time.sleep(0.012)
+                return []
+            with patch.object(b, "load_config", return_value=cfg), \
+                 patch.object(b, "acquire_instance_lock", return_value=Lock()), \
+                 patch.object(b, "ensure_remote_dirs"), \
+                 patch.object(b, "sweep_incomplete_processes", return_value=0), \
+                 patch.object(b, "start_rclone_rcd", side_effect=starts) as start, \
+                 patch.object(b, "list_requests_cfg", side_effect=list_once), \
+                 patch.object(b, "publish_health"):
+                b.daemon(Path(td) / "config.json")
+            self.assertGreaterEqual(start.call_count, 2)
+            self.assertTrue(first.stopped)
