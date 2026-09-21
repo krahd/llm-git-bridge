@@ -193,6 +193,48 @@ def create_job(args) -> dict:
     return job
 
 
+def ensure_job(args) -> dict:
+    state = state_root(args.state_dir)
+    if not args.job_id:
+        return create_job(args)
+    path = job_path(state, args.job_id)
+    if not path.exists():
+        return create_job(args)
+    job = load_job(state, args.job_id)
+    repo = repo_root(Path(args.repo))
+    resource = _safe_resource(args.resource)
+    expected = {
+        "repo": str(repo),
+        "resource": resource,
+        "remote": args.remote,
+        "target_branch": args.target,
+    }
+    mismatches = [
+        f"{key}: existing={job.get(key)!r} requested={value!r}"
+        for key, value in expected.items() if job.get(key) != value
+    ]
+    if mismatches:
+        raise WorkspaceError(
+            f"existing job {args.job_id} does not match requested identity: " + "; ".join(mismatches)
+        )
+    worktree = Path(job["worktree"])
+    if not worktree.is_dir():
+        raise WorkspaceError(f"existing job {args.job_id} worktree is missing: {worktree}")
+    actual_branch = git(worktree, "branch", "--show-current").stdout.strip()
+    if actual_branch != job["branch"]:
+        raise WorkspaceError(
+            f"existing job {args.job_id} worktree branch does not match metadata: "
+            f"{actual_branch!r} != {job['branch']!r}"
+        )
+    if args.push_initial and not job.get("last_remote_checkpoint"):
+        head = git(worktree, "rev-parse", "HEAD").stdout.strip()
+        git(worktree, "push", "-u", job["remote"], f"HEAD:refs/heads/{job['branch']}")
+        _verify_remote_branch(repo, job["remote"], job["branch"], head)
+        job["last_remote_checkpoint"] = head
+        save_job(state, job)
+    return job
+
+
 def _dirty(worktree: Path) -> bool:
     return bool(git(worktree, "status", "--porcelain").stdout)
 
@@ -471,6 +513,7 @@ def main():
     ap.add_argument("--state-dir")
     sub=ap.add_subparsers(dest="cmd",required=True)
     p=sub.add_parser("create"); p.add_argument("--repo",required=True); p.add_argument("--resource",required=True); p.add_argument("--remote",default="origin"); p.add_argument("--target",default="main"); p.add_argument("--job-id"); p.add_argument("--worktree-root"); p.add_argument("--push-initial",action="store_true"); p.set_defaults(fn=create_job)
+    p=sub.add_parser("ensure"); p.add_argument("--repo",required=True); p.add_argument("--resource",required=True); p.add_argument("--remote",default="origin"); p.add_argument("--target",default="main"); p.add_argument("--job-id",required=True); p.add_argument("--worktree-root"); p.add_argument("--push-initial",action="store_true"); p.set_defaults(fn=ensure_job)
     p=sub.add_parser("exec"); p.add_argument("--job",required=True); p.add_argument("--command",required=True); p.add_argument("--timeout",type=int,default=120); p.add_argument("--shell",default="/bin/zsh" if Path('/bin/zsh').exists() else "/bin/bash"); p.add_argument("--no-checkpoint",action="store_true"); p.add_argument("--checkpoint-message"); p.set_defaults(fn=exec_job)
     p=sub.add_parser("list"); p.add_argument("--repo"); p.set_defaults(fn=list_jobs)
     p=sub.add_parser("show"); p.add_argument("--job",required=True); p.set_defaults(fn=show_job)
