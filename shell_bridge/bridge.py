@@ -10,6 +10,7 @@ import json
 import os
 import re
 import signal
+import shutil
 import socket
 import subprocess
 import sys
@@ -100,6 +101,96 @@ def _rc_call(cfg: dict, command: str, payload: dict, *, timeout: float, mutating
         if mutating:
             raise RuntimeError("rclone rc write outcome is unknown; retry required") from exc
         return None
+
+
+class RcloneRCProcess:
+    def __init__(self, socket_path: Path, process: subprocess.Popen | None):
+        self.socket_path = socket_path
+        self.process = process
+
+    def healthy(self, *, timeout: float = 0.25) -> bool:
+        if self.process is not None and self.process.poll() is not None:
+            return False
+        return _rc_ready(self.socket_path, timeout=timeout)
+
+    def stop(self) -> None:
+        if self.process is not None and self.process.poll() is None:
+            self.process.terminate()
+            try:
+                self.process.wait(timeout=3)
+            except subprocess.TimeoutExpired:
+                self.process.kill()
+                self.process.wait(timeout=3)
+        self.socket_path.unlink(missing_ok=True)
+
+
+def _rc_ready(socket_path: Path, *, timeout: float = 0.75) -> bool:
+    if not socket_path.exists():
+        return False
+    try:
+        _rc_request(socket_path, 'rc/noop', {}, timeout=timeout)
+        return True
+    except Exception:
+        return False
+
+
+def _retire_existing_rcd(socket_path: Path, *, timeout: float = 2.0) -> None:
+    if not _rc_ready(socket_path):
+        socket_path.unlink(missing_ok=True)
+        return
+    try:
+        _rc_request(socket_path, 'core/quit', {}, timeout=min(1.0, timeout))
+    except Exception:
+        pass
+    deadline = time.monotonic() + max(0.25, timeout)
+    while time.monotonic() < deadline:
+        if not _rc_ready(socket_path, timeout=0.1):
+            break
+        time.sleep(0.05)
+    socket_path.unlink(missing_ok=True)
+
+
+def start_rclone_rcd(cfg: dict, startup_timeout: float = 5.0) -> RcloneRCProcess | None:
+    rclone = shutil.which('rclone')
+    if not rclone:
+        return None
+    socket_path = _rc_socket_path(cfg)
+    socket_path.parent.mkdir(parents=True, exist_ok=True, mode=0o700)
+    try:
+        os.chmod(socket_path.parent, 0o700)
+    except OSError:
+        pass
+    _retire_existing_rcd(socket_path)
+    log_path = socket_path.parent / 'rclone-rcd.log'
+    log_fh = log_path.open('ab', buffering=0)
+    try:
+        process = subprocess.Popen(
+            [rclone, *_rclone_prefix(cfg), 'rcd', '--rc-addr', f'unix://{socket_path}', '--rc-no-auth'],
+            stdin=subprocess.DEVNULL, stdout=log_fh, stderr=subprocess.STDOUT, close_fds=True,
+        )
+    finally:
+        log_fh.close()
+    deadline = time.monotonic() + max(0.5, float(startup_timeout))
+    while time.monotonic() < deadline:
+        if socket_path.exists():
+            try:
+                os.chmod(socket_path, 0o600)
+            except OSError:
+                pass
+            if _rc_ready(socket_path):
+                return RcloneRCProcess(socket_path, process)
+        if process.poll() is not None:
+            break
+        time.sleep(0.05)
+    if process.poll() is None:
+        process.terminate()
+        try:
+            process.wait(timeout=2)
+        except subprocess.TimeoutExpired:
+            process.kill()
+            process.wait(timeout=2)
+    socket_path.unlink(missing_ok=True)
+    return None
 
 
 def sha256_bytes(data: bytes) -> str:
@@ -896,16 +987,24 @@ def daemon(config_path: Path) -> None:
     cfg = load_config(config_path)
     lock_file = acquire_instance_lock(cfg)
     ensure_remote_dirs(cfg)
+    rcd = start_rclone_rcd(cfg)
+    if rcd is None:
+        print('rclone rcd unavailable; using bounded subprocess fallback', flush=True)
+    else:
+        print('rclone rcd ready', flush=True)
     swept = sweep_incomplete_processes(cfg)
     if swept:
         print(f"startup contained {swept} recorded incomplete process group(s)", flush=True)
     poll = float(cfg.get("poll_seconds", DEFAULT_POLL_SECONDS))
     limit = max_active_requests(cfg)
     health_seconds = float(cfg.get("health_seconds", DEFAULT_HEALTH_SECONDS))
+    rc_health_seconds = float(cfg.get("rc_health_seconds", 10.0))
     active_names: set[str] = set()
     active_lock = threading.Lock()
     threads: set[threading.Thread] = set()
     last_health = 0.0
+    last_rc_health = 0.0
+    rc_health_failures = 0
     _SHUTDOWN.clear()
     old_handlers = {}
     for sig in (signal.SIGTERM, signal.SIGINT):
@@ -930,6 +1029,22 @@ def daemon(config_path: Path) -> None:
             except Exception as exc:
                 print(f"poll error: {type(exc).__name__}: {exc}", flush=True)
             now = time.monotonic()
+            if now - last_rc_health >= rc_health_seconds:
+                if rcd is None:
+                    rcd = start_rclone_rcd(cfg)
+                    rc_health_failures = 0
+                    if rcd is not None:
+                        print('rclone rcd recovered', flush=True)
+                elif rcd.healthy(timeout=0.25):
+                    rc_health_failures = 0
+                else:
+                    rc_health_failures += 1
+                    if rc_health_failures >= 2:
+                        rcd.stop()
+                        rcd = start_rclone_rcd(cfg)
+                        rc_health_failures = 0
+                        print('rclone rcd restarted' if rcd is not None else 'rclone rcd restart failed; using fallback', flush=True)
+                last_rc_health = now
             if now - last_health >= health_seconds:
                 publish_health(cfg)
                 last_health = now
@@ -940,6 +1055,8 @@ def daemon(config_path: Path) -> None:
         deadline = time.monotonic() + 5
         for t in list(threads):
             t.join(timeout=max(0.0, deadline - time.monotonic()))
+        if rcd is not None:
+            rcd.stop()
         lock_file.close()
         for sig, handler in old_handlers.items():
             signal.signal(sig, handler)
