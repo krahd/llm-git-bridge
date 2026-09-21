@@ -2,7 +2,7 @@
 set -euo pipefail
 
 APP_NAME="chatgpt-shell-bridge"
-LABEL="${SHELL_BRIDGE_LABEL:-io.llm-git-bridge.${APP_NAME}}"
+LABEL="${SHELL_BRIDGE_LABEL:-io.llm-git-bridge.daemon}"
 INSTALL_DIR="${INSTALL_DIR:-$HOME/.local/share/$APP_NAME}"
 CONFIG_DIR="${CONFIG_DIR:-$HOME/.config/$APP_NAME}"
 STATE_DIR="${STATE_DIR:-$HOME/.local/state/$APP_NAME}"
@@ -97,6 +97,24 @@ SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
 cp "$SCRIPT_DIR/bridge.py" "$INSTALL_DIR/bridge.py"
 cp "$SCRIPT_DIR/workspace.py" "$INSTALL_DIR/workspace.py"
 chmod 700 "$INSTALL_DIR/bridge.py" "$INSTALL_DIR/workspace.py"
+SOURCE_COMMIT="$(git -C "$SCRIPT_DIR/.." rev-parse HEAD)"
+python3 - "$INSTALL_DIR/install-manifest.json" "$SOURCE_COMMIT" "$INSTALL_DIR/bridge.py" "$INSTALL_DIR/workspace.py" <<'PYMAN'
+import hashlib,json,sys
+manifest_path,source_commit,bridge_path,workspace_path=sys.argv[1:]
+def sha256(path):
+    with open(path,'rb') as f:
+        return hashlib.sha256(f.read()).hexdigest()
+manifest={
+    'schema':1,
+    'source_commit':source_commit,
+    'bridge_sha256':sha256(bridge_path),
+    'workspace_sha256':sha256(workspace_path),
+}
+with open(manifest_path,'w',encoding='utf-8') as f:
+    json.dump(manifest,f,indent=2,sort_keys=True)
+    f.write('\n')
+PYMAN
+chmod 600 "$INSTALL_DIR/install-manifest.json"
 
 python3 - "$CONFIG_DIR/config.json" "$REMOTE" "$BASE_PATH" "$ROOT_ID" "$REQUESTS_ID" "$RESULTS_ID" "$INSTANCE_ID" "$ALLOWED_ROOT" "$STATE_DIR" "$SHELL_BIN" <<'PY'
 import json,sys
