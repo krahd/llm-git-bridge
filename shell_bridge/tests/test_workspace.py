@@ -4,6 +4,8 @@ import json
 import os
 import subprocess
 import tempfile
+import threading
+import time
 import unittest
 from pathlib import Path
 
@@ -46,6 +48,41 @@ class WorkspaceTests(unittest.TestCase):
         self.ready(b['job_id']); ib=self.integrate(b['job_id']); self.assertEqual(ib['state'],'integrated')
         fresh=self.root/'fresh'; r('git','clone','-q',str(self.origin),str(fresh))
         self.assertEqual((fresh/'paper-a.txt').read_text(),'a1\n'); self.assertEqual((fresh/'paper-b.txt').read_text(),'b1\n')
+
+    def test_two_jobs_execute_concurrently_without_repo_wide_lock(self):
+        a=self.create('research:parallel:a'); b=self.create('research:parallel:b')
+        errors=[]
+        start=threading.Barrier(3)
+        def worker(job, path, value):
+            try:
+                start.wait()
+                self.exec(job['job_id'], f"python3 -c \"import time,pathlib; time.sleep(1); pathlib.Path('{path}').write_text('{value}\\n')\"")
+            except Exception as exc:
+                errors.append(exc)
+        t1=threading.Thread(target=worker,args=(a,'paper-a.txt','a-parallel'))
+        t2=threading.Thread(target=worker,args=(b,'paper-b.txt','b-parallel'))
+        t1.start(); t2.start(); before=time.monotonic(); start.wait(); t1.join(5); t2.join(5); elapsed=time.monotonic()-before
+        self.assertEqual(errors, [])
+        self.assertFalse(t1.is_alive()); self.assertFalse(t2.is_alive())
+        self.assertLess(elapsed, 1.8, f'workspace execution serialized across jobs: {elapsed:.3f}s')
+
+    def test_ensure_job_is_idempotent_for_same_conversation_job_id(self):
+        args=argparse.Namespace(state_dir=str(self.state),repo=str(self.repo),resource='research:ensure',remote='origin',target='main',job_id='conversation-stable-id',worktree_root=str(self.root/'worktrees'),push_initial=True)
+        first=w.ensure_job(args)
+        second=w.ensure_job(args)
+        self.assertEqual(first['job_id'], second['job_id'])
+        self.assertEqual(first['worktree'], second['worktree'])
+        self.assertEqual(first['last_remote_checkpoint'], second['last_remote_checkpoint'])
+        self.assertTrue(Path(first['worktree']).is_dir())
+        jobs=[j for j in w.list_jobs(argparse.Namespace(state_dir=str(self.state),repo=None)) if j['job_id']=='conversation-stable-id']
+        self.assertEqual(len(jobs),1)
+
+    def test_ensure_job_rejects_identity_mismatch(self):
+        args=argparse.Namespace(state_dir=str(self.state),repo=str(self.repo),resource='research:ensure:a',remote='origin',target='main',job_id='conversation-stable-id',worktree_root=str(self.root/'worktrees'),push_initial=True)
+        w.ensure_job(args)
+        args.resource='research:ensure:b'
+        with self.assertRaisesRegex(w.WorkspaceError,'does not match'):
+            w.ensure_job(args)
 
     def test_same_resource_requires_reconcile(self):
         a=self.create('research:paper:a'); b=self.create('research:paper:a')
