@@ -473,13 +473,12 @@ def run_rclone(args, cfg: dict | None = None, check=True, capture=True, timeout_
     timeout = general_timeout if timeout_override is None else max(0.5, min(float(timeout_override), general_timeout))
     argv = ["rclone", *_rclone_prefix(cfg or {}), *args]
     try:
-        with _TRANSPORT_LOCK:
-            cp = subprocess.run(
-                argv,
-                stdout=subprocess.PIPE if capture else None,
-                stderr=subprocess.PIPE if capture else None,
-                timeout=timeout,
-            )
+        cp = subprocess.run(
+            argv,
+            stdout=subprocess.PIPE if capture else None,
+            stderr=subprocess.PIPE if capture else None,
+            timeout=timeout,
+        )
     except subprocess.TimeoutExpired as exc:
         raise RuntimeError(f"rclone command timed out after {timeout:g}s") from exc
     if check and cp.returncode != 0:
