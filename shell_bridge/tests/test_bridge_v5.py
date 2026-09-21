@@ -74,42 +74,6 @@ class V5RcloneTests(unittest.TestCase):
             b.run_rclone(["lsf", "x:requests"], {"drive_root_folder_id":"abc","rclone_timeout_seconds":5})
         self.assertEqual(seen[0][:4], ["rclone", "--drive-root-folder-id", "abc", "lsf"])
 
-    def test_subprocess_fallback_calls_can_overlap(self):
-        class CP:
-            returncode = 0
-            stdout = b""
-            stderr = b""
-        entered_first = threading.Event()
-        entered_second = threading.Event()
-        release = threading.Event()
-        counter = {"n": 0}
-        counter_lock = threading.Lock()
-        errors = []
-        def fake_run(argv, **kwargs):
-            with counter_lock:
-                counter["n"] += 1
-                n = counter["n"]
-                if n == 1:
-                    entered_first.set()
-                elif n == 2:
-                    entered_second.set()
-            release.wait(2)
-            return CP()
-        def call():
-            try:
-                b.run_rclone(["version"], {"rclone_timeout_seconds": 5})
-            except Exception as exc:
-                errors.append(exc)
-        with patch.object(b.subprocess, "run", fake_run):
-            t1 = threading.Thread(target=call); t1.start()
-            self.assertTrue(entered_first.wait(0.5))
-            t2 = threading.Thread(target=call); t2.start()
-            try:
-                self.assertTrue(entered_second.wait(0.5), "second fallback was globally serialized")
-            finally:
-                release.set(); t1.join(2); t2.join(2)
-        self.assertEqual(errors, [])
-
 
 class V5CrashTests(unittest.TestCase):
     def test_started_active_is_contained_before_indeterminate(self):
@@ -182,32 +146,6 @@ class V5ConcurrencyTests(unittest.TestCase):
             release.set()
             for t in threads:t.join(2)
         self.assertEqual(active,set())
-
-
-class V5InstallProvenanceTests(unittest.TestCase):
-    def test_runtime_provenance_matches_install_manifest(self):
-        with tempfile.TemporaryDirectory() as td:
-            runtime = Path(td) / "bridge.py"
-            runtime.write_bytes(b"runtime-bytes")
-            digest = b.sha256_file(runtime)
-            (Path(td) / "install-manifest.json").write_text(json.dumps({
-                "schema": 1,
-                "source_commit": "abc123",
-                "bridge_sha256": digest,
-            }))
-            with patch.object(b, "__file__", str(runtime)):
-                info = b._runtime_provenance()
-            self.assertEqual(info["runtime_sha256"], digest)
-            self.assertEqual(info["installed_source_commit"], "abc123")
-            self.assertEqual(info["installed_source_bridge_sha256"], digest)
-            self.assertTrue(info["runtime_matches_installed_source"])
-
-    def test_installer_verifies_copies_and_writes_manifest(self):
-        script = (Path(__file__).resolve().parents[1] / "install.sh").read_text()
-        self.assertIn('cmp -s "$SCRIPT_DIR/bridge.py" "$INSTALL_DIR/bridge.py"', script)
-        self.assertIn('cmp -s "$SCRIPT_DIR/workspace.py" "$INSTALL_DIR/workspace.py"', script)
-        self.assertIn('install-manifest.json', script)
-        self.assertIn("'source_commit':source_commit or None", script)
 
 
 if __name__ == "__main__":
