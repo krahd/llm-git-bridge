@@ -96,7 +96,39 @@ chmod 700 "$INSTALL_DIR" "$CONFIG_DIR" "$STATE_DIR"
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
 cp "$SCRIPT_DIR/bridge.py" "$INSTALL_DIR/bridge.py"
 cp "$SCRIPT_DIR/workspace.py" "$INSTALL_DIR/workspace.py"
+if [ -f "$SCRIPT_DIR/VERSION" ]; then cp "$SCRIPT_DIR/VERSION" "$INSTALL_DIR/VERSION"; fi
 chmod 700 "$INSTALL_DIR/bridge.py" "$INSTALL_DIR/workspace.py"
+cmp -s "$SCRIPT_DIR/bridge.py" "$INSTALL_DIR/bridge.py" || { echo "ERROR: installed bridge.py differs from source after copy" >&2; exit 1; }
+cmp -s "$SCRIPT_DIR/workspace.py" "$INSTALL_DIR/workspace.py" || { echo "ERROR: installed workspace.py differs from source after copy" >&2; exit 1; }
+SOURCE_COMMIT="$(git -C "$SCRIPT_DIR" rev-parse HEAD 2>/dev/null || true)"
+python3 - "$INSTALL_DIR/install-manifest.json" "$SOURCE_COMMIT" "$INSTALL_DIR/bridge.py" "$INSTALL_DIR/workspace.py" <<'PY_MANIFEST'
+import hashlib,json,os,sys,tempfile,time
+manifest,source_commit,bridge_path,workspace_path=sys.argv[1:]
+def digest(path):
+    h=hashlib.sha256()
+    with open(path,'rb') as f:
+        for chunk in iter(lambda:f.read(1024*1024),b''):
+            h.update(chunk)
+    return h.hexdigest()
+obj={
+    'schema':1,
+    'source_commit':source_commit or None,
+    'bridge_sha256':digest(bridge_path),
+    'workspace_sha256':digest(workspace_path),
+    'installed_at':time.strftime('%Y-%m-%dT%H:%M:%SZ',time.gmtime()),
+}
+parent=os.path.dirname(manifest)
+fd,tmp=tempfile.mkstemp(prefix='.install-manifest.',dir=parent)
+try:
+    with os.fdopen(fd,'w',encoding='utf-8') as f:
+        json.dump(obj,f,indent=2,sort_keys=True)
+        f.write('\n')
+        f.flush(); os.fsync(f.fileno())
+    os.replace(tmp,manifest)
+finally:
+    if os.path.exists(tmp): os.unlink(tmp)
+PY_MANIFEST
+chmod 600 "$INSTALL_DIR/install-manifest.json"
 
 python3 - "$CONFIG_DIR/config.json" "$REMOTE" "$BASE_PATH" "$ROOT_ID" "$REQUESTS_ID" "$RESULTS_ID" "$INSTANCE_ID" "$ALLOWED_ROOT" "$STATE_DIR" "$SHELL_BIN" <<'PY'
 import json,sys

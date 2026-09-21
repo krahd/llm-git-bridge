@@ -888,6 +888,34 @@ def _result_state_counts(cfg: dict) -> dict:
     return out
 
 
+def _runtime_provenance() -> dict:
+    runtime_path = Path(__file__).resolve()
+    runtime_sha = sha256_file(runtime_path)
+    out = {
+        "runtime_sha256": runtime_sha,
+        "installed_source_commit": None,
+        "installed_source_bridge_sha256": None,
+        "runtime_matches_installed_source": None,
+    }
+    manifest_path = runtime_path.parent / "install-manifest.json"
+    if not manifest_path.is_file():
+        return out
+    try:
+        manifest = json.loads(manifest_path.read_text("utf-8"))
+        if not isinstance(manifest, dict):
+            raise ValueError("install manifest must be a JSON object")
+        source_commit = manifest.get("source_commit")
+        source_sha = manifest.get("bridge_sha256")
+        if isinstance(source_commit, str) and source_commit:
+            out["installed_source_commit"] = source_commit
+        if isinstance(source_sha, str) and source_sha:
+            out["installed_source_bridge_sha256"] = source_sha
+            out["runtime_matches_installed_source"] = source_sha == runtime_sha
+    except Exception as exc:
+        out["install_manifest_error"] = f"{type(exc).__name__}: {exc}"
+    return out
+
+
 def doctor(cfg: dict, *, probe_transport: bool = True) -> dict:
     info = {
         "protocol": PROTOCOL,
@@ -903,6 +931,7 @@ def doctor(cfg: dict, *, probe_transport: bool = True) -> dict:
         "rclone_timeout_seconds": int(cfg.get("rclone_timeout_seconds", DEFAULT_RCLONE_TIMEOUT)),
         "state": _result_state_counts(cfg),
     }
+    info.update(_runtime_provenance())
     with _ACTIVE_LOCK:
         info["active_requests"] = sorted(_ACTIVE)
     if probe_transport:
