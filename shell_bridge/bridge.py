@@ -628,15 +628,37 @@ def load_config(path: Path) -> dict:
     return cfg
 
 
+def _instance_lock_path(cfg: dict) -> Path:
+    """Return a per-user lock path stable across state-dir/config migrations."""
+    instance_id = cfg.get("bridge_instance_id")
+    if isinstance(instance_id, str) and instance_id.strip():
+        identity = f"instance:{instance_id.strip()}"
+    else:
+        # Backward-compatible fallback for incomplete/legacy configs.
+        remote = str(cfg.get("remote", ""))
+        base = str(cfg.get("base_path", ""))
+        identity = f"mailbox:{remote}|{base}"
+    digest = hashlib.sha256(identity.encode("utf-8")).hexdigest()[:32]
+    lock_root = Path(tempfile.gettempdir()) / f"chatgpt-shell-bridge-{os.getuid()}"
+    lock_root.mkdir(mode=0o700, parents=True, exist_ok=True)
+    try:
+        lock_root.chmod(0o700)
+    except OSError:
+        pass
+    return lock_root / f"{digest}.lock"
+
+
 def acquire_instance_lock(cfg: dict):
-    state_dir = Path(cfg["state_dir"]).expanduser()
-    state_dir.mkdir(parents=True, exist_ok=True)
-    lock_file = (state_dir / "daemon.lock").open("a+")
+    lock_file = _instance_lock_path(cfg).open("a+")
     try:
         fcntl.flock(lock_file.fileno(), fcntl.LOCK_EX | fcntl.LOCK_NB)
     except BlockingIOError as exc:
         lock_file.close()
-        raise RuntimeError("another shell-bridge instance already holds the state lock") from exc
+        raise RuntimeError("another shell-bridge instance already holds the instance lock") from exc
+    lock_file.seek(0)
+    lock_file.truncate()
+    lock_file.write(f"pid={os.getpid()}\n")
+    lock_file.flush()
     return lock_file
 
 
@@ -657,6 +679,28 @@ def _result_state_counts(cfg: dict) -> dict:
     return out
 
 
+def _private_oauth_client_configured(cfg: dict) -> bool | None:
+    """Return whether the rclone remote has its own client_id, without exposing it."""
+    remote = str(cfg.get("remote", "")).rstrip(":")
+    if not remote:
+        return None
+    safe_cfg = dict(cfg)
+    # `rclone config redacted` is local config inspection; Drive backend flags do not apply.
+    safe_cfg.pop("drive_root_folder_id", None)
+    try:
+        cp = run_rclone(["config", "redacted", remote], safe_cfg, check=False)
+    except Exception:
+        return None
+    if cp.returncode != 0:
+        return None
+    text = (cp.stdout or b"").decode("utf-8", errors="replace")
+    for line in text.splitlines():
+        key, sep, value = line.partition("=")
+        if sep and key.strip() == "client_id":
+            return bool(value.strip())
+    return False
+
+
 def doctor(cfg: dict, *, probe_transport: bool = True) -> dict:
     info = {
         "protocol": PROTOCOL,
@@ -670,6 +714,16 @@ def doctor(cfg: dict, *, probe_transport: bool = True) -> dict:
         "allowed_root": str(Path(cfg["allowed_root"]).expanduser().resolve()),
         "max_active_requests": max_active_requests(cfg),
         "rclone_timeout_seconds": int(cfg.get("rclone_timeout_seconds", DEFAULT_RCLONE_TIMEOUT)),
+        "state_dir": str(Path(cfg["state_dir"]).expanduser().resolve()),
+        "state_counter_semantics": "current_state_dir_journal_snapshot",
+        "health_interval_seconds": float(cfg.get("health_seconds", DEFAULT_HEALTH_SECONDS)),
+        "health_stale_after_seconds": max(
+            2.0 * float(cfg.get("health_seconds", DEFAULT_HEALTH_SECONDS)),
+            float(cfg.get("health_seconds", DEFAULT_HEALTH_SECONDS))
+            + float(cfg.get("rclone_timeout_seconds", DEFAULT_RCLONE_TIMEOUT))
+            + 10.0,
+        ),
+        "health_staleness_semantics": "advisory; a stale heartbeat alone does not prove daemon death",
         "state": _result_state_counts(cfg),
     }
     with _ACTIVE_LOCK:
@@ -691,6 +745,7 @@ def doctor(cfg: dict, *, probe_transport: bool = True) -> dict:
         except Exception as exc:
             info["drive_connectivity_ok"] = False
             info["drive_error"] = str(exc)
+        info["private_oauth_client_configured"] = _private_oauth_client_configured(cfg)
     return info
 
 
@@ -698,6 +753,7 @@ def publish_health(cfg: dict) -> None:
     state_dir = Path(cfg["state_dir"]).expanduser()
     payload = doctor(cfg, probe_transport=False)
     payload["kind"] = "shell_bridge_health"
+    payload["publisher_pid"] = os.getpid()
     payload["updated_at"] = time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime())
     local = state_dir / "health.json"
     atomic_write(local, json.dumps(payload, indent=2, sort_keys=True).encode("utf-8"))
