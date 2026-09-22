@@ -277,7 +277,7 @@ Multi-repository integrations that require several named locks acquire them in d
 - allowed root;
 - no tokens/secrets.
 
-A bounded `health.json` is periodically published at the pinned Drive root. A stale heartbeat is diagnosable even when requests stop being consumed.
+A bounded `health.json` is periodically published at the pinned Drive root. It records the publisher PID, resolved state directory, configured heartbeat interval, and an advisory staleness threshold. The `state.finished` and `state.started_without_finished` values are a snapshot of the current state-directory journal, not lifetime counters. A heartbeat older than the advisory threshold is evidence to investigate transport/process state; it is **not by itself proof that the daemon is dead**, because a bounded rclone operation may delay publication. The daemon singleton lock is keyed by stable `bridge_instance_id`, not by `state_dir`, so stale configuration generations cannot publish competing heartbeats for the same bridge instance.
 
 ## Drive/OAuth robustness
 

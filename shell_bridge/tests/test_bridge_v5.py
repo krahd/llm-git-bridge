@@ -36,6 +36,29 @@ class V5ConfigTests(unittest.TestCase):
                 b.max_active_requests({"max_active_requests": bad})
 
 
+class V5InstanceLockTests(unittest.TestCase):
+    def test_same_instance_id_cannot_lock_different_state_dirs(self):
+        with tempfile.TemporaryDirectory() as td:
+            cfg1={"state_dir":str(Path(td)/"state-a"),"bridge_instance_id":"same-instance","drive_root_folder_id":"root123"}
+            cfg2={"state_dir":str(Path(td)/"state-b"),"bridge_instance_id":"same-instance","drive_root_folder_id":"root123"}
+            first=b.acquire_instance_lock(cfg1)
+            try:
+                with self.assertRaisesRegex(RuntimeError, "another shell-bridge instance"):
+                    b.acquire_instance_lock(cfg2)
+            finally:
+                first.close()
+            second=b.acquire_instance_lock(cfg2)
+            second.close()
+
+    def test_distinct_instance_ids_can_lock_independently(self):
+        with tempfile.TemporaryDirectory() as td:
+            cfg1={"state_dir":str(Path(td)/"state-a"),"bridge_instance_id":"instance-a","drive_root_folder_id":"root123"}
+            cfg2={"state_dir":str(Path(td)/"state-b"),"bridge_instance_id":"instance-b","drive_root_folder_id":"root123"}
+            first=b.acquire_instance_lock(cfg1)
+            second=b.acquire_instance_lock(cfg2)
+            second.close(); first.close()
+
+
 class V5RcloneTests(unittest.TestCase):
     def test_rclone_timeout_is_bounded(self):
         with tempfile.TemporaryDirectory() as td:
@@ -153,6 +176,38 @@ class V5CrashTests(unittest.TestCase):
 
 
 class V5HealthTests(unittest.TestCase):
+    def test_doctor_reports_private_oauth_without_exposing_client_id(self):
+        with tempfile.TemporaryDirectory() as td:
+            root=Path(td)/"root"; root.mkdir(); state=Path(td)/"state"
+            cfg={"remote":"x:","base_path":"Bridge","drive_root_folder_id":"abc","allowed_root":str(root),"state_dir":str(state),"shell":b.DEFAULT_SHELL,"rclone_timeout_seconds":30}
+            class CP:
+                def __init__(self, returncode=0, stdout=b"", stderr=b""):
+                    self.returncode=returncode; self.stdout=stdout; self.stderr=stderr
+            def fake_run(args, _cfg, check=False, capture=True):
+                if args == ["version"]: return CP(stdout=b"rclone v1.75.1\n")
+                if args and args[0] == "about": return CP()
+                if args[:2] == ["config", "redacted"]:
+                    return CP(stdout=b"[x]\ntype = drive\nclient_id = XXX\nclient_secret = XXX\n")
+                raise AssertionError(args)
+            with patch.object(b,"run_rclone",side_effect=fake_run):
+                info=b.doctor(cfg)
+            self.assertTrue(info["private_oauth_client_configured"])
+            self.assertNotIn("XXX", json.dumps(info))
+            self.assertNotIn("client_secret", json.dumps(info))
+
+    def test_health_payload_documents_snapshot_and_staleness_semantics(self):
+        with tempfile.TemporaryDirectory() as td:
+            root=Path(td)/"root"; root.mkdir(); state=Path(td)/"state"
+            cfg={"remote":"x:","base_path":"Bridge","drive_root_folder_id":"abc","bridge_instance_id":"instance-a","allowed_root":str(root),"state_dir":str(state),"shell":b.DEFAULT_SHELL,"rclone_timeout_seconds":30,"health_seconds":60}
+            with patch.object(b,"copy_to_remote_cfg",lambda *a,**k: None):
+                b.publish_health(cfg)
+            payload=json.loads((state/"health.json").read_text())
+            self.assertEqual(payload["state_counter_semantics"],"current_state_dir_journal_snapshot")
+            self.assertEqual(payload["health_interval_seconds"],60.0)
+            self.assertGreaterEqual(payload["health_stale_after_seconds"],90.0)
+            self.assertEqual(payload["publisher_pid"],os.getpid())
+            self.assertEqual(payload["state_dir"],str(state.resolve()))
+
     def test_health_payload_skips_expensive_transport_probe(self):
         with tempfile.TemporaryDirectory() as td:
             root=Path(td)/"root"; root.mkdir(); state=Path(td)/"state"

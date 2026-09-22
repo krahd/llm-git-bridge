@@ -7,6 +7,8 @@ INSTALL_DIR="${INSTALL_DIR:-$HOME/.local/share/$APP_NAME}"
 CONFIG_DIR="${CONFIG_DIR:-$HOME/.config/$APP_NAME}"
 STATE_DIR="${STATE_DIR:-$HOME/.local/state/$APP_NAME}"
 PLIST="${PLIST:-$HOME/Library/LaunchAgents/$LABEL.plist}"
+LEGACY_LABEL="io.llm-git-bridge.chatgpt-shell-bridge"
+LEGACY_PLIST="$HOME/Library/LaunchAgents/$LEGACY_LABEL.plist"
 ALLOWED_ROOT="${ALLOWED_ROOT:-$HOME/tom-repos}"
 BASE_PATH="${BASE_PATH:-ChatGPT Shell Bridge}"
 SHELL_BIN="${SHELL_BIN:-/bin/zsh}"
@@ -59,6 +61,11 @@ else
   done < <(rclone listremotes)
   [ "${#matches[@]}" -eq 1 ] || { echo "ERROR: expected exactly one rclone remote exposing a valid $BASE_PATH marker; found ${#matches[@]}" >&2; printf '  %s\n' "${matches[@]:-}" >&2; exit 1; }
   REMOTE="${matches[0]}"
+fi
+
+# Inspect only rclone's redacted view; never print OAuth material.
+if ! rclone config redacted "${REMOTE%:}" 2>/dev/null | grep -Eq '^[[:space:]]*client_id[[:space:]]*='; then
+  echo "WARNING: Drive remote $REMOTE has no private OAuth client_id; rclone's shared client is being retired during 2026." >&2
 fi
 
 ROOT_JSON="$(rclone lsjson "$REMOTE" --dirs-only --max-depth 1)"
@@ -158,6 +165,19 @@ if [ "$STAGE_ONLY" -eq 1 ]; then
   echo "WORKSPACE: $INSTALL_DIR/workspace.py"
   echo "LABEL:     $LABEL"
   exit 0
+fi
+
+# Retire the one known pre-canonical LaunchAgent. Archive its plist for recovery.
+if [ "$LABEL" != "$LEGACY_LABEL" ]; then
+  launchctl bootout "gui/${UID_NOW}/${LEGACY_LABEL}" >/dev/null 2>&1 || \
+    launchctl bootout "gui/${UID_NOW}" "$LEGACY_PLIST" >/dev/null 2>&1 || true
+  if [ -f "$LEGACY_PLIST" ]; then
+    LEGACY_ARCHIVE_DIR="$STATE_DIR/legacy-launchagent"
+    mkdir -p "$LEGACY_ARCHIVE_DIR"
+    chmod 700 "$LEGACY_ARCHIVE_DIR"
+    LEGACY_STAMP="$(date +%Y%m%d%H%M%S)"
+    mv "$LEGACY_PLIST" "$LEGACY_ARCHIVE_DIR/${LEGACY_LABEL}.${LEGACY_STAMP}.plist"
+  fi
 fi
 
 launchctl bootout "gui/${UID_NOW}" "$PLIST" >/dev/null 2>&1 || true
