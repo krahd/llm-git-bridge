@@ -14,6 +14,12 @@ class InstallScriptTests(unittest.TestCase):
         self.assertIn("'ProgramArguments':[python,bridge,'daemon','--config',config]", self.text)
         self.assertNotIn("[python,bridge,'watch'", self.text)
 
+    def test_installer_retires_known_legacy_launchagent(self):
+        self.assertIn("io.llm-git-bridge.chatgpt-shell-bridge", self.text)
+        self.assertIn("LEGACY_PLIST", self.text)
+        self.assertIn("launchctl bootout", self.text)
+        self.assertIn("legacy-launchagent", self.text)
+
     def test_installer_writes_runtime_provenance_manifest(self):
         self.assertIn("install-manifest.json", self.text)
         self.assertIn("'source_commit':source_commit", self.text)
