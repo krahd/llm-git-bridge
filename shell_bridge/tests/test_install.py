@@ -14,6 +14,11 @@ class InstallScriptTests(unittest.TestCase):
         self.assertIn("'ProgramArguments':[python,bridge,'daemon','--config',config]", self.text)
         self.assertNotIn("[python,bridge,'watch'", self.text)
 
+    def test_installer_warns_when_private_oauth_client_is_missing_without_printing_secrets(self):
+        self.assertIn("rclone config redacted \"${REMOTE%:}\"", self.text)
+        self.assertIn("no private OAuth client_id", self.text)
+        self.assertNotIn("config show", self.text)
+
     def test_installer_retires_known_legacy_launchagent(self):
         self.assertIn("io.llm-git-bridge.chatgpt-shell-bridge", self.text)
         self.assertIn("LEGACY_PLIST", self.text)

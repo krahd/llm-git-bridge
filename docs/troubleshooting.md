@@ -124,4 +124,3 @@ The bridge is single-consumer but not FIFO. Transport listing order can differ f
 Read `health.json` before restarting anything. `health_interval_seconds` is the intended publication interval and `health_stale_after_seconds` is a conservative advisory threshold that includes bounded transport latency. A timestamp beyond that threshold means *investigate*; it does not prove the daemon is dead. Check `publisher_pid`, `state_dir`, active requests, STARTED-without-FINISHED state, and the LaunchAgent/process state. Do not restart or resubmit a request merely because one heartbeat update is late.
 
 The `state.finished` value is the number of FINISHED journals currently present in that publisher's state directory. It is not a lifetime completion counter.
-
