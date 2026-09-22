@@ -10,6 +10,12 @@ class InstallScriptTests(unittest.TestCase):
     def test_canonical_launchagent_label_is_default(self):
         self.assertIn("SHELL_BRIDGE_LABEL:-io.llm-git-bridge.daemon", self.text)
 
+    def test_installer_retires_legacy_launchagent_before_live_activation(self):
+        self.assertIn("LEGACY_LABEL=\"io.llm-git-bridge.chatgpt-shell-bridge\"", self.text)
+        self.assertIn("launchctl bootout \"gui/${UID_NOW}/$LEGACY_LABEL\"", self.text)
+        self.assertIn("rm -f \"$LEGACY_PLIST\"", self.text)
+        self.assertIn("[ \"$STAGE_ONLY\" -eq 0 ]", self.text)
+
     def test_launchagent_runs_shell_bridge_daemon_not_watch(self):
         self.assertIn("'ProgramArguments':[python,bridge,'daemon','--config',config]", self.text)
         self.assertNotIn("[python,bridge,'watch'", self.text)
