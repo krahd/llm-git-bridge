@@ -51,20 +51,36 @@ class WorkspaceTests(unittest.TestCase):
 
     def test_two_jobs_execute_concurrently_without_repo_wide_lock(self):
         a=self.create('research:parallel:a'); b=self.create('research:parallel:b')
+        rendezvous=self.root/'rendezvous'; rendezvous.mkdir()
         errors=[]
         start=threading.Barrier(3)
-        def worker(job, path, value):
+        def worker(job, path, value, marker, peer):
             try:
                 start.wait()
-                self.exec(job['job_id'], f"python3 -c \"import time,pathlib; time.sleep(1); pathlib.Path('{path}').write_text('{value}\\n')\"")
-            except Exception as exc:
+                command=(
+                    f"marker_dir={str(rendezvous)!r}; "
+                    f"me=\"$marker_dir/{marker}\"; peer=\"$marker_dir/{peer}\"; "
+                    "printf 'ready\n' > \"$me\"; "
+                    "i=0; while [ ! -e \"$peer\" ]; do i=$((i+1)); "
+                    "[ \"$i\" -lt 500 ] || exit 90; sleep 0.02; done; "
+                    f"printf '%s\n' {value!r} > {path!r}"
+                )
+                out=self.exec(job['job_id'], command)
+                if out['exit_code'] != 0:
+                    raise AssertionError(
+                        f"workspace exec failed for {marker}: rc={out['exit_code']} stderr={out['stderr']!r}"
+                    )
+            except BaseException as exc:
                 errors.append(exc)
-        t1=threading.Thread(target=worker,args=(a,'paper-a.txt','a-parallel'))
-        t2=threading.Thread(target=worker,args=(b,'paper-b.txt','b-parallel'))
-        t1.start(); t2.start(); before=time.monotonic(); start.wait(); t1.join(5); t2.join(5); elapsed=time.monotonic()-before
-        self.assertEqual(errors, [])
+        t1=threading.Thread(target=worker,args=(a,'paper-a.txt','a-parallel','a.ready','b.ready'))
+        t2=threading.Thread(target=worker,args=(b,'paper-b.txt','b-parallel','b.ready','a.ready'))
+        t1.start(); t2.start(); start.wait(); t1.join(30); t2.join(30)
         self.assertFalse(t1.is_alive()); self.assertFalse(t2.is_alive())
-        self.assertLess(elapsed, 1.8, f'workspace execution serialized across jobs: {elapsed:.3f}s')
+        self.assertEqual(errors, [])
+        self.assertEqual((rendezvous/'a.ready').read_text(),'ready\n')
+        self.assertEqual((rendezvous/'b.ready').read_text(),'ready\n')
+        self.assertEqual((Path(a['worktree'])/'paper-a.txt').read_text(),'a-parallel\n')
+        self.assertEqual((Path(b['worktree'])/'paper-b.txt').read_text(),'b-parallel\n')
 
     def test_ensure_job_is_idempotent_for_same_conversation_job_id(self):
         args=argparse.Namespace(state_dir=str(self.state),repo=str(self.repo),resource='research:ensure',remote='origin',target='main',job_id='conversation-stable-id',worktree_root=str(self.root/'worktrees'),push_initial=True)
