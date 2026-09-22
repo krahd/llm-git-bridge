@@ -5,14 +5,10 @@ APP_NAME="chatgpt-shell-bridge"
 LABEL="${SHELL_BRIDGE_LABEL:-io.llm-git-bridge.daemon}"
 LEGACY_LABEL="io.llm-git-bridge.chatgpt-shell-bridge"
 LEGACY_PLIST="$HOME/Library/LaunchAgents/$LEGACY_LABEL.plist"
-LEGACY_LABEL="io.llm-git-bridge.chatgpt-shell-bridge"
-LEGACY_PLIST="$HOME/Library/LaunchAgents/$LEGACY_LABEL.plist"
 INSTALL_DIR="${INSTALL_DIR:-$HOME/.local/share/$APP_NAME}"
 CONFIG_DIR="${CONFIG_DIR:-$HOME/.config/$APP_NAME}"
 STATE_DIR="${STATE_DIR:-$HOME/.local/state/$APP_NAME}"
 PLIST="${PLIST:-$HOME/Library/LaunchAgents/$LABEL.plist}"
-LEGACY_LABEL="io.llm-git-bridge.chatgpt-shell-bridge"
-LEGACY_PLIST="$HOME/Library/LaunchAgents/$LEGACY_LABEL.plist"
 ALLOWED_ROOT="${ALLOWED_ROOT:-$HOME/tom-repos}"
 BASE_PATH="${BASE_PATH:-ChatGPT Shell Bridge}"
 SHELL_BIN="${SHELL_BIN:-/bin/zsh}"
@@ -159,22 +155,6 @@ obj={'Label':label,'ProgramArguments':[python,bridge,'daemon','--config',config]
 with open(plist,'wb') as f: plistlib.dump(obj,f,fmt=plistlib.FMT_XML,sort_keys=True)
 PY
 chmod 600 "$PLIST"
-
-# Retire the pre-canonical LaunchAgent only during live activation.
-# Leaving it loaded can run a second daemon against the same mailbox and health file.
-if [ "$STAGE_ONLY" -eq 0 ] && [ "$LABEL" != "$LEGACY_LABEL" ]; then
-  launchctl bootout "gui/${UID_NOW}/$LEGACY_LABEL" >/dev/null 2>&1 || true
-  launchctl bootout "gui/${UID_NOW}" "$LEGACY_PLIST" >/dev/null 2>&1 || true
-  rm -f "$LEGACY_PLIST"
-fi
-
-# Retire the pre-canonical LaunchAgent only during live activation.
-# Leaving it loaded can run a second daemon against the same mailbox and health file.
-if [ "$STAGE_ONLY" -eq 0 ] && [ "$LABEL" != "$LEGACY_LABEL" ]; then
-  launchctl bootout "gui/${UID_NOW}/$LEGACY_LABEL" >/dev/null 2>&1 || true
-  launchctl bootout "gui/${UID_NOW}" "$LEGACY_PLIST" >/dev/null 2>&1 || true
-  rm -f "$LEGACY_PLIST"
-fi
 
 if [ "$STAGE_ONLY" -eq 1 ]; then
   echo "SHELL_BRIDGE_STAGED=1"
