@@ -6,6 +6,20 @@ It exposes a deliberately small mailbox protocol for repository discovery, filte
 
 > **Status:** `1.0.0rc9` protocol-v2 release candidate. RC9 retains RC8 direct current-branch authority and adds a separate default-off, qualification-gated self-update path for the bridge itself. Existing configurations keep both authorities disabled until the local operator enables them.
 
+
+## Two bridge modes
+
+This repository now contains two deliberately different ways to solve the "the LLM cannot reach my local repositories" problem:
+
+| Mode | Use it when | Remote authority |
+| --- | --- | --- |
+| **Protocol-v2 `llm-git-bridge`** | You want the narrowest, Git-specific interface for snapshots, validated patches, commits and optional pushes. | Structured Git transactions only; no arbitrary remote shell. |
+| **ChatGPT Shell Bridge v5** | You want ordinary ChatGPT/agent sessions to inspect and operate on a local Mac more transparently, including workflows that need ordinary shell tools. | Raw shell as the logged-in user; use the durable workspace coordinator for Git mutations. |
+
+The protocol-v2 bridge remains the safer default when its Git transaction model is sufficient. Shell Bridge v5 trades a larger trust boundary for transparency and generality. It is not a sandbox.
+
+For a fresh self-service Shell Bridge installation, including automatic Drive-mailbox bootstrap and host-neutral repository-root configuration, see [`shell_bridge/README.md`](shell_bridge/README.md).
+
 ## Why use it?
 
 A native Git hosting integration is usually the simplest option when it is available and has the permissions you need. `llm-git-bridge` exists for cases where you want a different boundary:

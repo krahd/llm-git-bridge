@@ -9,7 +9,7 @@ INSTALL_DIR="${INSTALL_DIR:-$HOME/.local/share/$APP_NAME}"
 CONFIG_DIR="${CONFIG_DIR:-$HOME/.config/$APP_NAME}"
 STATE_DIR="${STATE_DIR:-$HOME/.local/state/$APP_NAME}"
 PLIST="${PLIST:-$HOME/Library/LaunchAgents/$LABEL.plist}"
-ALLOWED_ROOT="${ALLOWED_ROOT:-$HOME/tom-repos}"
+ALLOWED_ROOT="${ALLOWED_ROOT:-}"
 BASE_PATH="${BASE_PATH:-ChatGPT Shell Bridge}"
 SHELL_BIN="${SHELL_BIN:-/bin/zsh}"
 SMOKE_ATTEMPTS="${SMOKE_ATTEMPTS:-30}"
@@ -19,6 +19,7 @@ STARTED_AGENT=0
 STAGE_ONLY=0
 TMP_REQ=""
 RESULT_TMP=""
+TMP_MARKER=""
 
 usage(){ echo "Usage: install.sh [--stage-only]"; }
 while [ "$#" -gt 0 ]; do
@@ -31,37 +32,114 @@ while [ "$#" -gt 0 ]; do
 done
 
 need(){ command -v "$1" >/dev/null 2>&1 || { echo "ERROR: missing required command: $1" >&2; exit 1; }; }
-cleanup(){ rc=$?; [ -n "$TMP_REQ" ] && rm -f "$TMP_REQ" || true; [ -n "$RESULT_TMP" ] && rm -f "$RESULT_TMP" || true; if [ "$rc" -ne 0 ] && [ "$STARTED_AGENT" -eq 1 ]; then launchctl bootout "gui/${UID_NOW}" "$PLIST" >/dev/null 2>&1 || true; fi; }
+cleanup(){ rc=$?; [ -n "$TMP_REQ" ] && rm -f "$TMP_REQ" || true; [ -n "$RESULT_TMP" ] && rm -f "$RESULT_TMP" || true; [ -n "$TMP_MARKER" ] && rm -f "$TMP_MARKER" || true; if [ "$rc" -ne 0 ] && [ "$STARTED_AGENT" -eq 1 ]; then launchctl bootout "gui/${UID_NOW}" "$PLIST" >/dev/null 2>&1 || true; fi; }
 trap cleanup EXIT
 
 [ "$(uname -s)" = Darwin ] || { echo "ERROR: this installer is for macOS" >&2; exit 1; }
 need python3; need rclone; need git; need launchctl
-[ -d "$ALLOWED_ROOT" ] || { echo "ERROR: allowed root does not exist: $ALLOWED_ROOT" >&2; exit 1; }
 [ -x "$SHELL_BIN" ] || { echo "ERROR: shell is not executable: $SHELL_BIN" >&2; exit 1; }
 
+fail(){ echo "ERROR: $*" >&2; exit 1; }
 normalize_remote(){ case "$1" in *:) printf '%s\n' "$1";; *) printf '%s:\n' "$1";; esac; }
 marker_for(){ rclone cat "$1$2/bridge-instance.json" 2>/dev/null || true; }
 valid_marker(){ python3 - "$1" <<'PY'
 import json,sys
 try: o=json.loads(sys.argv[1])
 except Exception: raise SystemExit(1)
-raise SystemExit(0 if o.get('protocol')==1 and o.get('kind')=='shell_bridge_instance' and isinstance(o.get('bridge_instance_id'),str) else 1)
+raise SystemExit(0 if o.get('protocol')==1 and o.get('kind')=='shell_bridge_instance' and isinstance(o.get('bridge_instance_id'),str) and o.get('bridge_instance_id') else 1)
 PY
 }
 
-if [ -n "${RCLONE_REMOTE:-}" ]; then
-  REMOTE="$(normalize_remote "$RCLONE_REMOTE")"
-  rclone listremotes | grep -Fxq "$REMOTE" || { echo "ERROR: configured RCLONE_REMOTE does not exist: $REMOTE" >&2; exit 1; }
-else
-  matches=()
+choose_allowed_root() {
+  if [ -z "$ALLOWED_ROOT" ]; then
+    [ -t 0 ] || fail "ALLOWED_ROOT is required for non-interactive installation"
+    printf 'Local directory ChatGPT may access (for example %s/repos): ' "$HOME"
+    IFS= read -r ALLOWED_ROOT || ALLOWED_ROOT=''
+    [ -n "$ALLOWED_ROOT" ] || fail "an allowed root is required"
+  fi
+  case "$ALLOWED_ROOT" in
+    '~') ALLOWED_ROOT="$HOME" ;;
+    '~/'*) ALLOWED_ROOT="$HOME/${ALLOWED_ROOT#~/}" ;;
+  esac
+  [ -d "$ALLOWED_ROOT" ] || fail "allowed root does not exist: $ALLOWED_ROOT"
+  ALLOWED_ROOT="$(cd "$ALLOWED_ROOT" && pwd -P)"
+}
+
+choose_remote() {
+  if [ -n "${RCLONE_REMOTE:-}" ]; then
+    REMOTE="$(normalize_remote "$RCLONE_REMOTE")"
+    rclone listremotes | grep -Fxq "$REMOTE" || fail "configured RCLONE_REMOTE does not exist: $REMOTE"
+    return
+  fi
+
+  local remotes=() matches=() remote marker selection
   while IFS= read -r remote; do
     [ -n "$remote" ] || continue
-    m="$(marker_for "$remote" "$BASE_PATH")"
-    if [ -n "$m" ] && valid_marker "$m"; then matches+=("$remote"); fi
+    remotes+=("$remote")
+    marker="$(marker_for "$remote" "$BASE_PATH")"
+    if [ -n "$marker" ] && valid_marker "$marker"; then
+      matches+=("$remote")
+    fi
   done < <(rclone listremotes)
-  [ "${#matches[@]}" -eq 1 ] || { echo "ERROR: expected exactly one rclone remote exposing a valid $BASE_PATH marker; found ${#matches[@]}" >&2; printf '  %s\n' "${matches[@]:-}" >&2; exit 1; }
-  REMOTE="${matches[0]}"
-fi
+
+  if [ "${#matches[@]}" -eq 1 ]; then
+    REMOTE="${matches[0]}"
+    return
+  fi
+  [ "${#matches[@]}" -eq 0 ] || fail "multiple rclone remotes contain a valid $BASE_PATH mailbox; set RCLONE_REMOTE explicitly"
+  [ "${#remotes[@]}" -gt 0 ] || fail "no rclone remotes are configured; run 'rclone config' first"
+  if [ "${#remotes[@]}" -eq 1 ]; then
+    REMOTE="${remotes[0]}"
+    return
+  fi
+
+  [ -t 0 ] || fail "multiple rclone remotes are configured; set RCLONE_REMOTE for non-interactive installation"
+  echo "Choose the rclone remote that should carry the Shell Bridge mailbox:"
+  local i=1
+  for remote in "${remotes[@]}"; do printf '  %d) %s\n' "$i" "$remote"; i=$((i+1)); done
+  printf 'Remote number: '
+  IFS= read -r selection || selection=''
+  case "$selection" in *[!0-9]*|'') fail "invalid remote selection" ;; esac
+  [ "$selection" -ge 1 ] && [ "$selection" -le "${#remotes[@]}" ] || fail "invalid remote selection"
+  REMOTE="${remotes[$((selection-1))]}"
+}
+
+ensure_mailbox() {
+  local root_json count marker instance
+  root_json="$(rclone lsjson "$REMOTE" --dirs-only --max-depth 1)"
+  count="$(python3 - "$BASE_PATH" "$root_json" <<'PYCOUNT'
+import json,sys
+name,raw=sys.argv[1:]
+print(sum(1 for x in json.loads(raw) if x.get('IsDir') and x.get('Name')==name))
+PYCOUNT
+)"
+  [ "$count" -le 1 ] || fail "multiple Drive folders are named exactly '$BASE_PATH'; keep one live mailbox and archive the others"
+  if [ "$count" -eq 0 ]; then
+    echo "Creating Drive mailbox: $BASE_PATH"
+    rclone mkdir "${REMOTE}${BASE_PATH}"
+    instance="shell-bridge-$(python3 - <<'PYID'
+import uuid
+print(uuid.uuid4().hex)
+PYID
+)"
+    TMP_MARKER="$(mktemp)"
+    python3 - "$TMP_MARKER" "$instance" <<'PYMARKER'
+import json,sys
+path,instance=sys.argv[1:]
+with open(path,'w',encoding='utf-8') as f:
+    json.dump({'protocol':1,'kind':'shell_bridge_instance','bridge_instance_id':instance},f,separators=(',',':'),sort_keys=True)
+    f.write('\n')
+PYMARKER
+    rclone copyto "$TMP_MARKER" "${REMOTE}${BASE_PATH}/bridge-instance.json"
+  else
+    marker="$(marker_for "$REMOTE" "$BASE_PATH")"
+    valid_marker "$marker" || fail "'$BASE_PATH' already exists but has no valid bridge-instance.json; refusing to adopt it implicitly"
+  fi
+}
+
+choose_allowed_root
+choose_remote
+ensure_mailbox
 
 # Inspect only rclone's redacted view; never print OAuth material.
 if ! rclone config redacted "${REMOTE%:}" 2>/dev/null | grep -Eq '^[[:space:]]*client_id[[:space:]]*='; then
