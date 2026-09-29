@@ -48,3 +48,7 @@ def main(argv: list[str] | None = None) -> int:
         return 2
     print(json.dumps(response, sort_keys=True, indent=2))
     return 0 if response.get("ok") else 1
+
+
+if __name__ == "__main__":
+    raise SystemExit(main())

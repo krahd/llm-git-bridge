@@ -12,6 +12,7 @@ dependencies = []
 
 [project.scripts]
 llm-git-bridge = "llm_git_bridge.app:main"
+llm-git-harness = "llm_git_bridge.harness.cli:main"
 
 [tool.setuptools]
 package-dir = {"" = "src"}
