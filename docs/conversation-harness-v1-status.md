@@ -1,7 +1,7 @@
 # Conversation Harness v1 — implementation status
 
 Status: DEPLOYED — daemon/CLI, live handoff, and browser-readiness diagnostics passed; manual Safari/ChatGPT pilot pending
-Date: 2026-09-28
+Date: 2026-09-29
 
 ## Verified complete
 
