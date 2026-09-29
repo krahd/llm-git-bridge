@@ -6,9 +6,14 @@ import json
 import sys
 import secrets
 from pathlib import Path
+import urllib.error
+import urllib.request
 
 from .daemon import request, serve_forever
-from .runtime import socket_path
+from .runtime import safari_extension_dir, socket_path
+
+DEFAULT_BROWSER_HOST = "127.0.0.1"
+DEFAULT_BROWSER_PORT = 47653
 
 
 def _parser() -> argparse.ArgumentParser:
@@ -22,10 +27,35 @@ def _parser() -> argparse.ArgumentParser:
     pair = sub.add_parser("pair", help="create a one-time browser pairing code")
     pair.add_argument("--socket", default=str(socket_path()))
     pair.add_argument("--ttl", type=float, default=300.0)
+    browser_status = sub.add_parser("browser-status", help="check browser-pilot readiness without creating a pairing code")
+    browser_status.add_argument("--http-host", default=DEFAULT_BROWSER_HOST)
+    browser_status.add_argument("--http-port", type=int, default=DEFAULT_BROWSER_PORT)
+    browser_status.add_argument("--timeout", type=float, default=1.0)
     call = sub.add_parser("call", help="send one JSON protocol request")
     call.add_argument("--socket", default=str(socket_path()))
     call.add_argument("message", nargs="?", help="JSON object; stdin is used when omitted")
     return p
+
+
+def _browser_status(host: str, port: int, timeout: float) -> dict[str, object]:
+    extension = safari_extension_dir()
+    manifest = extension / "manifest.json"
+    api_ok = False
+    api_error = None
+    try:
+        with urllib.request.urlopen(f"http://{host}:{port}/health", timeout=timeout) as response:
+            body = json.loads(response.read().decode("utf-8"))
+            api_ok = response.status == 200 and body.get("ok") is True
+            if not api_ok:
+                api_error = "unexpected health response"
+    except (OSError, urllib.error.URLError, json.JSONDecodeError, UnicodeError) as exc:
+        api_error = str(exc)
+    staged = extension.is_dir() and manifest.is_file()
+    return {
+        "ready": api_ok and staged,
+        "browser_api": {"ok": api_ok, "url": f"http://{host}:{port}/health", "error": api_error},
+        "extension": {"staged": staged, "path": str(extension), "manifest": str(manifest)},
+    }
 
 
 def main(argv: list[str] | None = None) -> int:
@@ -33,6 +63,10 @@ def main(argv: list[str] | None = None) -> int:
     if args.command == "serve":
         serve_forever(db=args.db, sock=args.socket, http_host=args.http_host, http_port=args.http_port)
         return 0
+    if args.command == "browser-status":
+        status = _browser_status(args.http_host, args.http_port, args.timeout)
+        print(json.dumps(status, sort_keys=True, indent=2))
+        return 0 if status["ready"] else 1
     if args.command == "pair":
         message={"protocol":1,"request_id":"pair-"+secrets.token_hex(8),"action":"create_pairing_code","args":{"ttl":args.ttl}}
         response=request(message,path=Path(args.socket))

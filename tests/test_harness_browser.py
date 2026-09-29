@@ -15,6 +15,7 @@ from llm_git_bridge.harness.sqlite_store import SQLiteHarnessStore
 ROOT=Path(__file__).resolve().parents[1]
 MANIFEST=ROOT/"safari"/"extension"/"manifest.json"
 BACKGROUND=ROOT/"safari"/"extension"/"background.js"
+POPUP=ROOT/"safari"/"extension"/"popup.js"
 
 class BrowserTests(unittest.TestCase):
     def setUp(self):
@@ -80,5 +81,11 @@ class BrowserTests(unittest.TestCase):
         self.assertIn("browser.storage.local.get",background)
         self.assertIn("browser.storage.local.remove",background)
         self.assertIn("pendingPrompt:",background)
+    def test_popup_reports_readiness_and_clears_stale_browser_token(self):
+        popup=POPUP.read_text()
+        self.assertIn('fetch(BASE + "/health")',popup)
+        self.assertIn('browser.storage.local.remove("token")',popup)
+        self.assertIn("Harness ready. Pair this browser.",popup)
+        self.assertIn("pending handoff",popup)
 
 if __name__=="__main__": unittest.main()

@@ -1,6 +1,34 @@
 const BASE = "http://127.0.0.1:47653";
 const status = document.getElementById("status");
 
+async function refreshStatus() {
+  try {
+    const health = await fetch(BASE + "/health");
+    const body = await health.json();
+    if (!health.ok || !body.ok) throw new Error("Harness health check failed.");
+  } catch (_) {
+    status.textContent = "Harness unavailable on this Mac.";
+    return;
+  }
+
+  const {token} = await browser.storage.local.get("token");
+  if (!token) {
+    status.textContent = "Harness ready. Pair this browser.";
+    return;
+  }
+
+  const response = await fetch(BASE + "/v1/pending", {headers:{Authorization:"Bearer "+token}});
+  if (response.status === 401 || response.status === 403) {
+    await browser.storage.local.remove("token");
+    status.textContent = "Harness ready. Pair this browser.";
+    return;
+  }
+  const body = await response.json();
+  if (!body.ok) throw new Error(body.error || "Harness unavailable");
+  const count = body.pending.length;
+  status.textContent = `Paired. ${count} pending handoff${count === 1 ? "" : "s"}.`;
+}
+
 async function clientId() {
   const stored = await browser.storage.local.get("clientId");
   if (stored.clientId) return stored.clientId;
@@ -21,7 +49,7 @@ async function pair() {
   const body = await response.json();
   if (!body.ok) throw new Error(body.error || "Pairing failed");
   await browser.storage.local.set({token: body.token});
-  status.textContent = "Paired.";
+  await refreshStatus();
 }
 
 async function openNext() {
@@ -38,3 +66,4 @@ async function openNext() {
 
 document.getElementById("pair").addEventListener("click", () => pair().catch(e => status.textContent=e.message));
 document.getElementById("open").addEventListener("click", () => openNext().catch(e => status.textContent=e.message));
+refreshStatus().catch(e => status.textContent=e.message);

@@ -8,6 +8,11 @@ APP_ID = "chatgpt-conversation-harness-v1"
 LAUNCH_AGENT_LABEL = "net.laurenzo.chatgpt-conversation-harness-v1"
 
 
+def install_dir() -> Path:
+    override = os.environ.get("HARNESS_INSTALL_DIR")
+    return Path(override).expanduser() if override else Path.home() / ".local" / "share" / APP_ID
+
+
 def state_dir() -> Path:
     override = os.environ.get("LLM_HARNESS_STATE_DIR")
     return Path(override).expanduser() if override else Path.home() / ".local" / "state" / APP_ID
@@ -19,3 +24,7 @@ def database_path() -> Path:
 
 def socket_path() -> Path:
     return state_dir() / "harness.sock"
+
+
+def safari_extension_dir() -> Path:
+    return install_dir() / "safari-extension"
