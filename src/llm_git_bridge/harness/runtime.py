@@ -28,3 +28,7 @@ def socket_path() -> Path:
 
 def safari_extension_dir() -> Path:
     return install_dir() / "safari-extension"
+
+
+def install_manifest_path() -> Path:
+    return install_dir() / "install-manifest.json"

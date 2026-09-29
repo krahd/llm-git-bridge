@@ -3,14 +3,30 @@
   "name": "Conversation Harness",
   "version": "0.1.0",
   "description": "Open a fresh ChatGPT conversation for a durable harness handoff.",
-  "permissions": ["storage", "tabs", "activeTab"],
+  "permissions": [
+    "storage",
+    "tabs"
+  ],
   "host_permissions": [
     "https://chatgpt.com/*",
     "http://127.0.0.1:47653/*"
   ],
-  "background": {"service_worker": "background.js"},
-  "action": {"default_popup": "popup.html", "default_title": "Conversation Harness"},
+  "background": {
+    "service_worker": "background.js"
+  },
+  "action": {
+    "default_popup": "popup.html",
+    "default_title": "Conversation Harness"
+  },
   "content_scripts": [
-    {"matches": ["https://chatgpt.com/*"], "js": ["content.js"], "run_at": "document_idle"}
+    {
+      "matches": [
+        "https://chatgpt.com/*"
+      ],
+      "js": [
+        "content.js"
+      ],
+      "run_at": "document_idle"
+    }
   ]
 }

@@ -49,6 +49,10 @@ chmod 700 "$INSTALL_DIR" "$PY_ROOT" "$BIN_DIR" "$STATE_DIR"
 printf '%s\n' '"""Private package root for the standalone conversation harness runtime."""' > "$PY_ROOT/llm_git_bridge/__init__.py"
 rm -rf "$PY_ROOT/llm_git_bridge/harness"
 cp -R "$REPO_ROOT/src/llm_git_bridge/harness" "$PY_ROOT/llm_git_bridge/harness"
+# Never ship bytecode copied from the development checkout. Compile a fresh cache
+# after staging the source into the isolated runtime.
+find "$PY_ROOT/llm_git_bridge/harness" -type d -name '__pycache__' -prune -exec rm -rf {} +
+find "$PY_ROOT/llm_git_bridge/harness" -type f \( -name '*.pyc' -o -name '*.pyo' \) -delete
 find "$PY_ROOT/llm_git_bridge/harness" -type d -exec chmod 700 {} +
 find "$PY_ROOT/llm_git_bridge/harness" -type f -exec chmod 600 {} +
 python3 -m compileall -q "$PY_ROOT/llm_git_bridge/harness"
@@ -70,14 +74,18 @@ EOF
 chmod 700 "$BIN_DIR/harness"
 
 SOURCE_COMMIT="$(git -C "$REPO_ROOT" rev-parse HEAD 2>/dev/null || printf unknown)"
-python3 - "$INSTALL_DIR/install-manifest.json" "$SOURCE_COMMIT" "$REPO_ROOT/src/llm_git_bridge/harness" <<'PY'
+python3 - "$INSTALL_DIR/install-manifest.json" "$SOURCE_COMMIT" "$REPO_ROOT/src/llm_git_bridge/harness" "$REPO_ROOT/safari/extension" <<'PY'
 import hashlib,json,sys
 from pathlib import Path
-manifest_path,source_commit,source_dir=sys.argv[1:]
+manifest_path,source_commit,source_dir,safari_dir=sys.argv[1:]
 files={}
 for path in sorted(Path(source_dir).glob('*.py')):
     files[path.name]=hashlib.sha256(path.read_bytes()).hexdigest()
-obj={'schema':1,'app_id':'chatgpt-conversation-harness-v1','source_commit':source_commit,'files':files}
+safari_files={}
+safari_root=Path(safari_dir)
+for path in sorted(p for p in safari_root.rglob('*') if p.is_file()):
+    safari_files[path.relative_to(safari_root).as_posix()]=hashlib.sha256(path.read_bytes()).hexdigest()
+obj={'schema':2,'app_id':'chatgpt-conversation-harness-v1','source_commit':source_commit,'files':files,'safari_files':safari_files}
 with open(manifest_path,'w',encoding='utf-8') as fh:
     json.dump(obj,fh,indent=2,sort_keys=True); fh.write('\n')
 PY
@@ -117,11 +125,42 @@ command -v launchctl >/dev/null 2>&1 || { echo "ERROR: launchctl is required for
 UID_NOW="$(id -u)"
 # Deliberately operate on this label only. Never unload or restart the shell bridge.
 launchctl bootout "gui/${UID_NOW}/${LABEL}" >/dev/null 2>&1 || true
-launchctl bootstrap "gui/${UID_NOW}" "$PLIST"
+
+# bootout may return before launchd has fully removed the service. Wait for the
+# exact harness label to disappear before bootstrapping the replacement.
+for _ in 1 2 3 4 5 6 7 8 9 10; do
+  if ! launchctl print "gui/${UID_NOW}/${LABEL}" >/dev/null 2>&1; then
+    break
+  fi
+  sleep 0.2
+done
+if launchctl print "gui/${UID_NOW}/${LABEL}" >/dev/null 2>&1; then
+  echo "ERROR: harness LaunchAgent did not stop cleanly" >&2
+  exit 1
+fi
+
+BOOTSTRAPPED=0
+for _ in 1 2 3; do
+  if launchctl bootstrap "gui/${UID_NOW}" "$PLIST" >/dev/null 2>&1; then
+    BOOTSTRAPPED=1
+    break
+  fi
+  # A bootstrap acknowledgement can fail after launchd has accepted the job.
+  # Reconcile the exact label before deciding whether another attempt is needed.
+  if launchctl print "gui/${UID_NOW}/${LABEL}" >/dev/null 2>&1; then
+    BOOTSTRAPPED=1
+    break
+  fi
+  sleep 0.3
+done
+if [ "$BOOTSTRAPPED" -ne 1 ]; then
+  echo "ERROR: harness LaunchAgent bootstrap failed" >&2
+  exit 1
+fi
 launchctl kickstart -k "gui/${UID_NOW}/${LABEL}"
 
-for _ in 1 2 3 4 5 6 7 8 9 10; do
-  if "$BIN_DIR/harness" call '{"protocol":1,"action":"ping","args":{}}' >/dev/null 2>&1; then
+for _ in 1 2 3 4 5 6 7 8 9 10 11 12 13 14 15; do
+  if "$BIN_DIR/harness" call '{"protocol":1,"action":"ping","args":{}}' >/dev/null 2>&1 \n     && "$BIN_DIR/harness" browser-status >/dev/null 2>&1; then
     echo "HARNESS_ACTIVE=1"
     echo "SOCKET=$STATE_DIR/harness.sock"
     echo "SAFARI_EXTENSION_DIR=$SAFARI_EXTENSION_DIR"
@@ -130,5 +169,5 @@ for _ in 1 2 3 4 5 6 7 8 9 10; do
   sleep 0.2
 done
 
-echo "ERROR: harness LaunchAgent started but ping did not succeed" >&2
+echo "ERROR: harness LaunchAgent started but acceptance checks did not succeed" >&2
 exit 1

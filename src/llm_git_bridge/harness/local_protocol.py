@@ -48,6 +48,43 @@ def _lease(args: dict[str, Any]) -> LeaseToken:
         raise ValidationError("invalid lease token") from exc
 
 
+_REQUIRED_ARGS: dict[str, tuple[str, ...]] = {
+    "create_job": ("job_id", "title", "goal"),
+    "get_job": ("job_id",),
+    "continuation": ("job_id",),
+    "events": ("job_id",),
+    "acquire_lease": ("job_id", "holder_id"),
+    "renew_lease": ("lease",),
+    "release_lease": ("lease",),
+    "update_job": ("lease", "expected_version", "changes"),
+    "create_handoff": ("lease",),
+    "claim_handoff": ("job_id", "nonce", "holder_id"),
+    "start_operation": ("lease", "idempotency_key", "kind"),
+    "finish_operation": ("lease", "operation_id", "status"),
+}
+
+
+def _validate_action_args(action: str, args: dict[str, Any]) -> None:
+    missing = [name for name in _REQUIRED_ARGS.get(action, ()) if name not in args]
+    if missing:
+        raise ValidationError(f"missing required args: {', '.join(missing)}")
+    if action == "create_job":
+        if not isinstance(args.get("title"), str) or not isinstance(args.get("goal"), str):
+            raise ValidationError("title and goal must be strings")
+        if "lifecycle" in args and not isinstance(args["lifecycle"], str):
+            raise ValidationError("lifecycle must be a string")
+    if action in {"renew_lease", "release_lease", "update_job", "create_handoff", "start_operation", "finish_operation"}:
+        _lease(args)
+    if action == "update_job":
+        value = args.get("expected_version")
+        if isinstance(value, bool) or not isinstance(value, int):
+            raise ValidationError("expected_version must be an integer")
+        if not isinstance(args.get("changes"), dict):
+            raise ValidationError("changes must be an object")
+        if "lifecycle" in args["changes"] and not isinstance(args["changes"]["lifecycle"], str):
+            raise ValidationError("lifecycle must be a string")
+
+
 class LocalProtocol:
     def __init__(self, service: HarnessService):
         self.service = service
@@ -102,6 +139,7 @@ class LocalProtocol:
             return self._error(request_id, "validation_error", "invalid action or args")
         mutating = action in MUTATING_ACTIONS
         try:
+            _validate_action_args(action, args)
             if mutating:
                 if not isinstance(request_id, str):
                     raise ValidationError("request_id is required for mutations")

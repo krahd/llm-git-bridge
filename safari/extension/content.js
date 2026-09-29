@@ -20,7 +20,32 @@ function fillComposer(prompt) {
   return true;
 }
 
+function waitAndFillComposer(prompt, timeoutMs = 15000) {
+  if (fillComposer(prompt)) return Promise.resolve(true);
+  return new Promise((resolve) => {
+    let finished = false;
+    let timer = null;
+    const finish = (filled) => {
+      if (finished) return;
+      finished = true;
+      observer.disconnect();
+      if (timer !== null) clearTimeout(timer);
+      resolve(filled);
+    };
+    const observer = new MutationObserver(() => {
+      if (fillComposer(prompt)) finish(true);
+    });
+    observer.observe(document.documentElement, {childList: true, subtree: true});
+    timer = setTimeout(() => finish(false), timeoutMs);
+    if (fillComposer(prompt)) finish(true);
+  });
+}
+
 browser.runtime.onMessage.addListener((message) => {
   if (message?.type !== "fillPrompt" || typeof message.prompt !== "string") return;
-  return Promise.resolve({filled: fillComposer(message.prompt)});
+  return waitAndFillComposer(message.prompt).then((filled) => ({filled}));
 });
+
+// Wake the MV3 background worker after this content script is actually ready.
+// The background retains the pending prompt until fillPrompt succeeds.
+browser.runtime.sendMessage({type: "contentReady"}).catch(() => {});

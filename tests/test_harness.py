@@ -109,6 +109,32 @@ class HarnessTests(unittest.TestCase):
         with self.assertRaises(Conflict):
             self.service.finish_operation(token, first.operation_id, status="failed")
 
+    def test_operation_idempotency_key_is_bound_to_operation_payload(self):
+        token = self.service.acquire_lease("paper-a", "conversation-a")
+        self.service.start_operation(
+            token,
+            idempotency_key="push-main-bound-001",
+            kind="git-push",
+            target="origin/main",
+            intended_effect="publish checkpoint",
+        )
+        with self.assertRaisesRegex(Conflict, "different operation payload"):
+            self.service.start_operation(
+                token,
+                idempotency_key="push-main-bound-001",
+                kind="delete",
+                target="other",
+                intended_effect="different effect",
+            )
+
+    def test_new_pairing_code_invalidates_older_unconsumed_code(self):
+        old = self.service.create_pairing_code(ttl=300)["code"]
+        new = self.service.create_pairing_code(ttl=300)["code"]
+        with self.assertRaises(Conflict):
+            self.service.consume_pairing_code(old, "browser-old")
+        paired = self.service.consume_pairing_code(new, "browser-new")
+        self.assertEqual(paired["client_id"], "browser-new")
+
     def test_database_reopen_preserves_job_and_fencing_generation(self):
         first = self.service.acquire_lease("paper-a", "conversation-a", ttl=5)
         self.store.close()

@@ -313,6 +313,12 @@ class HarnessService:
             ).fetchone()
             if existing is not None:
                 record = dict(existing)
+                if (
+                    record["kind"] != kind
+                    or record["target"] != target
+                    or record["intended_effect"] != intended_effect
+                ):
+                    raise Conflict("idempotency key reused with different operation payload")
                 return OperationStart(record["operation_id"], False, record["status"], record)
             self._require_no_unresolved_operations(conn, token.job_id)
             operation_id = secrets.token_hex(16)
@@ -360,7 +366,9 @@ class HarnessService:
         code = secrets.token_urlsafe(9)
         code_hash = hashlib.sha256(code.encode("utf-8")).hexdigest()
         with self.store.transaction() as conn:
-            conn.execute("DELETE FROM pairing_codes WHERE expires_at<=? OR used_at IS NOT NULL", (now,))
+            # Only the newest code may remain usable. Generating a replacement explicitly
+            # invalidates any older unconsumed code so there is never more than one pairing secret.
+            conn.execute("DELETE FROM pairing_codes")
             conn.execute(
                 "INSERT INTO pairing_codes(code_hash,created_at,expires_at) VALUES(?,?,?)",
                 (code_hash, now, now + ttl),

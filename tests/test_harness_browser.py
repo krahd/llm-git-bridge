@@ -16,6 +16,7 @@ ROOT=Path(__file__).resolve().parents[1]
 MANIFEST=ROOT/"safari"/"extension"/"manifest.json"
 BACKGROUND=ROOT/"safari"/"extension"/"background.js"
 POPUP=ROOT/"safari"/"extension"/"popup.js"
+CONTENT=ROOT/"safari"/"extension"/"content.js"
 
 class BrowserTests(unittest.TestCase):
     def setUp(self):
@@ -74,6 +75,7 @@ class BrowserTests(unittest.TestCase):
         self.assertNotIn("<all_urls>",json.dumps(manifest))
         self.assertEqual(set(manifest["host_permissions"]),{"https://chatgpt.com/*","http://127.0.0.1:47653/*"})
         self.assertNotIn("nativeMessaging",manifest["permissions"])
+        self.assertNotIn("activeTab",manifest["permissions"])
     def test_background_persists_pending_prompt_across_mv3_worker_restarts(self):
         background=BACKGROUND.read_text()
         self.assertNotIn("new Map",background)
@@ -81,6 +83,14 @@ class BrowserTests(unittest.TestCase):
         self.assertIn("browser.storage.local.get",background)
         self.assertIn("browser.storage.local.remove",background)
         self.assertIn("pendingPrompt:",background)
+    def test_content_script_waits_for_async_composer_and_wakes_background(self):
+        content=CONTENT.read_text()
+        background=BACKGROUND.read_text()
+        self.assertIn("MutationObserver",content)
+        self.assertIn("timeoutMs = 15000",content)
+        self.assertIn('type: "contentReady"',content)
+        self.assertIn('message?.type === "contentReady"',background)
+        self.assertIn("deliverPending(sender.tab.id)",background)
     def test_popup_reports_readiness_and_clears_stale_browser_token(self):
         popup=POPUP.read_text()
         self.assertIn('fetch(BASE + "/health")',popup)

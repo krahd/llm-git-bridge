@@ -19,7 +19,7 @@ ALLOWED_ORIGIN_PREFIXES = ("safari-web-extension://", "chrome-extension://", "mo
 
 class BrowserAPIServer(ThreadingHTTPServer):
     daemon_threads = True
-    allow_reuse_address = False
+    allow_reuse_address = True
 
     def __init__(self, address: tuple[str, int], db_path: str | Path):
         host, _ = address
