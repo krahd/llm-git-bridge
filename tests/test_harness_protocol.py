@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import json
 from pathlib import Path
+import socket
 import stat
 import tempfile
 import threading
@@ -109,6 +110,46 @@ class ProtocolTests(unittest.TestCase):
             thread.join(timeout=2)
         self.assertTrue(stop.is_set())
         self.assertFalse(path.exists())
+
+    def test_stale_unix_socket_is_reclaimed(self):
+        path = self.root / "stale" / "harness.sock"
+        path.parent.mkdir(parents=True)
+        stale = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
+        stale.bind(str(path))
+        stale.close()
+        self.assertTrue(path.exists())
+
+        server = HarnessUnixServer(path, self.protocol)
+        try:
+            self.assertTrue(path.exists())
+            self.assertEqual(stat.S_IMODE(path.stat().st_mode), 0o600)
+        finally:
+            server.server_close()
+        self.assertFalse(path.exists())
+
+    def test_live_unix_socket_is_preserved(self):
+        path = self.root / "live" / "harness.sock"
+        path.parent.mkdir(parents=True)
+        live = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
+        live.bind(str(path))
+        live.listen(1)
+        before = path.lstat()
+        try:
+            with self.assertRaisesRegex(RuntimeError, "socket already active"):
+                HarnessUnixServer(path, self.protocol)
+            after = path.lstat()
+            self.assertEqual((after.st_dev, after.st_ino), (before.st_dev, before.st_ino))
+        finally:
+            live.close()
+            path.unlink(missing_ok=True)
+
+    def test_non_socket_path_is_preserved_and_fails_closed(self):
+        path = self.root / "not-socket" / "harness.sock"
+        path.parent.mkdir(parents=True)
+        path.write_text("do not replace")
+        with self.assertRaisesRegex(RuntimeError, "is not a socket"):
+            HarnessUnixServer(path, self.protocol)
+        self.assertEqual(path.read_text(), "do not replace")
 
     def test_runtime_namespace_is_not_shell_bridge_namespace(self):
         self.assertEqual(APP_ID, "chatgpt-conversation-harness-v1")

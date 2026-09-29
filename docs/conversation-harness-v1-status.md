@@ -23,3 +23,8 @@ The generated Safari containing app cannot currently be compiled because the ins
 ## Remaining acceptance gate
 
 After Xcode is repaired: build/run the generated containing app, enable Conversation Harness in Safari, pair it with `llm-git-harness pair`, and run the manual new-chat/handoff pilot. Until then, browser automation is not claimed as production-accepted. The daemon/CLI continuity path is usable independently.
+
+
+## Stale-socket restart recovery
+
+A deployment restart exposed a stale Unix-socket failure: launchd correctly restarted the harness process, but the daemon refused the socket pathname left by the prior process. The daemon now reclaims only a socket that is provably stale (connect returns ECONNREFUSED), preserves a live socket, fails closed on non-socket paths or unverifiable errors, and removes only the exact socket inode it created. Regression tests cover stale recovery, live-socket preservation, non-socket preservation, and normal cleanup.

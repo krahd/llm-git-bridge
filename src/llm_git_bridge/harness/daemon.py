@@ -1,11 +1,13 @@
 """Local Unix-socket server for conversation harness v1."""
 from __future__ import annotations
 
+import errno
 import json
 import os
 from pathlib import Path
 import socket
 import socketserver
+import stat
 import threading
 from typing import Any
 
@@ -42,18 +44,56 @@ class HarnessUnixServer(socketserver.UnixStreamServer):
             os.chmod(self.socket_path.parent, 0o700)
         except OSError:
             pass
-        if self.socket_path.exists():
-            raise RuntimeError(f"socket already exists: {self.socket_path}")
+        self._prepare_socket_path()
         super().__init__(str(self.socket_path), _Handler)
         self.protocol = protocol
         os.chmod(self.socket_path, 0o600)
+        created = self.socket_path.lstat()
+        self._socket_identity = (created.st_dev, created.st_ino)
+
+    def _prepare_socket_path(self) -> None:
+        try:
+            existing = self.socket_path.lstat()
+        except FileNotFoundError:
+            return
+        if not stat.S_ISSOCK(existing.st_mode):
+            raise RuntimeError(f"socket path exists and is not a socket: {self.socket_path}")
+
+        probe = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
+        probe.settimeout(0.25)
+        try:
+            probe.connect(str(self.socket_path))
+        except OSError as exc:
+            if exc.errno == errno.ENOENT:
+                return
+            if exc.errno != errno.ECONNREFUSED:
+                raise RuntimeError(f"cannot verify existing socket path: {self.socket_path}") from exc
+            try:
+                current = self.socket_path.lstat()
+            except FileNotFoundError:
+                return
+            if (
+                not stat.S_ISSOCK(current.st_mode)
+                or (current.st_dev, current.st_ino) != (existing.st_dev, existing.st_ino)
+            ):
+                raise RuntimeError(f"socket path changed during stale-socket check: {self.socket_path}")
+            self.socket_path.unlink()
+        else:
+            raise RuntimeError(f"socket already active: {self.socket_path}")
+        finally:
+            probe.close()
 
     def server_close(self) -> None:
         super().server_close()
+        identity = getattr(self, "_socket_identity", None)
+        if identity is None:
+            return
         try:
-            self.socket_path.unlink()
+            current = self.socket_path.lstat()
         except FileNotFoundError:
-            pass
+            return
+        if stat.S_ISSOCK(current.st_mode) and (current.st_dev, current.st_ino) == identity:
+            self.socket_path.unlink()
 
 
 def request(message: dict[str, Any], *, path: str | Path | None = None, timeout: float = 5.0) -> dict[str, Any]:
