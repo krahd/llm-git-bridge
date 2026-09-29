@@ -30,3 +30,6 @@ Generated Xcode output goes to `safari/build/` by default and is intentionally i
 
 For rapid development, Safari can also load the raw extension folder temporarily through its Developer settings. The durable source of the extension remains `safari/extension/`; generated Xcode projects are build artefacts.
 
+## Temporary installation without Xcode
+
+For the macOS v1 pilot, Safari can load the WebExtension resources directly from disk. A normal harness install stages them at `~/.local/share/chatgpt-conversation-harness-v1/safari-extension/`. In Safari Settings, enable developer features, open the Developer pane, allow unsigned extensions if required, choose **Add Temporary Extension…**, and select that directory. This avoids the local Xcode/CoreDevice toolchain entirely. Temporary extensions are removed after 24 hours or when Safari quits; use the containing-app packaging path below for durable installation or distribution.

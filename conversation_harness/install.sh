@@ -42,6 +42,7 @@ REPO_ROOT="$(cd "$SCRIPT_DIR/.." && pwd)"
 PYTHON_BIN="$(command -v python3)"
 PY_ROOT="$INSTALL_DIR/python"
 BIN_DIR="$INSTALL_DIR/bin"
+SAFARI_EXTENSION_DIR="$INSTALL_DIR/safari-extension"
 
 mkdir -p "$PY_ROOT/llm_git_bridge" "$BIN_DIR" "$STATE_DIR" "$(dirname "$PLIST")"
 chmod 700 "$INSTALL_DIR" "$PY_ROOT" "$BIN_DIR" "$STATE_DIR"
@@ -51,6 +52,14 @@ cp -R "$REPO_ROOT/src/llm_git_bridge/harness" "$PY_ROOT/llm_git_bridge/harness"
 find "$PY_ROOT/llm_git_bridge/harness" -type d -exec chmod 700 {} +
 find "$PY_ROOT/llm_git_bridge/harness" -type f -exec chmod 600 {} +
 python3 -m compileall -q "$PY_ROOT/llm_git_bridge/harness"
+
+# Stage the standard WebExtension separately from the Python runtime. Safari 18.4+
+# can load this directory temporarily for development without an Xcode project.
+rm -rf "$SAFARI_EXTENSION_DIR"
+cp -R "$REPO_ROOT/safari/extension" "$SAFARI_EXTENSION_DIR"
+find "$SAFARI_EXTENSION_DIR" -type d -exec chmod 700 {} +
+find "$SAFARI_EXTENSION_DIR" -type f -exec chmod 600 {} +
+[ -f "$SAFARI_EXTENSION_DIR/manifest.json" ] || { echo "ERROR: staged Safari extension has no manifest.json" >&2; exit 1; }
 
 cat > "$BIN_DIR/harness" <<EOF
 #!/bin/sh
@@ -100,6 +109,7 @@ if [ "$ACTIVATE" -eq 0 ]; then
   echo "STATE_DIR=$STATE_DIR"
   echo "PLIST=$PLIST"
   echo "LABEL=$LABEL"
+  echo "SAFARI_EXTENSION_DIR=$SAFARI_EXTENSION_DIR"
   exit 0
 fi
 
@@ -114,6 +124,7 @@ for _ in 1 2 3 4 5 6 7 8 9 10; do
   if "$BIN_DIR/harness" call '{"protocol":1,"action":"ping","args":{}}' >/dev/null 2>&1; then
     echo "HARNESS_ACTIVE=1"
     echo "SOCKET=$STATE_DIR/harness.sock"
+    echo "SAFARI_EXTENSION_DIR=$SAFARI_EXTENSION_DIR"
     exit 0
   fi
   sleep 0.2

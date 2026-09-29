@@ -1,6 +1,6 @@
 # Conversation Harness v1 — implementation status
 
-Status: CORE/RUNTIME COMPLETE — Safari app build blocked by local Xcode/CoreDevice mismatch
+Status: CORE/RUNTIME COMPLETE — temporary Safari browser pilot ready
 Date: 2026-09-28
 
 ## Verified complete
@@ -16,13 +16,13 @@ Date: 2026-09-28
 
 The original architecture plan selected Safari native messaging. The implementation spike superseded that choice: Safari v1 uses an authenticated loopback API bound to `127.0.0.1:47653`, plus the user-only Unix socket for CLI/service traffic. The extension requests only `chatgpt.com` and the exact loopback origin, stores only a bearer token obtained from a short-lived one-time pairing code, and does not auto-submit prompts. `safari/README.md` is authoritative for this implemented browser boundary. Native-messaging sections in the historical architecture plan are therefore superseded.
 
-## External blocker
+## Browser pilot path
 
-The generated Safari containing app cannot currently be compiled because the installed Xcode fails while loading `DVTCoreDeviceCore`: its framework expects a `CoreDevice` symbol not present in the installed private framework. This is a local Xcode/CoreDevice installation mismatch, not a harness source failure. The packaging script itself completed before `xcodebuild` failed. Repairing/reinstalling Xcode or the corresponding macOS developer components is intentionally outside this task while the Mac is in active use.
+The local Xcode/CoreDevice installation still cannot build the generated Safari containing app, but this no longer blocks v1 browser acceptance. Safari 18.4 and later can temporarily install a WebExtension directly from a folder for development. The harness installer therefore stages the canonical extension at `~/.local/share/chatgpt-conversation-harness-v1/safari-extension/`; Xcode is required only for durable containing-app packaging/distribution.
 
 ## Remaining acceptance gate
 
-After Xcode is repaired: build/run the generated containing app, enable Conversation Harness in Safari, pair it with `llm-git-harness pair`, and run the manual new-chat/handoff pilot. Until then, browser automation is not claimed as production-accepted. The daemon/CLI continuity path is usable independently.
+Load the staged directory with Safari's **Add Temporary Extension…** developer control, pair it with `llm-git-harness pair`, and run the manual new-chat/handoff pilot. Browser automation is production-accepted only after that real Safari/ChatGPT pilot passes. The daemon/CLI continuity path remains independently usable.
 
 
 ## Stale-socket restart recovery

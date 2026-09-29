@@ -30,6 +30,18 @@ class HarnessInstallerTests(unittest.TestCase):
         self.assertIn("coexist indefinitely", text)
         self.assertIn("does not unload or restart any Shell Bridge label", text)
 
+    def test_installer_stages_temporary_safari_extension(self):
+        text = INSTALLER.read_text()
+        self.assertIn('SAFARI_EXTENSION_DIR="$INSTALL_DIR/safari-extension"', text)
+        self.assertIn('cp -R "$REPO_ROOT/safari/extension" "$SAFARI_EXTENSION_DIR"', text)
+        self.assertIn('SAFARI_EXTENSION_DIR=$SAFARI_EXTENSION_DIR', text)
+
+    def test_readme_documents_xcode_free_temporary_pilot(self):
+        text = README.read_text()
+        self.assertIn("Temporary Safari pilot (no Xcode required)", text)
+        self.assertIn("Add Temporary Extension", text)
+        self.assertIn("safari-extension/", text)
+
 
 if __name__ == "__main__":
     unittest.main()
