@@ -28,3 +28,8 @@ After Xcode is repaired: build/run the generated containing app, enable Conversa
 ## Stale-socket restart recovery
 
 A deployment restart exposed a stale Unix-socket failure: launchd correctly restarted the harness process, but the daemon refused the socket pathname left by the prior process. The daemon now reclaims only a socket that is provably stale (connect returns ECONNREFUSED), preserves a live socket, fails closed on non-socket paths or unverifiable errors, and removes only the exact socket inode it created. Regression tests cover stale recovery, live-socket preservation, non-socket preservation, and normal cleanup.
+
+
+## Recovery and terminal-state invariants
+
+The runtime now enforces the audited recovery gate: a job with a `started` or `indeterminate` external operation may be handed off and claimed, but no new semantic mutation or new external operation may begin until that operation is reconciled. `indeterminate` operations can be resolved explicitly to `completed` or `failed`. Terminal job lifecycles (`completed`, `failed`, `cancelled`) are immutable and cannot be re-leased; lifecycle transitions are checked against the documented state machine. Regression tests cover handoff with in-flight work, indeterminate reconciliation, terminal immutability, and illegal transitions.
