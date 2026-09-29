@@ -1,32 +1,31 @@
 # Conversation Harness v1 — implementation status
 
-Status: ACTIVE — isolated parallel implementation
+Status: COMPLETE — integrated and remotely verified
 Date: 2026-09-28
-Workspace job: `conversation-harness-v1-20260928`
-Resource: `harness/v1`
-Base: `2437e518f8b8556f0baff72fbadd4b57afb23165`
 
 ## Safety boundary
 
-The existing ChatGPT Shell Bridge v5 is live and in use. Harness v1 must coexist with it and must not restart, replace, reconfigure, deploy over, or mutate its installed runtime. All development occurs in this isolated workspace. Runtime state, sockets, launch labels, locks, browser/native identifiers and job namespace are separate.
+The existing ChatGPT Shell Bridge v5 remains live, separate, and supported. Harness v1 coexists with it; no migration of existing conversations is required. The harness uses a distinct runtime namespace, state directory, socket, launch label, browser/native identifiers, and job namespace.
 
-## Current phase
+## Verified implementation
 
-Implement the transport-independent job/lease/handoff state machine and SQLite persistence, then local Unix-socket/CLI protocol. Safari integration follows only after the core passes focused tests.
+- durable SQLite job state with independent lifecycle/version/lease state;
+- fenced leases with expiry and safe reclaim;
+- atomic handoff/claim semantics and continuation projections;
+- idempotent external-operation records;
+- at-most-once local request journalling with indeterminate replay handling;
+- Unix-domain-socket daemon and CLI protocol;
+- browser pairing/pending-prompt API with narrow origin/token checks;
+- Safari/WebExtension packaging and persistence tests;
+- separate, stage-only installer/activation path for the harness runtime;
+- coexistence with the existing Shell Bridge v5 as a permanent supported topology.
 
-## In-flight operation
+## Acceptance evidence
 
-none
+Canonical integration commit before this status-only closure: `a1713cc7c8feac959aacd6b2e40b978ad3e79337`. At acceptance, local `HEAD`, `origin/main`, and `git ls-remote origin refs/heads/main` all matched that commit. Harness-focused tests passed; the full repository test suite passed; `compileall` and `git diff --check` passed.
 
-## Exact next action
+The live Shell Bridge was not replaced, restarted, reconfigured, or migrated as part of Harness v1 implementation. Existing conversations may continue using it indefinitely; Harness v1 is opt-in.
 
-Create `src/llm_git_bridge/harness/` core modules and focused tests. Success: state transitions, lease fencing, idempotent handoffs, expiry/reclaim, and SQLite crash/reopen semantics pass without touching the live bridge runtime.
+## Required next action
 
-## Implementation checkpoint — 2026-09-28
-
-- Harness v1 implementation completed in isolated workspace.
-- Full repository suite passed.
-- Isolated daemon/socket/pairing smoke passed.
-- Runtime namespace, installer label/state, and browser packaging remain separate from live Shell Bridge v5.
-- No live v5 restart, replacement, activation, or migration performed.
-- Next gate: workspace integration and independent GitHub remote verification.
+None for v1 implementation. Real-world opt-in trials may now be run against the separately staged harness. Stage 2 / Cloudflare remains optional future work and must not change the v1 authority or replay semantics without a new adversarial review.
