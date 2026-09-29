@@ -48,3 +48,8 @@ Smoke test:
 ~/.local/share/chatgpt-conversation-harness-v1/bin/harness call \
   '{"protocol":1,"action":"ping","args":{}}'
 ```
+
+### Browser re-entry fencing
+
+Opening a pending handoff is not a read-only list operation. The extension first obtains a short-lived central `starting` reservation. Other paired browsers cannot open that handoff while the reservation is live, and repeated clicks in the same browser do not create another ChatGPT tab. Failed tab creation is explicitly released; otherwise the reservation recycles automatically on expiry.
+

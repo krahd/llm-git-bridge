@@ -7,7 +7,7 @@ import sqlite3
 from typing import Any, Iterator
 from contextlib import contextmanager
 
-SCHEMA_VERSION = 1
+SCHEMA_VERSION = 2
 
 
 class SQLiteHarnessStore:
@@ -87,10 +87,11 @@ class SQLiteHarnessStore:
                 created_at REAL NOT NULL,
                 expires_at REAL NOT NULL,
                 claimed_at REAL,
-                claimed_by TEXT
+                claimed_by TEXT,
+                starting_by TEXT,
+                starting_at REAL,
+                starting_expires_at REAL
             );
-            CREATE UNIQUE INDEX IF NOT EXISTS one_pending_handoff_per_job
-                ON handoffs(job_id) WHERE state='pending';
             CREATE TABLE IF NOT EXISTS operations(
                 operation_id TEXT PRIMARY KEY,
                 job_id TEXT NOT NULL REFERENCES jobs(job_id) ON DELETE CASCADE,
@@ -138,11 +139,36 @@ class SQLiteHarnessStore:
         )
         row = self.conn.execute("SELECT value FROM harness_meta WHERE key='schema_version'").fetchone()
         if row is None:
+            version = SCHEMA_VERSION
             self.conn.execute(
-                "INSERT INTO harness_meta(key,value) VALUES('schema_version',?)", (str(SCHEMA_VERSION),)
+                "INSERT INTO harness_meta(key,value) VALUES('schema_version',?)", (str(version),)
             )
-        elif int(row["value"]) != SCHEMA_VERSION:
+        else:
+            version = int(row["value"])
+        if version == 1:
+            columns = {r[1] for r in self.conn.execute("PRAGMA table_info(handoffs)").fetchall()}
+            for name, kind in (
+                ("starting_by", "TEXT"),
+                ("starting_at", "REAL"),
+                ("starting_expires_at", "REAL"),
+            ):
+                if name not in columns:
+                    self.conn.execute(f"ALTER TABLE handoffs ADD COLUMN {name} {kind}")
+            version = 2
+            self.conn.execute(
+                "UPDATE harness_meta SET value=? WHERE key='schema_version'", (str(version),)
+            )
+        if version != SCHEMA_VERSION:
             raise RuntimeError("unsupported harness schema version")
+        self.conn.execute("DROP INDEX IF EXISTS one_pending_handoff_per_job")
+        self.conn.execute(
+            "CREATE UNIQUE INDEX IF NOT EXISTS one_open_handoff_per_job "
+            "ON handoffs(job_id) WHERE state IN ('pending','starting')"
+        )
+        self.conn.execute(
+            "CREATE UNIQUE INDEX IF NOT EXISTS one_starting_handoff_per_client "
+            "ON handoffs(starting_by) WHERE state='starting' AND starting_by IS NOT NULL"
+        )
 
     @staticmethod
     def row_dict(row: sqlite3.Row | None) -> dict[str, Any] | None:

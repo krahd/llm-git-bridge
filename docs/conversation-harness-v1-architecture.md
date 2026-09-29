@@ -1140,3 +1140,8 @@ Rollout is therefore opt-in, not migration-driven: build and test harness v1 in 
 ## Browser transport correction — adversarial audit 3
 
 Implementation testing invalidated one Stage 1 assumption in the earlier plan: a Safari native app extension is sandboxed, so treating it as if it could simply open the harness Unix socket under `~/.local/state` is not a sound default. Apple documents app groups for sharing data between a containing app and native extension. Harness v1 therefore keeps the Unix socket as the private CLI/control path and adds a separately authenticated HTTP endpoint bound only to `127.0.0.1:47653` for the WebExtension. Pairing is one-time and short-lived; browser bearer tokens are random and only their hashes are persisted. The extension requests only the exact loopback origin and `https://chatgpt.com/*`. It opens and fills a new conversation but deliberately does not press Send.
+
+## Browser STARTING reservation
+
+Browser re-entry is centrally fenced. A paired browser must atomically reserve the next pending handoff before it receives the resume prompt and nonce. The reservation changes the handoff from `pending` to `starting`, records the browser client and a short expiry, and hides it from other browsers. Repeating the request from the same browser returns the existing reservation without opening another conversation. If opening the ChatGPT tab fails the extension releases the reservation; if that release is lost, the short starting lease expires and the handoff returns to `pending`. The overall handoff expiry always wins. A conversation may claim either `pending` or `starting`; claiming clears the browser reservation and nonce secret while creating the next fenced work lease.
+

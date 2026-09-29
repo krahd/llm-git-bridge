@@ -30,3 +30,7 @@ Generated Xcode output goes to `safari/build/` by default and is intentionally i
 
 For rapid development, Safari can also load the raw extension folder temporarily through its Developer settings. The durable source of the extension remains `safari/extension/`; generated Xcode projects are build artefacts.
 
+### Duplicate-opening protection
+
+The popup uses the harness `POST /v1/open-next` reservation endpoint rather than opening directly from the diagnostic pending list. Only a newly created `starting` reservation opens a tab. A repeated request from the same browser reports the existing start, while other browsers see no reservable handoff. If tab creation fails, `POST /v1/release-start` returns the handoff to `pending`.
+

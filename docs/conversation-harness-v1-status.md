@@ -30,3 +30,8 @@ Create `src/llm_git_bridge/harness/` core modules and focused tests. Success: st
 - Runtime namespace, installer label/state, and browser packaging remain separate from live Shell Bridge v5.
 - No live v5 restart, replacement, activation, or migration performed.
 - Next gate: workspace integration and independent GitHub remote verification.
+
+## Post-integration browser-start hardening
+
+The first integrated v1 exposed a race between browser opening and conversation claim: a handoff remained `pending` until ChatGPT claimed it, so repeated clicks or two paired browsers could open duplicate conversations. The follow-up hardening introduces a durable `starting` state, a short browser reservation, explicit release on failed opening, expiry-based recycling, and a schema-v1-to-v2 migration. Validation for this follow-up is recorded by the workspace checkpoint and integration gate.
+

@@ -102,7 +102,10 @@ class BrowserAPIHandler(BaseHTTPRequestHandler):
         store,service=self._service()
         try:
             client_id=service.authenticate_browser(token)
-            self._send(200,{"ok":True,"client_id":client_id,"pending":service.pending_reentries()})
+            pending = []
+            for item in service.pending_reentries():
+                pending.append({k: v for k, v in item.items() if k != "prompt"})
+            self._send(200,{"ok":True,"client_id":client_id,"pending":pending})
         except HarnessError as exc:
             self._send(401,{"ok":False,"error":str(exc)})
         finally:
@@ -110,7 +113,7 @@ class BrowserAPIHandler(BaseHTTPRequestHandler):
 
     def do_POST(self) -> None:
         parsed=urlparse(self.path)
-        if parsed.path != "/pair":
+        if parsed.path not in {"/pair", "/v1/open-next", "/v1/release-start"}:
             self._send(404,{"ok":False,"error":"not found"}); return
         if self._origin() is None:
             self._send(403,{"ok":False,"error":"extension origin required"}); return
@@ -120,9 +123,27 @@ class BrowserAPIHandler(BaseHTTPRequestHandler):
             self._send(400,{"ok":False,"error":str(exc)}); return
         store,service=self._service()
         try:
-            result=service.consume_pairing_code(body.get("code"),body.get("client_id"))
-            self._send(200,{"ok":True,**result})
-        except HarnessError as exc:
-            self._send(403,{"ok":False,"error":str(exc)})
+            if parsed.path == "/pair":
+                try:
+                    result=service.consume_pairing_code(body.get("code"),body.get("client_id"))
+                except HarnessError as exc:
+                    self._send(403,{"ok":False,"error":str(exc)}); return
+                self._send(200,{"ok":True,**result}); return
+            token=self._bearer()
+            if not token:
+                self._send(401,{"ok":False,"error":"bearer token required"}); return
+            try:
+                client_id=service.authenticate_browser(token)
+            except HarnessError as exc:
+                self._send(401,{"ok":False,"error":str(exc)}); return
+            try:
+                if parsed.path == "/v1/open-next":
+                    item=service.reserve_reentry(client_id,ttl=body.get("ttl",300.0))
+                    self._send(200,{"ok":True,"client_id":client_id,"item":item}); return
+                result=service.release_reentry(client_id,body.get("handoff_id"))
+                self._send(200,{"ok":True,"client_id":client_id,**result})
+            except HarnessError as exc:
+                self._send(409,{"ok":False,"error":str(exc)})
         finally:
             store.close()
+
