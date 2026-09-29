@@ -44,6 +44,40 @@ class ProtocolTests(unittest.TestCase):
         self.assertFalse(conflict["ok"])
         self.assertEqual(conflict["error"]["type"], "conflict")
 
+    def test_malformed_mutation_is_rejected_before_request_journal(self):
+        response = self.protocol.dispatch({
+            "protocol": 1,
+            "request_id": "bad-create-001",
+            "action": "create_job",
+            "args": {"job_id": "paper-a"},
+        })
+        self.assertFalse(response["ok"])
+        self.assertEqual(response["error"]["type"], "validation_error")
+        row = self.store.conn.execute(
+            "SELECT status FROM protocol_requests WHERE request_id=?", ("bad-create-001",)
+        ).fetchone()
+        self.assertIsNone(row)
+
+    def test_bad_update_version_is_rejected_before_request_journal(self):
+        self.protocol.service.create_job("paper-a", title="A", goal="A")
+        lease = self.protocol.service.acquire_lease("paper-a", "conversation-a")
+        response = self.protocol.dispatch({
+            "protocol": 1,
+            "request_id": "bad-update-001",
+            "action": "update_job",
+            "args": {
+                "lease": lease.__dict__,
+                "expected_version": "not-an-int",
+                "changes": {"next_action": "x"},
+            },
+        })
+        self.assertFalse(response["ok"])
+        self.assertEqual(response["error"]["type"], "validation_error")
+        row = self.store.conn.execute(
+            "SELECT status FROM protocol_requests WHERE request_id=?", ("bad-update-001",)
+        ).fetchone()
+        self.assertIsNone(row)
+
     def test_started_request_replay_is_indeterminate_not_reexecuted(self):
         args = {"job_id": "paper-a", "title": "Paper A", "goal": "Finish it"}
         fp = __import__("hashlib").sha256(
