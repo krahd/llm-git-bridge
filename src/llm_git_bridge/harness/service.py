@@ -12,6 +12,14 @@ from .model import HandoffToken, LeaseToken, OperationStart, validate_lifecycle,
 from .sqlite_store import SQLiteHarnessStore
 
 
+TERMINAL_LIFECYCLES = frozenset({"completed", "failed", "cancelled"})
+LIFECYCLE_TRANSITIONS = {
+    "active": frozenset({"waiting", "blocked", "completed", "failed", "cancelled"}),
+    "waiting": frozenset({"active", "blocked", "completed", "failed", "cancelled"}),
+    "blocked": frozenset({"active", "failed", "cancelled"}),
+}
+
+
 class HarnessService:
     def __init__(self, store: SQLiteHarnessStore, *, clock: Callable[[], float] = time.time):
         self.store = store
@@ -31,6 +39,27 @@ class HarnessService:
         if row is None:
             raise NotFound("job not found")
         return dict(row)
+
+    @staticmethod
+    def _require_nonterminal(job: dict[str, Any]) -> None:
+        if job["lifecycle"] in TERMINAL_LIFECYCLES:
+            raise Conflict("job lifecycle is terminal")
+
+    @staticmethod
+    def _validate_lifecycle_transition(current: str, target: str) -> None:
+        if current == target:
+            return
+        if current in TERMINAL_LIFECYCLES or target not in LIFECYCLE_TRANSITIONS.get(current, frozenset()):
+            raise Conflict(f"illegal lifecycle transition: {current} -> {target}")
+
+    @staticmethod
+    def _require_no_unresolved_operations(conn, job_id: str) -> None:
+        row = conn.execute(
+            "SELECT operation_id,status FROM operations WHERE job_id=? AND status IN ('started','indeterminate') ORDER BY created_at LIMIT 1",
+            (job_id,),
+        ).fetchone()
+        if row is not None:
+            raise Conflict(f"job has unresolved operation: {row['operation_id']} ({row['status']})")
 
     def _expire(self, conn, job_id: str, now: float) -> None:
         lease = conn.execute("SELECT * FROM leases WHERE job_id=?", (job_id,)).fetchone()
@@ -105,6 +134,7 @@ class HarnessService:
         with self.store.transaction() as conn:
             job = self._job(conn, job_id)
             self._expire(conn, job_id, now)
+            self._require_nonterminal(job)
             pending = conn.execute(
                 "SELECT handoff_id FROM handoffs WHERE job_id=? AND state='pending'", (job_id,)
             ).fetchone()
@@ -181,8 +211,12 @@ class HarnessService:
         with self.store.transaction() as conn:
             self._require_lease(conn, token.job_id, token.lease_id, token.generation, now)
             job = self._job(conn, token.job_id)
+            self._require_nonterminal(job)
+            self._require_no_unresolved_operations(conn, token.job_id)
             if int(job["version"]) != int(expected_version):
                 raise Conflict("job version changed")
+            if "lifecycle" in changes:
+                self._validate_lifecycle_transition(job["lifecycle"], changes["lifecycle"])
             fields = list(changes)
             values = [changes[k] for k in fields]
             sql = ",".join(f"{k}=?" for k in fields)
@@ -198,6 +232,8 @@ class HarnessService:
         now = self._now()
         with self.store.transaction() as conn:
             self._require_lease(conn, token.job_id, token.lease_id, token.generation, now)
+            job = self._job(conn, token.job_id)
+            self._require_nonterminal(job)
             pending = conn.execute(
                 "SELECT handoff_id FROM handoffs WHERE job_id=? AND state='pending'", (token.job_id,)
             ).fetchone()
@@ -227,6 +263,7 @@ class HarnessService:
         with self.store.transaction() as conn:
             job = self._job(conn, job_id)
             self._expire(conn, job_id, now)
+            self._require_nonterminal(job)
             handoff = conn.execute(
                 "SELECT * FROM handoffs WHERE job_id=? AND nonce_hash=?", (job_id, nonce_hash)
             ).fetchone()
@@ -268,6 +305,8 @@ class HarnessService:
         now = self._now()
         with self.store.transaction() as conn:
             self._require_lease(conn, token.job_id, token.lease_id, token.generation, now)
+            job = self._job(conn, token.job_id)
+            self._require_nonterminal(job)
             existing = conn.execute(
                 "SELECT * FROM operations WHERE job_id=? AND idempotency_key=?",
                 (token.job_id, idempotency_key),
@@ -275,6 +314,7 @@ class HarnessService:
             if existing is not None:
                 record = dict(existing)
                 return OperationStart(record["operation_id"], False, record["status"], record)
+            self._require_no_unresolved_operations(conn, token.job_id)
             operation_id = secrets.token_hex(16)
             conn.execute(
                 "INSERT INTO operations(operation_id,job_id,idempotency_key,kind,status,target,intended_effect,created_at) VALUES(?,?,?,?,?,?,?,?)",
@@ -295,16 +335,22 @@ class HarnessService:
             ).fetchone()
             if row is None:
                 raise NotFound("operation not found")
-            if row["status"] != "started":
-                if row["status"] == status:
+            previous = row["status"]
+            if previous in {"completed", "failed"}:
+                if previous == status:
                     return dict(row)
                 raise Conflict("operation already terminal")
+            if previous == "indeterminate" and status == "indeterminate":
+                return dict(row)
+            if previous == "indeterminate" and status not in {"completed", "failed"}:
+                raise Conflict("indeterminate operation must resolve to completed or failed")
             result_json = None if result is None else self.store.json_dump(result)
             conn.execute(
-                "UPDATE operations SET status=?,result_json=?,finished_at=? WHERE operation_id=? AND status='started'",
-                (status, result_json, now, operation_id),
+                "UPDATE operations SET status=?,result_json=?,finished_at=? WHERE operation_id=? AND status=?",
+                (status, result_json, now, operation_id, previous),
             )
-            self._event(conn, token.job_id, "operation_finished", {"operation_id": operation_id, "status": status}, now)
+            event_type = "operation_reconciled" if previous == "indeterminate" else "operation_finished"
+            self._event(conn, token.job_id, event_type, {"operation_id": operation_id, "from_status": previous, "status": status}, now)
             return dict(conn.execute("SELECT * FROM operations WHERE operation_id=?", (operation_id,)).fetchone())
 
 
