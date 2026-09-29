@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import argparse
+import hashlib
 import json
 import sys
 import secrets
@@ -10,7 +11,7 @@ import urllib.error
 import urllib.request
 
 from .daemon import request, serve_forever
-from .runtime import safari_extension_dir, socket_path
+from .runtime import install_manifest_path, safari_extension_dir, socket_path
 
 DEFAULT_BROWSER_HOST = "127.0.0.1"
 DEFAULT_BROWSER_PORT = 47653
@@ -51,10 +52,33 @@ def _browser_status(host: str, port: int, timeout: float) -> dict[str, object]:
     except (OSError, urllib.error.URLError, json.JSONDecodeError, UnicodeError) as exc:
         api_error = str(exc)
     staged = extension.is_dir() and manifest.is_file()
+    integrity_ok = False
+    integrity_error = None
+    if staged:
+        try:
+            install_manifest = json.loads(install_manifest_path().read_text(encoding="utf-8"))
+            expected = install_manifest.get("safari_files")
+            if not isinstance(expected, dict) or not expected:
+                raise ValueError("install manifest has no Safari extension hashes")
+            actual: dict[str, str] = {}
+            for path in sorted(p for p in extension.rglob("*") if p.is_file()):
+                relative = path.relative_to(extension).as_posix()
+                actual[relative] = hashlib.sha256(path.read_bytes()).hexdigest()
+            integrity_ok = actual == expected
+            if not integrity_ok:
+                integrity_error = "staged Safari extension differs from install manifest"
+        except (OSError, ValueError, TypeError, json.JSONDecodeError) as exc:
+            integrity_error = str(exc)
     return {
-        "ready": api_ok and staged,
+        "ready": api_ok and staged and integrity_ok,
         "browser_api": {"ok": api_ok, "url": f"http://{host}:{port}/health", "error": api_error},
-        "extension": {"staged": staged, "path": str(extension), "manifest": str(manifest)},
+        "extension": {
+            "staged": staged,
+            "integrity_ok": integrity_ok,
+            "integrity_error": integrity_error,
+            "path": str(extension),
+            "manifest": str(manifest),
+        },
     }
 
 

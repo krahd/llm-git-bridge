@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import hashlib
 import json
 import os
 import subprocess
@@ -32,6 +33,11 @@ class HarnessCLITests(unittest.TestCase):
             extension = root / "safari-extension"
             extension.mkdir()
             (extension / "manifest.json").write_text("{}\n")
+            digest = hashlib.sha256((extension / "manifest.json").read_bytes()).hexdigest()
+            (root / "install-manifest.json").write_text(json.dumps({
+                "schema": 2,
+                "safari_files": {"manifest.json": digest},
+            }) + "\n")
             server = BrowserAPIServer(("127.0.0.1", 0), root / "h.sqlite3")
             thread = threading.Thread(target=server.serve_forever, daemon=True)
             thread.start()
@@ -54,6 +60,36 @@ class HarnessCLITests(unittest.TestCase):
                 server.shutdown()
                 server.server_close()
                 thread.join(timeout=2)
+
+    def test_browser_status_fails_closed_on_staged_extension_drift(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            extension = root / "safari-extension"
+            extension.mkdir()
+            (extension / "manifest.json").write_text("{}\n")
+            digest = hashlib.sha256((extension / "manifest.json").read_bytes()).hexdigest()
+            (root / "install-manifest.json").write_text(json.dumps({
+                "schema": 2,
+                "safari_files": {"manifest.json": digest},
+            }) + "\n")
+            (extension / "manifest.json").write_text('{"changed": true}\n')
+            server = BrowserAPIServer(("127.0.0.1", 0), root / "h.sqlite3")
+            thread = threading.Thread(target=server.serve_forever, daemon=True)
+            thread.start()
+            try:
+                env = os.environ.copy()
+                env["HARNESS_INSTALL_DIR"] = str(root)
+                proc = subprocess.run(
+                    [sys.executable, "-m", "llm_git_bridge.harness.cli", "browser-status",
+                     "--http-port", str(server.server_address[1])],
+                    text=True, stdout=subprocess.PIPE, stderr=subprocess.PIPE, timeout=10, env=env,
+                )
+                self.assertEqual(proc.returncode, 1, proc.stderr)
+                payload = json.loads(proc.stdout)
+                self.assertFalse(payload["ready"])
+                self.assertFalse(payload["extension"]["integrity_ok"])
+            finally:
+                server.shutdown(); server.server_close(); thread.join(timeout=2)
 
 
 if __name__ == "__main__":

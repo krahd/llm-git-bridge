@@ -25,6 +25,20 @@ class HarnessInstallerTests(unittest.TestCase):
         self.assertNotIn("LEGACY_LABEL", text)
         self.assertNotIn("io.llm-git-bridge", text)
 
+    def test_installer_reconciles_launchd_and_retries_bootstrap_boundedly(self):
+        text = INSTALLER.read_text()
+        self.assertIn('launchctl print "gui/${UID_NOW}/${LABEL}"', text)
+        self.assertIn('for _ in 1 2 3; do', text)
+        self.assertIn('BOOTSTRAPPED=0', text)
+        self.assertIn('browser-status >/dev/null 2>&1', text)
+
+    def test_installer_drops_stale_bytecode_and_hashes_safari_extension(self):
+        text = INSTALLER.read_text()
+        self.assertIn("-name '__pycache__'", text)
+        self.assertIn("-name '*.pyc'", text)
+        self.assertIn("'schema':2", text)
+        self.assertIn("'safari_files':safari_files", text)
+
     def test_readme_documents_coexistence(self):
         text = README.read_text()
         self.assertIn("coexist indefinitely", text)

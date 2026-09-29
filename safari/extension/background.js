@@ -29,7 +29,11 @@ async function deliverPending(tabId) {
   return false;
 }
 
-browser.runtime.onMessage.addListener(async (message) => {
+browser.runtime.onMessage.addListener(async (message, sender) => {
+  if (message?.type === "contentReady" && sender?.tab?.id != null) {
+    await deliverPending(sender.tab.id);
+    return {ok: true};
+  }
   if (message?.type !== "openPrompt" || typeof message.prompt !== "string") return;
   const tab = await browser.tabs.create({url: "https://chatgpt.com/"});
   await savePending(tab.id, message.prompt);

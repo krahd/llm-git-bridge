@@ -42,7 +42,13 @@ Current Safari can load a WebExtension folder temporarily for development, so th
 
 In Safari, enable **Show features for web developers**, open **Settings > Developer**, allow unsigned extensions if prompted, choose **Add Temporary Extension…**, and select that staged folder. Safari removes temporary extensions after 24 hours or when Safari quits, so this is a development/pilot path rather than distribution.
 
-Then run:
+After loading the extension, first verify that the loopback API and staged extension match the installed manifest:
+
+```bash
+~/.local/share/chatgpt-conversation-harness-v1/bin/harness browser-status
+```
+
+Only when that reports `"ready": true`, create the short-lived pairing secret:
 
 ```bash
 ~/.local/share/chatgpt-conversation-harness-v1/bin/harness pair
