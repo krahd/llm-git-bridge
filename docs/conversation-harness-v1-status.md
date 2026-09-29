@@ -1,31 +1,25 @@
 # Conversation Harness v1 — implementation status
 
-Status: COMPLETE — integrated and remotely verified
+Status: CORE/RUNTIME COMPLETE — Safari app build blocked by local Xcode/CoreDevice mismatch
 Date: 2026-09-28
 
-## Safety boundary
+## Verified complete
 
-The existing ChatGPT Shell Bridge v5 remains live, separate, and supported. Harness v1 coexists with it; no migration of existing conversations is required. The harness uses a distinct runtime namespace, state directory, socket, launch label, browser/native identifiers, and job namespace.
+- Harness core/state machine, SQLite persistence, fencing, handoffs, operation identity, request journalling, Unix-socket daemon, CLI, browser pairing API, and Safari WebExtension source are implemented.
+- Canonical repository integration and independent GitHub remote verification passed.
+- Harness-focused suite passed 27/27; full repository suite passed 357/357; compileall and git diff --check passed.
+- The parallel harness LaunchAgent is active under `net.laurenzo.chatgpt-conversation-harness-v1`, with state and runtime paths separate from Shell Bridge v5.
+- Live Shell Bridge v5 remained at the same publisher PID during harness activation. Both services are supported to coexist indefinitely; migration of existing conversations is not required.
+- Safari WebExtension packaging produced a generated Xcode project from canonical source.
 
-## Verified implementation
+## Browser transport implementation variance
 
-- durable SQLite job state with independent lifecycle/version/lease state;
-- fenced leases with expiry and safe reclaim;
-- atomic handoff/claim semantics and continuation projections;
-- idempotent external-operation records;
-- at-most-once local request journalling with indeterminate replay handling;
-- Unix-domain-socket daemon and CLI protocol;
-- browser pairing/pending-prompt API with narrow origin/token checks;
-- Safari/WebExtension packaging and persistence tests;
-- separate, stage-only installer/activation path for the harness runtime;
-- coexistence with the existing Shell Bridge v5 as a permanent supported topology.
+The original architecture plan selected Safari native messaging. The implementation spike superseded that choice: Safari v1 uses an authenticated loopback API bound to `127.0.0.1:47653`, plus the user-only Unix socket for CLI/service traffic. The extension requests only `chatgpt.com` and the exact loopback origin, stores only a bearer token obtained from a short-lived one-time pairing code, and does not auto-submit prompts. `safari/README.md` is authoritative for this implemented browser boundary. Native-messaging sections in the historical architecture plan are therefore superseded.
 
-## Acceptance evidence
+## External blocker
 
-Canonical integration commit before this status-only closure: `a1713cc7c8feac959aacd6b2e40b978ad3e79337`. At acceptance, local `HEAD`, `origin/main`, and `git ls-remote origin refs/heads/main` all matched that commit. Harness-focused tests passed; the full repository test suite passed; `compileall` and `git diff --check` passed.
+The generated Safari containing app cannot currently be compiled because the installed Xcode fails while loading `DVTCoreDeviceCore`: its framework expects a `CoreDevice` symbol not present in the installed private framework. This is a local Xcode/CoreDevice installation mismatch, not a harness source failure. The packaging script itself completed before `xcodebuild` failed. Repairing/reinstalling Xcode or the corresponding macOS developer components is intentionally outside this task while the Mac is in active use.
 
-The live Shell Bridge was not replaced, restarted, reconfigured, or migrated as part of Harness v1 implementation. Existing conversations may continue using it indefinitely; Harness v1 is opt-in.
+## Remaining acceptance gate
 
-## Required next action
-
-None for v1 implementation. Real-world opt-in trials may now be run against the separately staged harness. Stage 2 / Cloudflare remains optional future work and must not change the v1 authority or replay semantics without a new adversarial review.
+After Xcode is repaired: build/run the generated containing app, enable Conversation Harness in Safari, pair it with `llm-git-harness pair`, and run the manual new-chat/handoff pilot. Until then, browser automation is not claimed as production-accepted. The daemon/CLI continuity path is usable independently.

@@ -5,6 +5,8 @@ Date: 2026-09-28
 Target repository: `krahd/llm-git-bridge`
 Primary goal: make substantial work survive ChatGPT conversation timeouts, context exhaustion, browser failure, and deliberate handoff between conversations, without making any conversation itself authoritative.
 
+> **Implementation variance (2026-09-28):** the Safari transport described in the historical plan below was superseded by the implementation spike. Canonical v1 uses a narrow authenticated loopback API on `127.0.0.1:47653` for the WebExtension, while the CLI/service boundary remains a user-only Unix socket. This avoids requiring a sandboxed Safari native extension to access arbitrary files under the harness state directory. See `safari/README.md` and `docs/conversation-harness-v1-status.md`. Native-messaging sections below are retained as design history, not current implementation authority.
+
 This implementation is the infrastructure substrate for the existing **Conversational Work Continuity** research programme. It inherits that project's hard product invariant: Tomas should not perform bookkeeping merely to keep the system organised. Safety confirmations are allowed; manual tagging, hand-authored summaries, project assignment, graph maintenance, and continuation bookkeeping are not.
 
 ## 1. Executive design
