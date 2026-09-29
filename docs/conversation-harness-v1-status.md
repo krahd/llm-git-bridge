@@ -1,6 +1,6 @@
 # Conversation Harness v1 — implementation status
 
-Status: CORE/RUNTIME COMPLETE — temporary Safari browser pilot ready
+Status: DEPLOYED — CLI continuity pilot passed; manual Safari/ChatGPT pilot pending
 Date: 2026-09-28
 
 ## Verified complete
@@ -15,6 +15,15 @@ Date: 2026-09-28
 ## Browser transport implementation variance
 
 The original architecture plan selected Safari native messaging. The implementation spike superseded that choice: Safari v1 uses an authenticated loopback API bound to `127.0.0.1:47653`, plus the user-only Unix socket for CLI/service traffic. The extension requests only `chatgpt.com` and the exact loopback origin, stores only a bearer token obtained from a short-lived one-time pairing code, and does not auto-submit prompts. `safari/README.md` is authoritative for this implemented browser boundary. Native-messaging sections in the historical architecture plan are therefore superseded.
+
+## Live deployment acceptance — 2026-09-28
+
+- Canonical `origin/main` and the installed harness runtime were verified at `2ca74c9e36cd4565e71cb989971fb984cffb8e9d`.
+- The harness-only deployment restarted `net.laurenzo.chatgpt-conversation-harness-v1` while the live Shell Bridge v5 publisher remained PID `38449`; the two runtimes remained independent.
+- Installed Unix-socket `ping` passed and the authenticated loopback service returned HTTP 200 on `127.0.0.1:47653`.
+- The staged Safari extension contains five files and byte-matches canonical `safari/extension/`.
+- A live continuity pilot exercised the installed daemon: logical conversation A created/acquired/handed off a job; the client pilot then stopped after the durable handoff; recovery inspected the existing pending handoff instead of replaying it; logical conversation B claimed it; the event log showed `job_created`, `lease_acquired`, `handoff_created`, and `handoff_claimed`; the final lease was released.
+- This validates daemon/CLI continuation and recovery against the deployed runtime, including the intended missing-delta recovery discipline after a client-side failure.
 
 ## Browser pilot path
 
