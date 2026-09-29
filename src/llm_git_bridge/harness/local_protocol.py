@@ -135,6 +135,8 @@ class LocalProtocol:
 
     def _execute(self, action: str, args: dict[str, Any]) -> Any:
         s = self.service
+        if action == "ping":
+            return {"service": "chatgpt-conversation-harness-v1", "protocol": PROTOCOL_VERSION}
         if action == "create_job":
             return s.create_job(**args)
         if action == "get_job":
