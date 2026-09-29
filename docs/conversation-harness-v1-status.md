@@ -21,3 +21,12 @@ none
 ## Exact next action
 
 Create `src/llm_git_bridge/harness/` core modules and focused tests. Success: state transitions, lease fencing, idempotent handoffs, expiry/reclaim, and SQLite crash/reopen semantics pass without touching the live bridge runtime.
+
+## Implementation checkpoint — 2026-09-28
+
+- Harness v1 implementation completed in isolated workspace.
+- Full repository suite passed.
+- Isolated daemon/socket/pairing smoke passed.
+- Runtime namespace, installer label/state, and browser packaging remain separate from live Shell Bridge v5.
+- No live v5 restart, replacement, activation, or migration performed.
+- Next gate: workspace integration and independent GitHub remote verification.
