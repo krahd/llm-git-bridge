@@ -18,3 +18,15 @@ The browser token protects the loopback API from ordinary webpage access. The se
 ## Development packaging
 
 The files in `safari/extension/` are standard WebExtension assets. Package them in a Safari Web Extension containing app with Xcode. The v1 browser path does not require `nativeMessaging`.
+## Packaging for Safari
+
+Xcode's `safari-web-extension-packager` can generate the containing macOS app without changing the harness or Shell Bridge runtimes:
+
+```bash
+safari/package.sh
+```
+
+Generated Xcode output goes to `safari/build/` by default and is intentionally ignored. Pass another directory as the first argument for an isolated test build. The script is non-interactive (`--no-open --no-prompt`), macOS-only, uses Swift, and copies the WebExtension resources into the generated project. Packaging does not install or enable the extension in Safari.
+
+For rapid development, Safari can also load the raw extension folder temporarily through its Developer settings. The durable source of the extension remains `safari/extension/`; generated Xcode projects are build artefacts.
+
