@@ -46,7 +46,12 @@ def _browser_status(host: str, port: int, timeout: float) -> dict[str, object]:
     try:
         with urllib.request.urlopen(f"http://{host}:{port}/health", timeout=timeout) as response:
             body = json.loads(response.read().decode("utf-8"))
-            api_ok = response.status == 200 and body.get("ok") is True
+            api_ok = (
+                response.status == 200
+                and body.get("ok") is True
+                and body.get("service") == "chatgpt-conversation-harness-v1"
+                and body.get("protocol") == 1
+            )
             if not api_ok:
                 api_error = "unexpected health response"
     except (OSError, urllib.error.URLError, json.JSONDecodeError, UnicodeError) as exc:

@@ -1,13 +1,24 @@
 const storageKey = (tabId) => `pendingPrompt:${tabId}`;
+const PENDING_TTL_MS = 10 * 60 * 1000;
 
 async function savePending(tabId, prompt) {
-  await browser.storage.local.set({[storageKey(tabId)]: prompt});
+  await browser.storage.local.set({[storageKey(tabId)]: {prompt, createdAt: Date.now()}});
 }
 
 async function loadPending(tabId) {
   const key = storageKey(tabId);
   const values = await browser.storage.local.get(key);
-  return values[key];
+  const record = values[key];
+  if (!record || typeof record !== "object" || typeof record.prompt !== "string" || !Number.isFinite(record.createdAt)) {
+    if (record !== undefined) await browser.storage.local.remove(key);
+    return undefined;
+  }
+  const age = Date.now() - record.createdAt;
+  if (age < 0 || age > PENDING_TTL_MS) {
+    await browser.storage.local.remove(key);
+    return undefined;
+  }
+  return record.prompt;
 }
 
 async function clearPending(tabId) {
