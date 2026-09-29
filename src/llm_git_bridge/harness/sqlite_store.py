@@ -103,6 +103,15 @@ class SQLiteHarnessStore:
                 finished_at REAL,
                 UNIQUE(job_id, idempotency_key)
             );
+            CREATE TABLE IF NOT EXISTS protocol_requests(
+                request_id TEXT PRIMARY KEY,
+                fingerprint TEXT NOT NULL,
+                action TEXT NOT NULL,
+                status TEXT NOT NULL,
+                response_json TEXT,
+                created_at REAL NOT NULL,
+                finished_at REAL
+            );
             CREATE TABLE IF NOT EXISTS events(
                 seq INTEGER PRIMARY KEY AUTOINCREMENT,
                 job_id TEXT NOT NULL REFERENCES jobs(job_id) ON DELETE CASCADE,
