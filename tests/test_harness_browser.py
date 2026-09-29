@@ -14,6 +14,7 @@ from llm_git_bridge.harness.sqlite_store import SQLiteHarnessStore
 
 ROOT=Path(__file__).resolve().parents[1]
 MANIFEST=ROOT/"safari"/"extension"/"manifest.json"
+BACKGROUND=ROOT/"safari"/"extension"/"background.js"
 
 class BrowserTests(unittest.TestCase):
     def setUp(self):
@@ -50,6 +51,8 @@ class BrowserTests(unittest.TestCase):
         self.assertEqual(item["job_id"],"job-a")
         self.assertIn(self.handoff.nonce,item["prompt"])
         self.assertNotIn("/secret/path",json.dumps(pending))
+        self.assertIn("ChatGPT Shell Bridge",item["prompt"])
+        self.assertIn("parallel Conversation Harness v1",item["prompt"])
     def test_pending_requires_extension_origin_and_token(self):
         status,_=self._req("/v1/pending")
         self.assertEqual(status,401)
@@ -70,5 +73,12 @@ class BrowserTests(unittest.TestCase):
         self.assertNotIn("<all_urls>",json.dumps(manifest))
         self.assertEqual(set(manifest["host_permissions"]),{"https://chatgpt.com/*","http://127.0.0.1:47653/*"})
         self.assertNotIn("nativeMessaging",manifest["permissions"])
+    def test_background_persists_pending_prompt_across_mv3_worker_restarts(self):
+        background=BACKGROUND.read_text()
+        self.assertNotIn("new Map",background)
+        self.assertIn("browser.storage.local.set",background)
+        self.assertIn("browser.storage.local.get",background)
+        self.assertIn("browser.storage.local.remove",background)
+        self.assertIn("pendingPrompt:",background)
 
 if __name__=="__main__": unittest.main()

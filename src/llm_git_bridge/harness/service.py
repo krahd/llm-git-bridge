@@ -372,8 +372,11 @@ class HarnessService:
             for row in rows:
                 prompt=(
                     f"Resume harness job {row['job_id']} using handoff {row['handoff_id']} "
-                    f"with token {row['nonce_secret']}. Read the durable continuation state first, "
-                    "claim the handoff, reconcile any in-flight operation before mutation, and continue from next_action."
+                    f"with token {row['nonce_secret']}. Use the existing ChatGPT Shell Bridge to reach "
+                    "the Mac and the parallel Conversation Harness v1. Read the durable continuation "
+                    "state first, claim the handoff with a new conversation holder id, reconcile any "
+                    "in-flight operation before mutation, and continue from next_action. Do not replay "
+                    "an ambiguous operation merely because the prior conversation ended."
                 )
                 out.append({
                     "handoff_id": row["handoff_id"], "job_id": row["job_id"], "title": row["title"],
