@@ -73,24 +73,41 @@ class ProtocolTests(unittest.TestCase):
 
     def test_unix_socket_roundtrip_and_permissions(self):
         path = self.root / "sock" / "harness.sock"
-        with HarnessUnixServer(path, self.protocol) as server:
-            thread = threading.Thread(target=server.serve_forever, daemon=True)
-            thread.start()
+        ready = threading.Event()
+        stop = threading.Event()
+        state = {}
+
+        def serve():
+            thread_store = SQLiteHarnessStore(self.root / "socket.sqlite3")
             try:
-                response = request({
-                    "protocol": 1,
-                    "request_id": "socket-create-001",
-                    "action": "create_job",
-                    "args": {"job_id": "socket-job", "title": "Socket", "goal": "Round trip"},
-                }, path=path)
-                self.assertTrue(response["ok"])
-                mode = stat.S_IMODE(path.stat().st_mode)
-                self.assertEqual(mode, 0o600)
-                continuation = request({"protocol": 1, "action": "continuation", "args": {"job_id": "socket-job"}}, path=path)
-                self.assertEqual(continuation["result"]["job"]["job_id"], "socket-job")
+                protocol = LocalProtocol(HarnessService(thread_store))
+                with HarnessUnixServer(path, protocol) as server:
+                    state["server"] = server
+                    ready.set()
+                    server.serve_forever(poll_interval=0.05)
             finally:
-                server.shutdown()
-                thread.join(timeout=2)
+                thread_store.close()
+                stop.set()
+
+        thread = threading.Thread(target=serve, daemon=True)
+        thread.start()
+        self.assertTrue(ready.wait(2), "server did not become ready")
+        try:
+            response = request({
+                "protocol": 1,
+                "request_id": "socket-create-001",
+                "action": "create_job",
+                "args": {"job_id": "socket-job", "title": "Socket", "goal": "Round trip"},
+            }, path=path)
+            self.assertTrue(response["ok"], response)
+            mode = stat.S_IMODE(path.stat().st_mode)
+            self.assertEqual(mode, 0o600)
+            continuation = request({"protocol": 1, "action": "continuation", "args": {"job_id": "socket-job"}}, path=path)
+            self.assertEqual(continuation["result"]["job"]["job_id"], "socket-job")
+        finally:
+            state["server"].shutdown()
+            thread.join(timeout=2)
+        self.assertTrue(stop.is_set())
         self.assertFalse(path.exists())
 
     def test_runtime_namespace_is_not_shell_bridge_namespace(self):
