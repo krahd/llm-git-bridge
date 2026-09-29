@@ -52,15 +52,40 @@ async function pair() {
   await refreshStatus();
 }
 
+async function releaseStart(token, handoffId) {
+  try {
+    await fetch(BASE + "/v1/release-start", {
+      method: "POST",
+      headers: {Authorization:"Bearer "+token, "Content-Type":"application/json"},
+      body: JSON.stringify({handoff_id: handoffId})
+    });
+  } catch (_) {
+    // The short server-side starting lease will recover even if release delivery fails.
+  }
+}
+
 async function openNext() {
   const {token} = await browser.storage.local.get("token");
   if (!token) throw new Error("Pair this browser first.");
-  const response = await fetch(BASE + "/v1/pending", {headers:{Authorization:"Bearer "+token}});
+  const response = await fetch(BASE + "/v1/open-next", {
+    method: "POST",
+    headers: {Authorization:"Bearer "+token, "Content-Type":"application/json"},
+    body: "{}"
+  });
   const body = await response.json();
   if (!body.ok) throw new Error(body.error || "Harness unavailable");
-  if (!body.pending.length) { status.textContent = "No pending handoffs."; return; }
-  const item = body.pending[0];
-  await browser.runtime.sendMessage({type:"openPrompt", prompt:item.prompt});
+  const item = body.item;
+  if (!item) { status.textContent = "No pending handoffs."; return; }
+  if (!item.new_reservation) {
+    status.textContent = `Already starting ${item.job_id}; use the existing tab or retry after the reservation expires.`;
+    return;
+  }
+  try {
+    await browser.runtime.sendMessage({type:"openPrompt", prompt:item.prompt});
+  } catch (error) {
+    await releaseStart(token, item.handoff_id);
+    throw error;
+  }
   status.textContent = `Opened ${item.job_id}. Review the prompt and press Send.`;
 }
 

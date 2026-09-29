@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from pathlib import Path
+import sqlite3
 import tempfile
 import unittest
 
@@ -162,6 +163,114 @@ class HarnessTests(unittest.TestCase):
         job = self.service.get_job("paper-a")
         with self.assertRaises(Conflict):
             self.service.update_job(old, expected_version=job["version"], next_action="bad")
+
+    def test_browser_start_reservation_fences_duplicate_opening_and_recycles(self):
+        old = self.service.acquire_lease("paper-a", "conversation-a")
+        handoff = self.service.create_handoff(old, ttl=300)
+        first = self.service.reserve_reentry("browser-a", ttl=30)
+        self.assertEqual(first["handoff_id"], handoff.handoff_id)
+        self.assertTrue(first["new_reservation"])
+        repeated = self.service.reserve_reentry("browser-a", ttl=30)
+        self.assertEqual(repeated["handoff_id"], handoff.handoff_id)
+        self.assertFalse(repeated["new_reservation"])
+        self.assertIsNone(self.service.reserve_reentry("browser-b", ttl=30))
+        with self.assertRaises(Conflict):
+            self.service.acquire_lease("paper-a", "conversation-c")
+        self.clock.advance(31)
+        recycled = self.service.reserve_reentry("browser-b", ttl=30)
+        self.assertEqual(recycled["handoff_id"], handoff.handoff_id)
+        self.assertTrue(recycled["new_reservation"])
+
+    def test_claim_from_starting_clears_browser_reservation(self):
+        old = self.service.acquire_lease("paper-a", "conversation-a")
+        handoff = self.service.create_handoff(old, ttl=300)
+        self.service.reserve_reentry("browser-a", ttl=60)
+        new = self.service.claim_handoff("paper-a", handoff.nonce, "conversation-b")
+        self.assertGreater(new.generation, old.generation)
+        row = self.store.conn.execute(
+            "SELECT state,nonce_secret,starting_by,starting_at,starting_expires_at FROM handoffs WHERE handoff_id=?",
+            (handoff.handoff_id,),
+        ).fetchone()
+        self.assertEqual(row["state"], "claimed")
+        self.assertIsNone(row["nonce_secret"])
+        self.assertIsNone(row["starting_by"])
+        self.assertIsNone(row["starting_at"])
+        self.assertIsNone(row["starting_expires_at"])
+
+    def test_release_reentry_returns_handoff_to_pending(self):
+        old = self.service.acquire_lease("paper-a", "conversation-a")
+        handoff = self.service.create_handoff(old, ttl=300)
+        self.service.reserve_reentry("browser-a", ttl=60)
+        with self.assertRaises(Conflict):
+            self.service.release_reentry("browser-b", handoff.handoff_id)
+        released = self.service.release_reentry("browser-a", handoff.handoff_id)
+        self.assertTrue(released["released"])
+        next_item = self.service.reserve_reentry("browser-b", ttl=60)
+        self.assertTrue(next_item["new_reservation"])
+
+    def test_overall_handoff_expiry_wins_over_starting_reservation(self):
+        old = self.service.acquire_lease("paper-a", "conversation-a")
+        handoff = self.service.create_handoff(old, ttl=5)
+        self.service.reserve_reentry("browser-a", ttl=30)
+        self.clock.advance(6)
+        self.assertIsNone(self.service.reserve_reentry("browser-b", ttl=30))
+        row = self.store.conn.execute(
+            "SELECT state,nonce_secret,starting_by FROM handoffs WHERE handoff_id=?",
+            (handoff.handoff_id,),
+        ).fetchone()
+        self.assertEqual(row["state"], "expired")
+        self.assertIsNone(row["nonce_secret"])
+        self.assertIsNone(row["starting_by"])
+
+    def test_starting_reservation_survives_database_reopen(self):
+        old = self.service.acquire_lease("paper-a", "conversation-a")
+        handoff = self.service.create_handoff(old, ttl=300)
+        self.service.reserve_reentry("browser-a", ttl=60)
+        self.store.close()
+        self.store = SQLiteHarnessStore(self.db)
+        self.service = HarnessService(self.store, clock=self.clock)
+        capsule = self.service.continuation("paper-a")
+        self.assertEqual(capsule["handoff"]["handoff_id"], handoff.handoff_id)
+        self.assertEqual(capsule["handoff"]["state"], "starting")
+        self.assertEqual(capsule["handoff"]["starting_by"], "browser-a")
+
+    def test_schema_v1_database_migrates_starting_reservation_fields(self):
+        legacy = Path(self.tmp.name) / "legacy.sqlite3"
+        conn = sqlite3.connect(legacy)
+        conn.executescript(
+            """
+            CREATE TABLE harness_meta(key TEXT PRIMARY KEY,value TEXT NOT NULL);
+            INSERT INTO harness_meta(key,value) VALUES('schema_version','1');
+            CREATE TABLE handoffs(
+                handoff_id TEXT PRIMARY KEY,
+                job_id TEXT NOT NULL,
+                nonce_hash TEXT NOT NULL UNIQUE,
+                nonce_secret TEXT,
+                state TEXT NOT NULL,
+                created_at REAL NOT NULL,
+                expires_at REAL NOT NULL,
+                claimed_at REAL,
+                claimed_by TEXT
+            );
+            CREATE UNIQUE INDEX one_pending_handoff_per_job
+                ON handoffs(job_id) WHERE state='pending';
+            """
+        )
+        conn.close()
+        migrated = SQLiteHarnessStore(legacy)
+        try:
+            cols = {row[1] for row in migrated.conn.execute("PRAGMA table_info(handoffs)").fetchall()}
+            self.assertTrue({"starting_by", "starting_at", "starting_expires_at"}.issubset(cols))
+            version = migrated.conn.execute(
+                "SELECT value FROM harness_meta WHERE key='schema_version'"
+            ).fetchone()[0]
+            self.assertEqual(version, "2")
+            indexes = {row[1] for row in migrated.conn.execute("PRAGMA index_list(handoffs)").fetchall()}
+            self.assertIn("one_open_handoff_per_job", indexes)
+            self.assertIn("one_starting_handoff_per_client", indexes)
+            self.assertNotIn("one_pending_handoff_per_job", indexes)
+        finally:
+            migrated.close()
 
 
 if __name__ == "__main__":

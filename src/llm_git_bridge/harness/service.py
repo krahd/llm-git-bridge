@@ -72,13 +72,34 @@ class HarnessService:
                 {"lease_id": lease["lease_id"], "generation": lease["generation"]},
                 now,
             )
-        rows = conn.execute(
-            "SELECT handoff_id FROM handoffs WHERE job_id=? AND state='pending' AND expires_at<=?",
+        expired = conn.execute(
+            "SELECT handoff_id FROM handoffs "
+            "WHERE job_id=? AND state IN ('pending','starting') AND expires_at<=?",
             (job_id, now),
         ).fetchall()
-        for row in rows:
-            conn.execute("UPDATE handoffs SET state='expired',nonce_secret=NULL WHERE handoff_id=?", (row["handoff_id"],))
+        for row in expired:
+            conn.execute(
+                "UPDATE handoffs SET state='expired',nonce_secret=NULL,starting_by=NULL,"
+                "starting_at=NULL,starting_expires_at=NULL WHERE handoff_id=?",
+                (row["handoff_id"],),
+            )
             self._event(conn, job_id, "handoff_expired", {"handoff_id": row["handoff_id"]}, now)
+        stale_starts = conn.execute(
+            "SELECT handoff_id,starting_by FROM handoffs "
+            "WHERE job_id=? AND state='starting' AND starting_expires_at IS NOT NULL "
+            "AND starting_expires_at<=? AND expires_at>?",
+            (job_id, now, now),
+        ).fetchall()
+        for row in stale_starts:
+            conn.execute(
+                "UPDATE handoffs SET state='pending',starting_by=NULL,starting_at=NULL,"
+                "starting_expires_at=NULL WHERE handoff_id=? AND state='starting'",
+                (row["handoff_id"],),
+            )
+            self._event(
+                conn, job_id, "handoff_start_expired",
+                {"handoff_id": row["handoff_id"], "starting_by": row["starting_by"]}, now,
+            )
 
     def create_job(
         self,
@@ -135,11 +156,12 @@ class HarnessService:
             job = self._job(conn, job_id)
             self._expire(conn, job_id, now)
             self._require_nonterminal(job)
-            pending = conn.execute(
-                "SELECT handoff_id FROM handoffs WHERE job_id=? AND state='pending'", (job_id,)
+            open_handoff = conn.execute(
+                "SELECT handoff_id FROM handoffs WHERE job_id=? AND state IN ('pending','starting')",
+                (job_id,),
             ).fetchone()
-            if pending is not None:
-                raise Conflict("job has a pending handoff")
+            if open_handoff is not None:
+                raise Conflict("job has an open handoff")
             current = conn.execute("SELECT * FROM leases WHERE job_id=?", (job_id,)).fetchone()
             if current is not None:
                 if current["holder_id"] != holder_id:
@@ -234,11 +256,12 @@ class HarnessService:
             self._require_lease(conn, token.job_id, token.lease_id, token.generation, now)
             job = self._job(conn, token.job_id)
             self._require_nonterminal(job)
-            pending = conn.execute(
-                "SELECT handoff_id FROM handoffs WHERE job_id=? AND state='pending'", (token.job_id,)
+            existing = conn.execute(
+                "SELECT handoff_id FROM handoffs WHERE job_id=? AND state IN ('pending','starting')",
+                (token.job_id,),
             ).fetchone()
-            if pending is not None:
-                raise Conflict("pending handoff already exists")
+            if existing is not None:
+                raise Conflict("open handoff already exists")
             handoff_id = secrets.token_hex(16)
             nonce = secrets.token_urlsafe(32)
             nonce_hash = hashlib.sha256(nonce.encode("utf-8")).hexdigest()
@@ -269,17 +292,21 @@ class HarnessService:
             ).fetchone()
             if handoff is None:
                 raise Conflict("handoff not found")
-            if handoff["state"] != "pending" or float(handoff["expires_at"]) <= now:
+            if handoff["state"] not in {"pending", "starting"} or float(handoff["expires_at"]) <= now:
                 raise Conflict("handoff is not claimable")
             if conn.execute("SELECT 1 FROM leases WHERE job_id=?", (job_id,)).fetchone() is not None:
                 raise Conflict("job already leased")
             generation = int(job["lease_generation"]) + 1
             lease_id = secrets.token_hex(16)
             expires = now + ttl
-            conn.execute(
-                "UPDATE handoffs SET state='claimed',claimed_at=?,claimed_by=?,nonce_secret=NULL WHERE handoff_id=? AND state='pending'",
+            changed = conn.execute(
+                "UPDATE handoffs SET state='claimed',claimed_at=?,claimed_by=?,nonce_secret=NULL,"
+                "starting_by=NULL,starting_at=NULL,starting_expires_at=NULL "
+                "WHERE handoff_id=? AND state IN ('pending','starting')",
                 (now, holder_id, handoff["handoff_id"]),
-            )
+            ).rowcount
+            if changed != 1:
+                raise Conflict("handoff state changed")
             conn.execute(
                 "INSERT INTO leases(job_id,lease_id,holder_id,generation,acquired_at,expires_at,last_heartbeat_at) VALUES(?,?,?,?,?,?,?)",
                 (job_id, lease_id, holder_id, generation, now, expires, now),
@@ -337,6 +364,7 @@ class HarnessService:
         with self.store.transaction() as conn:
             self._require_lease(conn, token.job_id, token.lease_id, token.generation, now)
             row = conn.execute(
+
                 "SELECT * FROM operations WHERE operation_id=? AND job_id=?", (operation_id, token.job_id)
             ).fetchone()
             if row is None:
@@ -408,12 +436,113 @@ class HarnessService:
             conn.execute("UPDATE browser_tokens SET last_used_at=? WHERE token_hash=?", (now, token_hash))
             return row["client_id"]
 
+    def _expire_open_handoffs(self, conn, now: float) -> None:
+        job_ids = [
+            row[0]
+            for row in conn.execute(
+                "SELECT DISTINCT job_id FROM handoffs WHERE state IN ('pending','starting')"
+            ).fetchall()
+        ]
+        for job_id in job_ids:
+            self._expire(conn, job_id, now)
+
+    @staticmethod
+    def _handoff_item(row, *, new_reservation: bool | None = None) -> dict[str, Any]:
+        prompt=(
+            f"Resume harness job {row['job_id']} using handoff {row['handoff_id']} "
+            f"with token {row['nonce_secret']}. Use the existing ChatGPT Shell Bridge to reach "
+            "the Mac and the parallel Conversation Harness v1. Read the durable continuation "
+            "state first, claim the handoff with a new conversation holder id, reconcile any "
+            "in-flight operation before mutation, and continue from next_action. Do not replay "
+            "an ambiguous operation merely because the prior conversation ended."
+        )
+        item = {
+            "handoff_id": row["handoff_id"], "job_id": row["job_id"], "title": row["title"],
+            "created_at": row["created_at"], "expires_at": row["expires_at"],
+            "next_action": row["next_action"], "lifecycle": row["lifecycle"], "prompt": prompt,
+        }
+        if new_reservation is not None:
+            item["new_reservation"] = new_reservation
+            item["starting_expires_at"] = row["starting_expires_at"]
+        return item
+
+    def reserve_reentry(self, client_id: str, *, ttl: float = 90.0) -> dict[str, Any] | None:
+        validate_token(client_id, "client_id")
+        ttl = validate_ttl(ttl, minimum=30.0, maximum=900.0)
+        now = self._now()
+        with self.store.transaction() as conn:
+            self._expire_open_handoffs(conn, now)
+            existing = conn.execute(
+                """SELECT h.handoff_id,h.job_id,h.nonce_secret,h.created_at,h.expires_at,
+                          h.starting_expires_at,j.title,j.next_action,j.lifecycle
+                   FROM handoffs h JOIN jobs j ON j.job_id=h.job_id
+                   WHERE h.state='starting' AND h.starting_by=?
+                     AND h.starting_expires_at>? AND h.expires_at>? AND h.nonce_secret IS NOT NULL
+                   ORDER BY h.starting_at LIMIT 1""",
+                (client_id, now, now),
+            ).fetchone()
+            if existing is not None:
+                return self._handoff_item(existing, new_reservation=False)
+            row = conn.execute(
+                """SELECT h.handoff_id,h.job_id,h.nonce_secret,h.created_at,h.expires_at,
+                          h.starting_expires_at,j.title,j.next_action,j.lifecycle
+                   FROM handoffs h JOIN jobs j ON j.job_id=h.job_id
+                   WHERE h.state='pending' AND h.expires_at>? AND h.nonce_secret IS NOT NULL
+                   ORDER BY h.created_at LIMIT 1""",
+                (now,),
+            ).fetchone()
+            if row is None:
+                return None
+            starting_expires_at = min(now + ttl, float(row["expires_at"]))
+            changed = conn.execute(
+                "UPDATE handoffs SET state='starting',starting_by=?,starting_at=?,starting_expires_at=? "
+                "WHERE handoff_id=? AND state='pending'",
+                (client_id, now, starting_expires_at, row["handoff_id"]),
+            ).rowcount
+            if changed != 1:
+                raise Conflict("handoff state changed")
+            self._event(
+                conn, row["job_id"], "handoff_starting",
+                {"handoff_id": row["handoff_id"], "starting_by": client_id,
+                 "starting_expires_at": starting_expires_at},
+                now,
+            )
+            reserved = conn.execute(
+                """SELECT h.handoff_id,h.job_id,h.nonce_secret,h.created_at,h.expires_at,
+                          h.starting_expires_at,j.title,j.next_action,j.lifecycle
+                   FROM handoffs h JOIN jobs j ON j.job_id=h.job_id WHERE h.handoff_id=?""",
+                (row["handoff_id"],),
+            ).fetchone()
+            return self._handoff_item(reserved, new_reservation=True)
+
+    def release_reentry(self, client_id: str, handoff_id: str) -> dict[str, Any]:
+        validate_token(client_id, "client_id")
+        validate_token(handoff_id, "handoff_id")
+        now = self._now()
+        with self.store.transaction() as conn:
+            self._expire_open_handoffs(conn, now)
+            row = conn.execute("SELECT * FROM handoffs WHERE handoff_id=?", (handoff_id,)).fetchone()
+            if row is None or row["state"] != "starting":
+                raise Conflict("handoff is not starting")
+            if row["starting_by"] != client_id:
+                raise Conflict("handoff is reserved by another browser")
+            changed = conn.execute(
+                "UPDATE handoffs SET state='pending',starting_by=NULL,starting_at=NULL,"
+                "starting_expires_at=NULL WHERE handoff_id=? AND state='starting' AND starting_by=?",
+                (handoff_id, client_id),
+            ).rowcount
+            if changed != 1:
+                raise Conflict("handoff state changed")
+            self._event(
+                conn, row["job_id"], "handoff_start_released",
+                {"handoff_id": handoff_id, "starting_by": client_id}, now,
+            )
+            return {"released": True, "handoff_id": handoff_id}
+
     def pending_reentries(self) -> list[dict[str, Any]]:
         now = self._now()
         with self.store.transaction() as conn:
-            job_ids = [row[0] for row in conn.execute("SELECT DISTINCT job_id FROM handoffs WHERE state='pending'").fetchall()]
-            for job_id in job_ids:
-                self._expire(conn, job_id, now)
+            self._expire_open_handoffs(conn, now)
             rows = conn.execute(
                 """SELECT h.handoff_id,h.job_id,h.nonce_secret,h.created_at,h.expires_at,
                           j.title,j.next_action,j.lifecycle
@@ -422,22 +551,7 @@ class HarnessService:
                    ORDER BY h.created_at""",
                 (now,),
             ).fetchall()
-            out=[]
-            for row in rows:
-                prompt=(
-                    f"Resume harness job {row['job_id']} using handoff {row['handoff_id']} "
-                    f"with token {row['nonce_secret']}. Use the existing ChatGPT Shell Bridge to reach "
-                    "the Mac and the parallel Conversation Harness v1. Read the durable continuation "
-                    "state first, claim the handoff with a new conversation holder id, reconcile any "
-                    "in-flight operation before mutation, and continue from next_action. Do not replay "
-                    "an ambiguous operation merely because the prior conversation ended."
-                )
-                out.append({
-                    "handoff_id": row["handoff_id"], "job_id": row["job_id"], "title": row["title"],
-                    "created_at": row["created_at"], "expires_at": row["expires_at"],
-                    "next_action": row["next_action"], "lifecycle": row["lifecycle"], "prompt": prompt,
-                })
-            return out
+            return [self._handoff_item(row) for row in rows]
 
     def continuation(self, job_id: str) -> dict[str, Any]:
         validate_token(job_id, "job_id")
@@ -447,7 +561,9 @@ class HarnessService:
             self._expire(conn, job_id, now)
             lease = conn.execute("SELECT * FROM leases WHERE job_id=?", (job_id,)).fetchone()
             handoff = conn.execute(
-                "SELECT handoff_id,state,created_at,expires_at,claimed_at,claimed_by FROM handoffs WHERE job_id=? ORDER BY created_at DESC LIMIT 1",
+                "SELECT handoff_id,state,created_at,expires_at,claimed_at,claimed_by,"
+                "starting_by,starting_at,starting_expires_at FROM handoffs "
+                "WHERE job_id=? ORDER BY created_at DESC LIMIT 1",
                 (job_id,),
             ).fetchone()
             ops = conn.execute(
