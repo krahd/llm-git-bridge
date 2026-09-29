@@ -64,7 +64,33 @@ _REQUIRED_ARGS: dict[str, tuple[str, ...]] = {
 }
 
 
+_ALLOWED_ARGS: dict[str, frozenset[str]] = {
+    "ping": frozenset(),
+    "create_pairing_code": frozenset({"ttl"}),
+    "create_job": frozenset({
+        "job_id", "title", "goal", "lifecycle", "repo_url", "repo_path", "resource_key",
+        "workspace_job_id", "next_action", "success_condition",
+    }),
+    "get_job": frozenset({"job_id"}),
+    "continuation": frozenset({"job_id"}),
+    "events": frozenset({"job_id"}),
+    "acquire_lease": frozenset({"job_id", "holder_id", "ttl"}),
+    "renew_lease": frozenset({"lease", "ttl"}),
+    "release_lease": frozenset({"lease"}),
+    "update_job": frozenset({"lease", "expected_version", "changes"}),
+    "create_handoff": frozenset({"lease", "ttl"}),
+    "claim_handoff": frozenset({"job_id", "nonce", "holder_id", "ttl"}),
+    "start_operation": frozenset({"lease", "idempotency_key", "kind", "target", "intended_effect"}),
+    "finish_operation": frozenset({"lease", "operation_id", "status", "result"}),
+}
+
+
 def _validate_action_args(action: str, args: dict[str, Any]) -> None:
+    allowed = _ALLOWED_ARGS.get(action)
+    if allowed is not None:
+        unknown = sorted(set(args) - allowed)
+        if unknown:
+            raise ValidationError(f"unsupported args for {action}: {unknown}")
     missing = [name for name in _REQUIRED_ARGS.get(action, ()) if name not in args]
     if missing:
         raise ValidationError(f"missing required args: {', '.join(missing)}")

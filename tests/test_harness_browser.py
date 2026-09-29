@@ -83,6 +83,14 @@ class BrowserTests(unittest.TestCase):
         self.assertIn("browser.storage.local.get",background)
         self.assertIn("browser.storage.local.remove",background)
         self.assertIn("pendingPrompt:",background)
+    def test_background_expires_persisted_handoff_prompt(self):
+        background=BACKGROUND.read_text()
+        self.assertIn("PENDING_TTL_MS",background)
+        self.assertIn("createdAt: Date.now()",background)
+        self.assertIn("age > PENDING_TTL_MS",background)
+        self.assertIn("age < 0",background)
+        self.assertIn("browser.storage.local.remove(key)",background)
+
     def test_content_script_waits_for_async_composer_and_wakes_background(self):
         content=CONTENT.read_text()
         background=BACKGROUND.read_text()
