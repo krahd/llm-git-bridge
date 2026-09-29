@@ -9,7 +9,7 @@ from .errors import ValidationError
 
 TOKEN_RE = re.compile(r"[a-z0-9][a-z0-9._-]{0,127}")
 LIFECYCLES = frozenset({"active", "waiting", "blocked", "completed", "failed", "cancelled"})
-HANDOFF_STATES = frozenset({"pending", "claimed", "expired", "cancelled"})
+HANDOFF_STATES = frozenset({"pending", "starting", "claimed", "expired", "cancelled"})
 OPERATION_STATES = frozenset({"started", "completed", "failed", "indeterminate"})
 
 

@@ -51,10 +51,16 @@ class BrowserTests(unittest.TestCase):
         self.assertEqual(status,200); self.assertEqual(len(pending["pending"]),1)
         item=pending["pending"][0]
         self.assertEqual(item["job_id"],"job-a")
-        self.assertIn(self.handoff.nonce,item["prompt"])
+        self.assertNotIn("prompt",item)
+        self.assertNotIn(self.handoff.nonce,json.dumps(pending))
         self.assertNotIn("/secret/path",json.dumps(pending))
-        self.assertIn("ChatGPT Shell Bridge",item["prompt"])
-        self.assertIn("parallel Conversation Harness v1",item["prompt"])
+        status,opened=self._req("/v1/open-next",method="POST",body={},token=token)
+        self.assertEqual(status,200,opened)
+        reserved=opened["item"]
+        self.assertEqual(reserved["handoff_id"],self.handoff.handoff_id)
+        self.assertIn(self.handoff.nonce,reserved["prompt"])
+        self.assertIn("ChatGPT Shell Bridge",reserved["prompt"])
+        self.assertIn("parallel Conversation Harness v1",reserved["prompt"])
     def test_pending_requires_extension_origin_and_token(self):
         status,_=self._req("/v1/pending")
         self.assertEqual(status,401)
@@ -105,5 +111,63 @@ class BrowserTests(unittest.TestCase):
         self.assertIn('browser.storage.local.remove("token")',popup)
         self.assertIn("Harness ready. Pair this browser.",popup)
         self.assertIn("pending handoff",popup)
+
+
+    def _pair_browser(self, client_id):
+        pairing=self.service.create_pairing_code(ttl=300)["code"]
+        status,body=self._req("/pair",method="POST",body={"code":pairing,"client_id":client_id})
+        self.assertEqual(status,200,body)
+        return body["token"]
+
+    def test_open_next_reserves_handoff_and_release_recycles_it(self):
+        token_a=self._pair_browser("safari-browser-a")
+        status,opened=self._req("/v1/open-next",method="POST",body={},token=token_a)
+        self.assertEqual(status,200,opened)
+        first=opened["item"]
+        self.assertEqual(first["handoff_id"],self.handoff.handoff_id)
+        self.assertTrue(first["new_reservation"])
+
+        status,repeated=self._req("/v1/open-next",method="POST",body={},token=token_a)
+        self.assertEqual(status,200,repeated)
+        self.assertEqual(repeated["item"]["handoff_id"],self.handoff.handoff_id)
+        self.assertFalse(repeated["item"]["new_reservation"])
+
+        status,pending=self._req("/v1/pending",token=token_a)
+        self.assertEqual(status,200,pending)
+        self.assertEqual(pending["pending"],[])
+
+        token_b=self._pair_browser("safari-browser-b")
+        status,blocked=self._req("/v1/open-next",method="POST",body={},token=token_b)
+        self.assertEqual(status,200,blocked)
+        self.assertIsNone(blocked["item"])
+
+        status,released=self._req(
+            "/v1/release-start",method="POST",
+            body={"handoff_id":self.handoff.handoff_id},token=token_a,
+        )
+        self.assertEqual(status,200,released)
+        self.assertTrue(released["released"])
+
+        status,reopened=self._req("/v1/open-next",method="POST",body={},token=token_b)
+        self.assertEqual(status,200,reopened)
+        self.assertEqual(reopened["item"]["handoff_id"],self.handoff.handoff_id)
+        self.assertTrue(reopened["item"]["new_reservation"])
+
+    def test_claim_from_browser_starting_reservation_clears_reservation_fields(self):
+        token=self._pair_browser("safari-browser-a")
+        status,opened=self._req("/v1/open-next",method="POST",body={},token=token)
+        self.assertEqual(status,200,opened)
+        self.assertEqual(opened["item"]["handoff_id"],self.handoff.handoff_id)
+        lease=self.service.claim_handoff("job-a",self.handoff.nonce,"conversation-b")
+        self.assertGreater(lease.generation,1)
+        row=self.store.conn.execute(
+            "SELECT state,nonce_secret,starting_by,starting_at,starting_expires_at FROM handoffs WHERE handoff_id=?",
+            (self.handoff.handoff_id,),
+        ).fetchone()
+        self.assertEqual(row["state"],"claimed")
+        self.assertIsNone(row["nonce_secret"])
+        self.assertIsNone(row["starting_by"])
+        self.assertIsNone(row["starting_at"])
+        self.assertIsNone(row["starting_expires_at"])
 
 if __name__=="__main__": unittest.main()
