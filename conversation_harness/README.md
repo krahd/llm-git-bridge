@@ -32,6 +32,24 @@ bash conversation_harness/install.sh --activate
 
 Activation touches only `net.laurenzo.chatgpt-conversation-harness-v1`. It does not unload or restart any Shell Bridge label.
 
+## Temporary Safari pilot (no Xcode required)
+
+Current Safari can load a WebExtension folder temporarily for development, so the v1 browser pilot does not depend on a working Xcode installation. The installer stages the canonical extension source at:
+
+```text
+~/.local/share/chatgpt-conversation-harness-v1/safari-extension/
+```
+
+In Safari, enable **Show features for web developers**, open **Settings > Developer**, allow unsigned extensions if prompted, choose **Add Temporary Extension…**, and select that staged folder. Safari removes temporary extensions after 24 hours or when Safari quits, so this is a development/pilot path rather than distribution.
+
+Then run:
+
+```bash
+~/.local/share/chatgpt-conversation-harness-v1/bin/harness pair
+```
+
+Enter the one-time code in the extension popup. The extension receives only the scoped loopback bearer token and still leaves the final ChatGPT Send action to the user. Xcode packaging remains the route for a durable/distributable Safari containing app, but is not required for the v1 acceptance pilot.
+
 ## Local protocol
 
 The daemon listens on a user-only Unix socket:
