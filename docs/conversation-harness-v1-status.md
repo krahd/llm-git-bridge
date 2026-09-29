@@ -1,6 +1,6 @@
 # Conversation Harness v1 — implementation status
 
-Status: DEPLOYED — daemon/CLI and live handoff acceptance passed; manual Safari/ChatGPT pilot pending
+Status: DEPLOYED — daemon/CLI, live handoff, and browser-readiness diagnostics passed; manual Safari/ChatGPT pilot pending
 Date: 2026-09-28
 
 ## Verified complete
@@ -32,6 +32,15 @@ The original architecture plan selected Safari native messaging. The implementat
 - Live job `selftest-handoff-20260929-0523` exercised the running Unix-socket daemon: actor A acquired generation 1, created a handoff, actor B claimed it at generation 2, the continuation projection exposed the claimed handoff and new lease, and the event log recorded `job_created`, `lease_acquired`, `handoff_created`, and `handoff_claimed`.
 - The self-test then transitioned the job to terminal `completed`, leaving no actionable pilot job behind.
 - The first client attempt intentionally became a recovery exercise: a flat lease object was rejected with `validation_error` because mutating lease-bound protocol calls require the token under `args.lease`. The same durable job was inspected and resumed with a new request ID and the correct lease envelope; no completed mutation was replayed. This confirms fail-closed protocol validation and the intended missing-delta recovery discipline in the deployed runtime.
+
+## Browser-pilot UX and deployment acceptance — 2026-09-29
+
+- Browser-pilot UX was integrated as canonical commit `ae545822eeb0f56f6022784dbd418062503fc0d9`; independent `git ls-remote` verification matched `origin/main`.
+- The full repository suite passed 368/368 tests before integration, with `git diff --check` clean.
+- The installed CLI now exposes `harness browser-status`, a read-only readiness check for the loopback browser API and staged Safari extension; it creates no pairing secret. The Safari popup reports harness availability, paired state, and pending-handoff count, and clears a stale bearer token after authentication failure.
+- The first harness-only activation attempt staged the canonical files successfully but hit a transient `launchctl bootstrap` I/O error after removing the old harness service. Recovery inspected the actual install/LaunchAgent/socket state instead of replaying installation: Shell Bridge v5 remained PID `38449`, canonical `ae545822…` files were present, the plist was valid, and the harness service was absent.
+- Only the missing launchd activation was then applied. Harness ping and `browser-status` passed, the harness is running as PID `61410`, and Shell Bridge v5 remained PID `38449`.
+- Pairing remains intentionally explicit and short-lived: run `browser-status` first, load the temporary Safari extension, and only then generate the one-time pairing code.
 
 ## Browser pilot path
 
