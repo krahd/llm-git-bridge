@@ -6,9 +6,11 @@ import os
 from pathlib import Path
 import socket
 import socketserver
+import threading
 from typing import Any
 
 from .local_protocol import LocalProtocol, MAX_MESSAGE_BYTES
+from .browser_api import BrowserAPIServer, DEFAULT_HOST, DEFAULT_PORT
 from .runtime import database_path, socket_path, state_dir
 from .service import HarnessService
 from .sqlite_store import SQLiteHarnessStore
@@ -76,13 +78,18 @@ def request(message: dict[str, Any], *, path: str | Path | None = None, timeout:
     return json.loads(bytes(chunks).decode("utf-8"))
 
 
-def serve_forever(*, db: str | Path | None = None, sock: str | Path | None = None) -> None:
+def serve_forever(*, db: str | Path | None = None, sock: str | Path | None = None, http_host: str = DEFAULT_HOST, http_port: int = DEFAULT_PORT) -> None:
     root = state_dir()
     root.mkdir(parents=True, exist_ok=True, mode=0o700)
-    store = SQLiteHarnessStore(Path(db) if db else database_path())
+    db_file = Path(db) if db else database_path()
+    store = SQLiteHarnessStore(db_file)
+    http = BrowserAPIServer((http_host, int(http_port)), db_file)
+    http_thread = threading.Thread(target=http.serve_forever, kwargs={"poll_interval":0.25}, daemon=True)
+    http_thread.start()
     try:
         protocol = LocalProtocol(HarnessService(store))
         with HarnessUnixServer(Path(sock) if sock else socket_path(), protocol) as server:
             server.serve_forever(poll_interval=0.5)
     finally:
+        http.shutdown(); http.server_close(); http_thread.join(timeout=2)
         store.close()

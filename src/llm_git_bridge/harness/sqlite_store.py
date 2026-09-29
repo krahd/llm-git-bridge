@@ -82,6 +82,7 @@ class SQLiteHarnessStore:
                 handoff_id TEXT PRIMARY KEY,
                 job_id TEXT NOT NULL REFERENCES jobs(job_id) ON DELETE CASCADE,
                 nonce_hash TEXT NOT NULL UNIQUE,
+                nonce_secret TEXT,
                 state TEXT NOT NULL,
                 created_at REAL NOT NULL,
                 expires_at REAL NOT NULL,
@@ -102,6 +103,19 @@ class SQLiteHarnessStore:
                 created_at REAL NOT NULL,
                 finished_at REAL,
                 UNIQUE(job_id, idempotency_key)
+            );
+            CREATE TABLE IF NOT EXISTS pairing_codes(
+                code_hash TEXT PRIMARY KEY,
+                created_at REAL NOT NULL,
+                expires_at REAL NOT NULL,
+                used_at REAL
+            );
+            CREATE TABLE IF NOT EXISTS browser_tokens(
+                token_hash TEXT PRIMARY KEY,
+                client_id TEXT NOT NULL,
+                created_at REAL NOT NULL,
+                last_used_at REAL NOT NULL,
+                revoked_at REAL
             );
             CREATE TABLE IF NOT EXISTS protocol_requests(
                 request_id TEXT PRIMARY KEY,

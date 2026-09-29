@@ -1135,3 +1135,8 @@ To make coexistence fail-safe rather than conventional, v1 uses a separate runti
 It must also use a distinct LaunchAgent label, PID/lock files, socket path, browser/native messaging identifier, and job namespace. Harness installation/deployment must never restart, replace, reconfigure, or write into the live `chatgpt-shell-bridge` runtime. Shared Git repository state is coordinated only through existing workspace/resource safety.
 
 Rollout is therefore opt-in, not migration-driven: build and test harness v1 in parallel; pilot one or more new conversations/jobs; retain v5 unchanged as the stable path; expand usage only where the harness is useful. A future Cloudflare control plane remains optional and does not imply retirement of either local service.
+
+
+## Browser transport correction — adversarial audit 3
+
+Implementation testing invalidated one Stage 1 assumption in the earlier plan: a Safari native app extension is sandboxed, so treating it as if it could simply open the harness Unix socket under `~/.local/state` is not a sound default. Apple documents app groups for sharing data between a containing app and native extension. Harness v1 therefore keeps the Unix socket as the private CLI/control path and adds a separately authenticated HTTP endpoint bound only to `127.0.0.1:47653` for the WebExtension. Pairing is one-time and short-lived; browser bearer tokens are random and only their hashes are persisted. The extension requests only the exact loopback origin and `https://chatgpt.com/*`. It opens and fills a new conversation but deliberately does not press Send.

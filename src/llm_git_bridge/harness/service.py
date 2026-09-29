@@ -48,7 +48,7 @@ class HarnessService:
             (job_id, now),
         ).fetchall()
         for row in rows:
-            conn.execute("UPDATE handoffs SET state='expired' WHERE handoff_id=?", (row["handoff_id"],))
+            conn.execute("UPDATE handoffs SET state='expired',nonce_secret=NULL WHERE handoff_id=?", (row["handoff_id"],))
             self._event(conn, job_id, "handoff_expired", {"handoff_id": row["handoff_id"]}, now)
 
     def create_job(
@@ -208,8 +208,8 @@ class HarnessService:
             nonce_hash = hashlib.sha256(nonce.encode("utf-8")).hexdigest()
             expires = now + ttl
             conn.execute(
-                "INSERT INTO handoffs(handoff_id,job_id,nonce_hash,state,created_at,expires_at) VALUES(?,?,?,'pending',?,?)",
-                (handoff_id, token.job_id, nonce_hash, now, expires),
+                "INSERT INTO handoffs(handoff_id,job_id,nonce_hash,nonce_secret,state,created_at,expires_at) VALUES(?,?,?,?,'pending',?,?)",
+                (handoff_id, token.job_id, nonce_hash, nonce, now, expires),
             )
             conn.execute("DELETE FROM leases WHERE job_id=?", (token.job_id,))
             conn.execute("UPDATE jobs SET version=version+1,updated_at=? WHERE job_id=?", (now, token.job_id))
@@ -240,7 +240,7 @@ class HarnessService:
             lease_id = secrets.token_hex(16)
             expires = now + ttl
             conn.execute(
-                "UPDATE handoffs SET state='claimed',claimed_at=?,claimed_by=? WHERE handoff_id=? AND state='pending'",
+                "UPDATE handoffs SET state='claimed',claimed_at=?,claimed_by=?,nonce_secret=NULL WHERE handoff_id=? AND state='pending'",
                 (now, holder_id, handoff["handoff_id"]),
             )
             conn.execute(
@@ -306,6 +306,81 @@ class HarnessService:
             )
             self._event(conn, token.job_id, "operation_finished", {"operation_id": operation_id, "status": status}, now)
             return dict(conn.execute("SELECT * FROM operations WHERE operation_id=?", (operation_id,)).fetchone())
+
+
+    def create_pairing_code(self, *, ttl: float = 300.0) -> dict[str, Any]:
+        ttl = validate_ttl(ttl, minimum=30.0, maximum=1800.0)
+        now = self._now()
+        code = secrets.token_urlsafe(9)
+        code_hash = hashlib.sha256(code.encode("utf-8")).hexdigest()
+        with self.store.transaction() as conn:
+            conn.execute("DELETE FROM pairing_codes WHERE expires_at<=? OR used_at IS NOT NULL", (now,))
+            conn.execute(
+                "INSERT INTO pairing_codes(code_hash,created_at,expires_at) VALUES(?,?,?)",
+                (code_hash, now, now + ttl),
+            )
+        return {"code": code, "expires_at": now + ttl}
+
+    def consume_pairing_code(self, code: str, client_id: str) -> dict[str, Any]:
+        if not isinstance(code, str) or len(code) < 8 or len(code) > 64:
+            raise ValidationError("invalid pairing code")
+        validate_token(client_id, "client_id")
+        now = self._now()
+        code_hash = hashlib.sha256(code.encode("utf-8")).hexdigest()
+        token = secrets.token_urlsafe(32)
+        token_hash = hashlib.sha256(token.encode("utf-8")).hexdigest()
+        with self.store.transaction() as conn:
+            row = conn.execute("SELECT * FROM pairing_codes WHERE code_hash=?", (code_hash,)).fetchone()
+            if row is None or row["used_at"] is not None or float(row["expires_at"]) <= now:
+                raise Conflict("pairing code is invalid or expired")
+            conn.execute("UPDATE pairing_codes SET used_at=? WHERE code_hash=? AND used_at IS NULL", (now, code_hash))
+            conn.execute(
+                "INSERT INTO browser_tokens(token_hash,client_id,created_at,last_used_at) VALUES(?,?,?,?)",
+                (token_hash, client_id, now, now),
+            )
+        return {"token": token, "client_id": client_id}
+
+    def authenticate_browser(self, token: str) -> str:
+        if not isinstance(token, str) or len(token) < 32:
+            raise Conflict("invalid browser token")
+        now = self._now()
+        token_hash = hashlib.sha256(token.encode("utf-8")).hexdigest()
+        with self.store.transaction() as conn:
+            row = conn.execute(
+                "SELECT * FROM browser_tokens WHERE token_hash=? AND revoked_at IS NULL", (token_hash,)
+            ).fetchone()
+            if row is None:
+                raise Conflict("invalid browser token")
+            conn.execute("UPDATE browser_tokens SET last_used_at=? WHERE token_hash=?", (now, token_hash))
+            return row["client_id"]
+
+    def pending_reentries(self) -> list[dict[str, Any]]:
+        now = self._now()
+        with self.store.transaction() as conn:
+            job_ids = [row[0] for row in conn.execute("SELECT DISTINCT job_id FROM handoffs WHERE state='pending'").fetchall()]
+            for job_id in job_ids:
+                self._expire(conn, job_id, now)
+            rows = conn.execute(
+                """SELECT h.handoff_id,h.job_id,h.nonce_secret,h.created_at,h.expires_at,
+                          j.title,j.next_action,j.lifecycle
+                   FROM handoffs h JOIN jobs j ON j.job_id=h.job_id
+                   WHERE h.state='pending' AND h.expires_at>? AND h.nonce_secret IS NOT NULL
+                   ORDER BY h.created_at""",
+                (now,),
+            ).fetchall()
+            out=[]
+            for row in rows:
+                prompt=(
+                    f"Resume harness job {row['job_id']} using handoff {row['handoff_id']} "
+                    f"with token {row['nonce_secret']}. Read the durable continuation state first, "
+                    "claim the handoff, reconcile any in-flight operation before mutation, and continue from next_action."
+                )
+                out.append({
+                    "handoff_id": row["handoff_id"], "job_id": row["job_id"], "title": row["title"],
+                    "created_at": row["created_at"], "expires_at": row["expires_at"],
+                    "next_action": row["next_action"], "lifecycle": row["lifecycle"], "prompt": prompt,
+                })
+            return out
 
     def continuation(self, job_id: str) -> dict[str, Any]:
         validate_token(job_id, "job_id")

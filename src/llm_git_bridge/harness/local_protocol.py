@@ -14,7 +14,7 @@ PROTOCOL_VERSION = 1
 MAX_MESSAGE_BYTES = 1_000_000
 MUTATING_ACTIONS = frozenset({
     "create_job", "acquire_lease", "renew_lease", "release_lease", "update_job",
-    "create_handoff", "claim_handoff", "start_operation", "finish_operation",
+    "create_handoff", "claim_handoff", "start_operation", "finish_operation", "create_pairing_code",
 })
 
 
@@ -137,6 +137,8 @@ class LocalProtocol:
         s = self.service
         if action == "ping":
             return {"service": "chatgpt-conversation-harness-v1", "protocol": PROTOCOL_VERSION}
+        if action == "create_pairing_code":
+            return s.create_pairing_code(ttl=args.get("ttl", 300.0))
         if action == "create_job":
             return s.create_job(**args)
         if action == "get_job":
