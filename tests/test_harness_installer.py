@@ -32,6 +32,10 @@ class HarnessInstallerTests(unittest.TestCase):
         self.assertIn('BOOTSTRAPPED=0', text)
         self.assertIn('socket_is_live()', text)
         self.assertIn('previous harness daemon still owns the Unix socket', text)
+        self.assertIn('OLD_PID=', text)
+        self.assertIn('kill -0 "$OLD_PID"', text)
+        self.assertIn('rm -f "$STATE_DIR/harness.sock"', text)
+        self.assertIn('refusing to remove unexpected non-socket harness.sock', text)
         self.assertIn('browser-status >/dev/null 2>&1', text)
 
     def test_installer_drops_stale_bytecode_and_hashes_safari_extension(self):
