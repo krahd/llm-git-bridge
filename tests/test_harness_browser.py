@@ -104,7 +104,9 @@ class BrowserTests(unittest.TestCase):
     def test_manifest_is_narrow(self):
         manifest=json.loads(MANIFEST.read_text())
         self.assertNotIn("<all_urls>",json.dumps(manifest))
-        self.assertEqual(set(manifest["host_permissions"]),{"https://chatgpt.com/*","http://127.0.0.1:47653/*"})
+        self.assertEqual(set(manifest["host_permissions"]),{"http://127.0.0.1:47653/*"})
+        self.assertEqual(set(manifest["optional_host_permissions"]),{"https://chatgpt.com/*"})
+        self.assertIn("scripting",manifest["permissions"])
         self.assertNotIn("nativeMessaging",manifest["permissions"])
         self.assertNotIn("activeTab",manifest["permissions"])
     def test_background_persists_pending_prompt_across_mv3_worker_restarts(self):
@@ -121,6 +123,21 @@ class BrowserTests(unittest.TestCase):
         self.assertIn("age > PENDING_TTL_MS",background)
         self.assertIn("age < 0",background)
         self.assertIn("browser.storage.local.remove(key)",background)
+
+    def test_open_next_requires_chatgpt_permission_before_handoff_reservation(self):
+        popup=POPUP.read_text()
+        self.assertIn("browser.permissions.contains",popup)
+        self.assertIn("browser.permissions.request",popup)
+        self.assertIn("await ensureChatGPTAccess()",popup)
+        self.assertLess(popup.index("await ensureChatGPTAccess()"),popup.index('fetch(BASE + "/v1/open-next"'))
+
+    def test_background_waits_for_chatgpt_and_has_explicit_scripting_fallback(self):
+        background=BACKGROUND.read_text()
+        self.assertIn("waitForTabComplete",background)
+        self.assertIn("browser.scripting.executeScript",background)
+        self.assertIn("injectedFillPrompt",background)
+        self.assertIn("filled: false",background)
+        self.assertIn("Confirm Conversation Harness has access to chatgpt.com",background)
 
     def test_content_script_waits_for_async_composer_and_wakes_background(self):
         content=CONTENT.read_text()

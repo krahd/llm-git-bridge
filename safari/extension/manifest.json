@@ -1,14 +1,14 @@
 {
   "manifest_version": 3,
   "name": "Conversation Harness",
-  "version": "0.1.1",
+  "version": "0.1.2",
   "description": "Open a fresh ChatGPT conversation for a durable harness handoff.",
   "permissions": [
     "storage",
-    "tabs"
+    "tabs",
+    "scripting"
   ],
   "host_permissions": [
-    "https://chatgpt.com/*",
     "http://127.0.0.1:47653/*"
   ],
   "background": {
@@ -28,5 +28,8 @@
       ],
       "run_at": "document_idle"
     }
+  ],
+  "optional_host_permissions": [
+    "https://chatgpt.com/*"
   ]
 }

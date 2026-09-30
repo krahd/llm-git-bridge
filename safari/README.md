@@ -6,6 +6,10 @@ The extension uses a narrow authenticated loopback API on `127.0.0.1:47653`. Ear
 
 The extension requests only two hosts: `chatgpt.com` and the exact loopback origin. It never requests `<all_urls>`, never extracts ChatGPT cookies/tokens, never calls private ChatGPT APIs, and does not submit prompts automatically. It opens `https://chatgpt.com/`, fills a narrowly identified composer when possible, and leaves the final Send action visible to the user.
 
+## ChatGPT website access
+
+Safari requires a separate user grant before a WebExtension may read or modify `chatgpt.com`, even when the extension declares that site. The popup requests this access when **Open next handoff** is pressed, before the handoff is reserved. If Safari denies the request, grant Conversation Harness access to `chatgpt.com` in Safari's extension website settings and retry. No handoff is reserved until access is granted.
+
 ## Pairing
 
 1. Verify browser-pilot readiness without creating a pairing secret:
