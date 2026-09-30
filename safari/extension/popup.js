@@ -80,7 +80,6 @@ async function releaseStart(token, handoffId) {
 }
 
 async function ensureChatGPTAccess() {
-  if (await browser.permissions.contains({origins: [CHATGPT_ORIGIN]})) return;
   const granted = await browser.permissions.request({origins: [CHATGPT_ORIGIN]});
   if (!granted) {
     throw new Error("Allow Conversation Harness access to chatgpt.com in Safari, then try again.");
@@ -88,9 +87,11 @@ async function ensureChatGPTAccess() {
 }
 
 async function openNext() {
+  // permissions.request must be the first awaited browser call from the click handler;
+  // otherwise Safari may no longer treat it as a user-initiated permission request.
+  await ensureChatGPTAccess();
   const {token} = await browser.storage.local.get("token");
   if (!token) throw new Error("Pair this browser first.");
-  await ensureChatGPTAccess();
   const response = await fetch(BASE + "/v1/open-next", {
     method: "POST",
     headers: {"Content-Type":"application/json"},
