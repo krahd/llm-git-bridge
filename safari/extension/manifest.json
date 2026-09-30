@@ -1,7 +1,7 @@
 {
   "manifest_version": 3,
   "name": "Conversation Harness",
-  "version": "0.1.3",
+  "version": "0.1.4",
   "description": "Open a fresh ChatGPT conversation for a durable harness handoff.",
   "permissions": [
     "storage",
