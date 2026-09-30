@@ -63,6 +63,27 @@ class BrowserTests(unittest.TestCase):
         self.assertIn(self.handoff.nonce,reserved["prompt"])
         self.assertIn("ChatGPT Shell Bridge",reserved["prompt"])
         self.assertIn("parallel Conversation Harness v1",reserved["prompt"])
+
+    def test_post_body_token_authentication_for_safari_loopback(self):
+        pairing=self.service.create_pairing_code(ttl=300)["code"]
+        status,body=self._req("/pair",method="POST",body={"code":pairing,"client_id":"safari-body-token"})
+        self.assertEqual(status,200,body); token=body["token"]
+        status,pending=self._req("/v1/pending",method="POST",body={"token":token})
+        self.assertEqual(status,200,pending)
+        self.assertEqual(len(pending["pending"]),1)
+        status,opened=self._req("/v1/open-next",method="POST",body={"token":token})
+        self.assertEqual(status,200,opened)
+        self.assertEqual(opened["item"]["handoff_id"],self.handoff.handoff_id)
+        status,released=self._req(
+            "/v1/release-start",method="POST",
+            body={"token":token,"handoff_id":self.handoff.handoff_id},
+        )
+        self.assertEqual(status,200,released)
+        self.assertTrue(released["released"])
+        popup=POPUP.read_text()
+        self.assertIn("JSON.stringify({token})",popup)
+        self.assertNotIn('Authorization:"Bearer "+token',popup)
+
     def test_pending_requires_extension_origin_and_token(self):
         status,_=self._req("/v1/pending")
         self.assertEqual(status,401)

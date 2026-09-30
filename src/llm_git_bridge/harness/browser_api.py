@@ -133,9 +133,9 @@ class BrowserAPIHandler(BaseHTTPRequestHandler):
                 except HarnessError as exc:
                     self._send(403,{"ok":False,"error":str(exc)}); return
                 self._send(200,{"ok":True,**result}); return
-            token=self._bearer()
+            token=self._bearer() or body.get("token")
             if not token:
-                self._send(401,{"ok":False,"error":"bearer token required"}); return
+                self._send(401,{"ok":False,"error":"browser token required"}); return
             try:
                 client_id=service.authenticate_browser(token)
             except HarnessError as exc:

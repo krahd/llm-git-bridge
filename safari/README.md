@@ -16,7 +16,7 @@ The extension requests only two hosts: `chatgpt.com` and the exact loopback orig
 3. Copy the short-lived one-time code into the extension popup.
 4. The extension receives a random bearer token. Only its SHA-256 hash is retained by the harness database. On later popup opens it reports whether the harness is reachable, whether the browser is paired, and how many handoffs are pending.
 
-The browser token protects the loopback API from ordinary webpage access. The server also accepts requests only from WebExtension origins and binds exclusively to loopback. This is not a defence against malicious software already executing as the same macOS user; that remains outside the v1 threat boundary.
+Safari sends the browser token in extension-origin JSON POST bodies rather than the `Authorization` header, because Safari may suppress that header on extension-to-loopback requests; the loopback server retains bearer-header support for compatible clients. The browser token protects the loopback API from ordinary webpage access. The server also accepts requests only from WebExtension origins and binds exclusively to loopback. This is not a defence against malicious software already executing as the same macOS user; that remains outside the v1 threat boundary.
 
 ## Development packaging
 
