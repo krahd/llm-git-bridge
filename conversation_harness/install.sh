@@ -220,7 +220,9 @@ if [ "$BOOTSTRAPPED" -ne 1 ]; then
   echo "ERROR: harness LaunchAgent bootstrap failed" >&2
   exit 1
 fi
-launchctl kickstart -k "gui/${UID_NOW}/${LABEL}"
+# bootstrap of this RunAtLoad/KeepAlive label already starts the new daemon. Do not
+# immediately kickstart -k it: killing the freshly started process can leave a
+# transient socket pathname and recreate the exact restart race fenced above.
 
 for _ in 1 2 3 4 5 6 7 8 9 10 11 12 13 14 15; do
   if "$BIN_DIR/harness" call '{"protocol":1,"action":"ping","args":{}}' >/dev/null 2>&1 \n     && "$BIN_DIR/harness" browser-status >/dev/null 2>&1; then

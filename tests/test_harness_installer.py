@@ -37,6 +37,7 @@ class HarnessInstallerTests(unittest.TestCase):
         self.assertIn('rm -f "$STATE_DIR/harness.sock"', text)
         self.assertIn('refusing to remove unexpected non-socket harness.sock', text)
         self.assertIn('browser-status >/dev/null 2>&1', text)
+        self.assertNotIn('launchctl kickstart -k \"gui/${UID_NOW}/${LABEL}\"', text)
 
     def test_installer_drops_stale_bytecode_and_hashes_safari_extension(self):
         text = INSTALLER.read_text()
