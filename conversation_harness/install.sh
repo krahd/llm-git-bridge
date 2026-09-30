@@ -148,11 +148,13 @@ fi
 # The label disappearing is not proof that the predecessor process is gone. Wait
 # for the captured PID before considering any leftover socket pathname stale.
 if [ -n "$OLD_PID" ]; then
-  for _ in $(seq 1 50); do
+  OLD_PID_WAIT=0
+  while [ "$OLD_PID_WAIT" -lt 50 ]; do
     if ! kill -0 "$OLD_PID" >/dev/null 2>&1; then
       OLD_PID=""
       break
     fi
+    OLD_PID_WAIT=$((OLD_PID_WAIT + 1))
     sleep 0.1
   done
   if [ -n "$OLD_PID" ] && kill -0 "$OLD_PID" >/dev/null 2>&1; then
