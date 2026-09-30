@@ -19,8 +19,8 @@ async function refreshStatus() {
 
   const response = await fetch(BASE + "/v1/pending", {
     method: "POST",
-    headers: {Authorization:"Bearer "+token, "Content-Type":"application/json"},
-    body: "{}"
+    headers: {"Content-Type":"application/json"},
+    body: JSON.stringify({token})
   });
   if (response.status === 401 || response.status === 403) {
     await browser.storage.local.remove("token");
@@ -70,8 +70,8 @@ async function releaseStart(token, handoffId) {
   try {
     await fetch(BASE + "/v1/release-start", {
       method: "POST",
-      headers: {Authorization:"Bearer "+token, "Content-Type":"application/json"},
-      body: JSON.stringify({handoff_id: handoffId})
+      headers: {"Content-Type":"application/json"},
+      body: JSON.stringify({token, handoff_id: handoffId})
     });
   } catch (_) {
     // The short server-side starting lease will recover even if release delivery fails.
@@ -83,8 +83,8 @@ async function openNext() {
   if (!token) throw new Error("Pair this browser first.");
   const response = await fetch(BASE + "/v1/open-next", {
     method: "POST",
-    headers: {Authorization:"Bearer "+token, "Content-Type":"application/json"},
-    body: "{}"
+    headers: {"Content-Type":"application/json"},
+    body: JSON.stringify({token})
   });
   const body = await response.json();
   if (!body.ok) throw new Error(body.error || "Harness unavailable");
