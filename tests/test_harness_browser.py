@@ -124,12 +124,14 @@ class BrowserTests(unittest.TestCase):
         self.assertIn("age < 0",background)
         self.assertIn("browser.storage.local.remove(key)",background)
 
-    def test_open_next_requires_chatgpt_permission_before_handoff_reservation(self):
+    def test_open_next_requests_chatgpt_permission_directly_from_user_action(self):
         popup=POPUP.read_text()
-        self.assertIn("browser.permissions.contains",popup)
+        self.assertNotIn("browser.permissions.contains",popup)
         self.assertIn("browser.permissions.request",popup)
-        self.assertIn("await ensureChatGPTAccess()",popup)
-        self.assertLess(popup.index("await ensureChatGPTAccess()"),popup.index('fetch(BASE + "/v1/open-next"'))
+        start=popup.index("async function openNext()")
+        open_next=popup[start:]
+        self.assertLess(open_next.index("await ensureChatGPTAccess()"),open_next.index('browser.storage.local.get("token")'))
+        self.assertLess(open_next.index("await ensureChatGPTAccess()"),open_next.index('fetch(BASE + "/v1/open-next"'))
 
     def test_background_waits_for_chatgpt_and_has_explicit_scripting_fallback(self):
         background=BACKGROUND.read_text()
