@@ -30,6 +30,8 @@ class HarnessInstallerTests(unittest.TestCase):
         self.assertIn('launchctl print "gui/${UID_NOW}/${LABEL}"', text)
         self.assertIn('for _ in 1 2 3; do', text)
         self.assertIn('BOOTSTRAPPED=0', text)
+        self.assertIn('socket_is_live()', text)
+        self.assertIn('previous harness daemon still owns the Unix socket', text)
         self.assertIn('browser-status >/dev/null 2>&1', text)
 
     def test_installer_drops_stale_bytecode_and_hashes_safari_extension(self):
