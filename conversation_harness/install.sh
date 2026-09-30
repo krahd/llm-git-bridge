@@ -139,6 +139,34 @@ if launchctl print "gui/${UID_NOW}/${LABEL}" >/dev/null 2>&1; then
   exit 1
 fi
 
+# launchd can remove the label before the old daemon has released its Unix socket.
+# Fence on socket liveness so the replacement daemon never races an active predecessor.
+socket_is_live() {
+  python3 - "$STATE_DIR/harness.sock" <<'PY_SOCKET'
+import socket, sys
+sock = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
+sock.settimeout(0.2)
+try:
+    sock.connect(sys.argv[1])
+except OSError:
+    raise SystemExit(1)
+else:
+    raise SystemExit(0)
+finally:
+    sock.close()
+PY_SOCKET
+}
+for _ in 1 2 3 4 5 6 7 8 9 10 11 12 13 14 15 16 17 18 19 20; do
+  if ! socket_is_live; then
+    break
+  fi
+  sleep 0.1
+done
+if socket_is_live; then
+  echo "ERROR: previous harness daemon still owns the Unix socket" >&2
+  exit 1
+fi
+
 BOOTSTRAPPED=0
 for _ in 1 2 3; do
   if launchctl bootstrap "gui/${UID_NOW}" "$PLIST" >/dev/null 2>&1; then
