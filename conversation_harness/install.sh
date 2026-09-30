@@ -123,6 +123,12 @@ fi
 
 command -v launchctl >/dev/null 2>&1 || { echo "ERROR: launchctl is required for --activate" >&2; exit 1; }
 UID_NOW="$(id -u)"
+# Capture the exact predecessor before bootout. launchd may remove the label before
+# that process has fully exited and released/unlinked its Unix socket.
+OLD_PID="$(launchctl print "gui/${UID_NOW}/${LABEL}" 2>/dev/null | awk '$1 == "pid" && $2 == "=" {print $3; exit}' || true)"
+case "$OLD_PID" in
+  ''|*[!0-9]*) OLD_PID="" ;;
+esac
 # Deliberately operate on this label only. Never unload or restart the shell bridge.
 launchctl bootout "gui/${UID_NOW}/${LABEL}" >/dev/null 2>&1 || true
 
@@ -137,6 +143,24 @@ done
 if launchctl print "gui/${UID_NOW}/${LABEL}" >/dev/null 2>&1; then
   echo "ERROR: harness LaunchAgent did not stop cleanly" >&2
   exit 1
+fi
+
+# The label disappearing is not proof that the predecessor process is gone. Wait
+# for the captured PID before considering any leftover socket pathname stale.
+if [ -n "$OLD_PID" ]; then
+  OLD_PID_WAIT=0
+  while [ "$OLD_PID_WAIT" -lt 50 ]; do
+    if ! kill -0 "$OLD_PID" >/dev/null 2>&1; then
+      OLD_PID=""
+      break
+    fi
+    OLD_PID_WAIT=$((OLD_PID_WAIT + 1))
+    sleep 0.1
+  done
+  if [ -n "$OLD_PID" ] && kill -0 "$OLD_PID" >/dev/null 2>&1; then
+    echo "ERROR: previous harness daemon process did not exit cleanly" >&2
+    exit 1
+  fi
 fi
 
 # launchd can remove the label before the old daemon has released its Unix socket.
@@ -165,6 +189,17 @@ done
 if socket_is_live; then
   echo "ERROR: previous harness daemon still owns the Unix socket" >&2
   exit 1
+fi
+
+# A terminated predecessor can leave a filesystem entry after its socket is no
+# longer live. Remove only a socket entry, and fail closed on any other file type.
+if [ -e "$STATE_DIR/harness.sock" ]; then
+  if [ -S "$STATE_DIR/harness.sock" ]; then
+    rm -f "$STATE_DIR/harness.sock"
+  else
+    echo "ERROR: refusing to remove unexpected non-socket harness.sock" >&2
+    exit 1
+  fi
 fi
 
 BOOTSTRAPPED=0
