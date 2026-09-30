@@ -28,6 +28,8 @@ def _parser() -> argparse.ArgumentParser:
     pair = sub.add_parser("pair", help="create a one-time browser pairing code")
     pair.add_argument("--socket", default=str(socket_path()))
     pair.add_argument("--ttl", type=float, default=300.0)
+    ping = sub.add_parser("ping", help="check the local harness Unix-socket service")
+    ping.add_argument("--socket", default=str(socket_path()))
     browser_status = sub.add_parser("browser-status", help="check browser-pilot readiness without creating a pairing code")
     browser_status.add_argument("--http-host", default=DEFAULT_BROWSER_HOST)
     browser_status.add_argument("--http-port", type=int, default=DEFAULT_BROWSER_PORT)
@@ -92,6 +94,10 @@ def main(argv: list[str] | None = None) -> int:
     if args.command == "serve":
         serve_forever(db=args.db, sock=args.socket, http_host=args.http_host, http_port=args.http_port)
         return 0
+    if args.command == "ping":
+        response = request({"protocol": 1, "action": "ping", "args": {}}, path=Path(args.socket))
+        print(json.dumps(response, sort_keys=True, indent=2))
+        return 0 if response.get("ok") else 1
     if args.command == "browser-status":
         status = _browser_status(args.http_host, args.http_port, args.timeout)
         print(json.dumps(status, sort_keys=True, indent=2))

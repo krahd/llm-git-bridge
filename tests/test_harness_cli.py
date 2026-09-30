@@ -1,6 +1,8 @@
 from __future__ import annotations
 
+import contextlib
 import hashlib
+import io
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 import json
 import os
@@ -9,8 +11,10 @@ import sys
 import tempfile
 import threading
 import unittest
+from unittest import mock
 from pathlib import Path
 
+from llm_git_bridge.harness import cli as harness_cli
 from llm_git_bridge.harness.browser_api import BrowserAPIServer
 
 
@@ -36,10 +40,29 @@ class HarnessCLITests(unittest.TestCase):
         self.assertEqual(proc.returncode, 0, proc.stderr)
         self.assertIn("llm-git-harness", proc.stdout)
         self.assertIn("browser-status", proc.stdout)
+        self.assertIn("ping", proc.stdout)
 
     def test_pyproject_installs_harness_command(self):
         text = Path("pyproject.toml").read_text()
         self.assertIn("llm-git-harness = \"llm_git_bridge.harness.cli:main\"", text)
+
+    def test_ping_command_uses_read_only_protocol_without_request_id(self):
+        response = {
+            "ok": True,
+            "protocol": 1,
+            "request_id": None,
+            "result": {"protocol": 1, "service": "chatgpt-conversation-harness-v1"},
+        }
+        with mock.patch.object(harness_cli, "request", return_value=response) as request_mock:
+            output = io.StringIO()
+            with contextlib.redirect_stdout(output):
+                rc = harness_cli.main(["ping", "--socket", "/tmp/harness-test.sock"])
+        self.assertEqual(rc, 0)
+        request_mock.assert_called_once_with(
+            {"protocol": 1, "action": "ping", "args": {}},
+            path=Path("/tmp/harness-test.sock"),
+        )
+        self.assertTrue(json.loads(output.getvalue())["ok"])
 
     def test_browser_status_checks_loopback_and_staged_extension_without_pairing(self):
         with tempfile.TemporaryDirectory() as tmp:
