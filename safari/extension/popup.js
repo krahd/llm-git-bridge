@@ -1,5 +1,6 @@
 const BASE = "http://127.0.0.1:47653";
 const status = document.getElementById("status");
+const CHATGPT_ORIGIN = "https://chatgpt.com/*";
 
 async function refreshStatus() {
   try {
@@ -78,9 +79,18 @@ async function releaseStart(token, handoffId) {
   }
 }
 
+async function ensureChatGPTAccess() {
+  if (await browser.permissions.contains({origins: [CHATGPT_ORIGIN]})) return;
+  const granted = await browser.permissions.request({origins: [CHATGPT_ORIGIN]});
+  if (!granted) {
+    throw new Error("Allow Conversation Harness access to chatgpt.com in Safari, then try again.");
+  }
+}
+
 async function openNext() {
   const {token} = await browser.storage.local.get("token");
   if (!token) throw new Error("Pair this browser first.");
+  await ensureChatGPTAccess();
   const response = await fetch(BASE + "/v1/open-next", {
     method: "POST",
     headers: {"Content-Type":"application/json"},
@@ -95,7 +105,8 @@ async function openNext() {
     return;
   }
   try {
-    await browser.runtime.sendMessage({type:"openPrompt", prompt:item.prompt});
+    const opened = await browser.runtime.sendMessage({type:"openPrompt", prompt:item.prompt});
+    if (!opened?.filled) throw new Error(opened?.error || "ChatGPT opened, but Safari could not fill the prompt.");
   } catch (error) {
     await releaseStart(token, item.handoff_id);
     throw error;
