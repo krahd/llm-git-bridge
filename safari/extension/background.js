@@ -27,11 +27,11 @@ async function clearPending(tabId) {
 }
 
 function injectedFillPrompt(prompt) {
-  const candidates = [
+  const candidates = [...new Set([
     document.querySelector("textarea#prompt-textarea"),
     document.querySelector("#prompt-textarea[contenteditable='true']"),
     document.querySelector("[data-testid='prompt-textarea'][contenteditable='true']")
-  ].filter(Boolean);
+  ].filter(Boolean))];
   if (candidates.length !== 1) return false;
   const composer = candidates[0];
   composer.focus();

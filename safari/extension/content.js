@@ -1,8 +1,9 @@
 function findComposer() {
-  const candidates = [
+  const candidates = [...new Set([
     document.querySelector("textarea#prompt-textarea"),
-    document.querySelector("#prompt-textarea[contenteditable='true']")
-  ].filter(Boolean);
+    document.querySelector("#prompt-textarea[contenteditable='true']"),
+    document.querySelector("[data-testid='prompt-textarea'][contenteditable='true']")
+  ].filter(Boolean))];
   return candidates.length === 1 ? candidates[0] : null;
 }
 

@@ -2,6 +2,8 @@ from __future__ import annotations
 
 import json
 from pathlib import Path
+import shutil
+import subprocess
 import tempfile
 import threading
 import unittest
@@ -140,6 +142,49 @@ class BrowserTests(unittest.TestCase):
         self.assertIn("injectedFillPrompt",background)
         self.assertIn("filled: false",background)
         self.assertIn("Confirm Conversation Harness has access to chatgpt.com",background)
+
+    def test_scripting_fallback_deduplicates_overlapping_composer_selectors(self):
+        node=shutil.which("node")
+        if node is None:
+            self.skipTest("node is required for the Safari fallback regression")
+        script=r"""
+const fs=require("fs");
+const vm=require("vm");
+const source=fs.readFileSync(process.argv[1],"utf8");
+const composer={focus(){},textContent:"",dispatchEvent(){}};
+const browser={
+  storage:{local:{set:async()=>{},get:async()=>({}),remove:async()=>{}}},
+  scripting:{executeScript:async()=>[]},
+  tabs:{
+    sendMessage:async()=>({}),create:async()=>({id:1}),get:async()=>({status:"complete"}),
+    onUpdated:{addListener(){},removeListener(){}},onRemoved:{addListener(){}}
+  },
+  runtime:{onMessage:{addListener(){}}}
+};
+const document={querySelector(selector){
+  if(selector==="textarea#prompt-textarea") return null;
+  if(selector==="#prompt-textarea[contenteditable='true']") return composer;
+  if(selector==="[data-testid='prompt-textarea'][contenteditable='true']") return composer;
+  return null;
+}};
+class HTMLTextAreaElement {}
+class InputEvent { constructor(type,init){ this.type=type; this.init=init; } }
+const context={browser,document,HTMLTextAreaElement,InputEvent,setTimeout,clearTimeout,console};
+vm.createContext(context);
+vm.runInContext(source,context);
+if(context.injectedFillPrompt("hello") !== true) process.exit(10);
+if(composer.textContent !== "hello") process.exit(11);
+"""
+        completed=subprocess.run(
+            [node,"-e",script,str(BACKGROUND)],
+            text=True,capture_output=True,check=False,
+        )
+        self.assertEqual(completed.returncode,0,completed.stderr or completed.stdout)
+        background=BACKGROUND.read_text()
+        content=CONTENT.read_text()
+        self.assertIn("[...new Set([",background)
+        self.assertIn("[...new Set([",content)
+        self.assertIn("[data-testid='prompt-textarea'][contenteditable='true']",content)
 
     def test_content_script_waits_for_async_composer_and_wakes_background(self):
         content=CONTENT.read_text()
