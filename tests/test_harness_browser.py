@@ -49,6 +49,8 @@ class BrowserTests(unittest.TestCase):
         self.assertEqual(status,403)
         status,pending=self._req("/v1/pending",token=token)
         self.assertEqual(status,200); self.assertEqual(len(pending["pending"]),1)
+        status,post_pending=self._req("/v1/pending",method="POST",body={},token=token)
+        self.assertEqual(status,200); self.assertEqual(len(post_pending["pending"]),1)
         item=pending["pending"][0]
         self.assertEqual(item["job_id"],"job-a")
         self.assertNotIn("prompt",item)
@@ -67,6 +69,8 @@ class BrowserTests(unittest.TestCase):
         pairing=self.service.create_pairing_code(ttl=300)["code"]
         _,body=self._req("/pair",method="POST",body={"code":pairing,"client_id":"safari-test-client"})
         status,_=self._req("/v1/pending",token=body["token"],origin=False)
+        self.assertEqual(status,403)
+        status,_=self._req("/v1/pending",method="POST",body={},token=body["token"],origin=False)
         self.assertEqual(status,403)
     def test_claim_removes_pending_secret(self):
         pairing=self.service.create_pairing_code(ttl=300)["code"]
@@ -108,9 +112,14 @@ class BrowserTests(unittest.TestCase):
     def test_popup_reports_readiness_and_clears_stale_browser_token(self):
         popup=POPUP.read_text()
         self.assertIn('fetch(BASE + "/health")',popup)
+        self.assertIn('fetch(BASE + "/v1/pending", {',popup)
+        self.assertIn('method: "POST"',popup)
         self.assertIn('browser.storage.local.remove("token")',popup)
         self.assertIn("Harness ready. Pair this browser.",popup)
         self.assertIn("pending handoff",popup)
+        self.assertIn('status.textContent = "Pairing..."',popup)
+        self.assertIn("pairButton.disabled = true",popup)
+        self.assertIn("pairButton.disabled = false",popup)
 
 
     def _pair_browser(self, client_id):

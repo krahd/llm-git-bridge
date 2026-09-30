@@ -17,7 +17,11 @@ async function refreshStatus() {
     return;
   }
 
-  const response = await fetch(BASE + "/v1/pending", {headers:{Authorization:"Bearer "+token}});
+  const response = await fetch(BASE + "/v1/pending", {
+    method: "POST",
+    headers: {Authorization:"Bearer "+token, "Content-Type":"application/json"},
+    body: "{}"
+  });
   if (response.status === 401 || response.status === 403) {
     await browser.storage.local.remove("token");
     status.textContent = "Harness ready. Pair this browser.";
@@ -39,17 +43,27 @@ async function clientId() {
 }
 
 async function pair() {
-  const code = document.getElementById("code").value.trim();
+  const pairButton = document.getElementById("pair");
+  const codeInput = document.getElementById("code");
+  const code = codeInput.value.trim();
   if (!code) throw new Error("Enter the pairing code shown by the harness CLI.");
-  const response = await fetch(BASE + "/pair", {
-    method: "POST",
-    headers: {"Content-Type":"application/json"},
-    body: JSON.stringify({code, client_id: await clientId()})
-  });
-  const body = await response.json();
-  if (!body.ok) throw new Error(body.error || "Pairing failed");
-  await browser.storage.local.set({token: body.token});
-  await refreshStatus();
+  pairButton.disabled = true;
+  status.textContent = "Pairing...";
+  try {
+    const response = await fetch(BASE + "/pair", {
+      method: "POST",
+      headers: {"Content-Type":"application/json"},
+      body: JSON.stringify({code, client_id: await clientId()})
+    });
+    const body = await response.json();
+    if (!body.ok) throw new Error(body.error || "Pairing failed");
+    await browser.storage.local.set({token: body.token});
+    codeInput.value = "";
+    status.textContent = "Paired. Verifying...";
+    await refreshStatus();
+  } finally {
+    pairButton.disabled = false;
+  }
 }
 
 async function releaseStart(token, handoffId) {

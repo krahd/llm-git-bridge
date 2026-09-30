@@ -78,6 +78,13 @@ class BrowserAPIHandler(BaseHTTPRequestHandler):
         value=self.headers.get("Authorization","")
         return value[7:] if value.startswith("Bearer ") else None
 
+    @staticmethod
+    def _pending_payload(service: HarnessService, client_id: str) -> dict[str, Any]:
+        pending = []
+        for item in service.pending_reentries():
+            pending.append({k: v for k, v in item.items() if k != "prompt"})
+        return {"ok":True,"client_id":client_id,"pending":pending}
+
     def do_OPTIONS(self) -> None:
         if self._origin() is None:
             self._send(403,{"ok":False,"error":"extension origin required"}); return
@@ -102,10 +109,7 @@ class BrowserAPIHandler(BaseHTTPRequestHandler):
         store,service=self._service()
         try:
             client_id=service.authenticate_browser(token)
-            pending = []
-            for item in service.pending_reentries():
-                pending.append({k: v for k, v in item.items() if k != "prompt"})
-            self._send(200,{"ok":True,"client_id":client_id,"pending":pending})
+            self._send(200,self._pending_payload(service,client_id))
         except HarnessError as exc:
             self._send(401,{"ok":False,"error":str(exc)})
         finally:
@@ -113,7 +117,7 @@ class BrowserAPIHandler(BaseHTTPRequestHandler):
 
     def do_POST(self) -> None:
         parsed=urlparse(self.path)
-        if parsed.path not in {"/pair", "/v1/open-next", "/v1/release-start"}:
+        if parsed.path not in {"/pair", "/v1/pending", "/v1/open-next", "/v1/release-start"}:
             self._send(404,{"ok":False,"error":"not found"}); return
         if self._origin() is None:
             self._send(403,{"ok":False,"error":"extension origin required"}); return
@@ -137,6 +141,8 @@ class BrowserAPIHandler(BaseHTTPRequestHandler):
             except HarnessError as exc:
                 self._send(401,{"ok":False,"error":str(exc)}); return
             try:
+                if parsed.path == "/v1/pending":
+                    self._send(200,self._pending_payload(service,client_id)); return
                 if parsed.path == "/v1/open-next":
                     item=service.reserve_reentry(client_id,ttl=body.get("ttl",300.0))
                     self._send(200,{"ok":True,"client_id":client_id,"item":item}); return
