@@ -44,7 +44,7 @@ Still planned after this safe point:
 
 - delta snapshots rather than full refreshes;
 - cache/LRU expiry;
-- transport interface generalisation beyond rclone implementation details;
+- make bridge transport genuinely provider-independent: separate protocol, durability, and execution from provider-specific mailbox adapters; keep Google Drive/rclone as the current production backend, and support alternatives such as Proton Drive through supported first-party tooling when an end-to-end ChatGPT-side connector is available; do not switch the production mailbox until both client and host sides are supported and verified;
 - richer observability and remote latency measurements;
 - Homebrew packaging;
 - migration tooling for older prototype configurations;
