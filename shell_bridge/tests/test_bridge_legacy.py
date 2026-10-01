@@ -79,6 +79,9 @@ class ConfirmationTests(unittest.TestCase):
             "gh repo create krahd/example --private": "github_repository_control_plane",
             "gh repo delete krahd/example --yes": "github_repository_control_plane",
             "gh api repos/krahd/example -X PATCH -f private=true": "github_api_mutation",
+            "gh issue create --title test --body body": "github_content_control_plane",
+            "curl -X POST https://example.invalid -d x=y": "http_mutation",
+            "ssh example.invalid 'touch /tmp/x'": "remote_shell_or_copy",
             "git push --force-with-lease origin main": "git_destructive_push",
             "git reset --hard HEAD~1": "git_destructive_local",
             "git clean -fdx": "git_destructive_local",
@@ -89,6 +92,7 @@ class ConfirmationTests(unittest.TestCase):
                 self.assertEqual(b.high_impact_command_category(command), expected)
         self.assertIsNone(b.high_impact_command_category("git push origin feature"))
         self.assertIsNone(b.high_impact_command_category("printf safe"))
+        self.assertIsNone(b.high_impact_command_category("curl -fsS https://example.invalid"))
 
     def test_non_repository_mutation_classifier_covers_common_writes(self):
         self.assertEqual(b.non_repository_write_category("touch marker"), "filesystem_mutation")
@@ -107,6 +111,7 @@ class ConfirmationTests(unittest.TestCase):
             plan = b.resolve_write_plan(request, cfg)
             self.assertEqual(plan["effective"], "read_only")
             self.assertEqual(plan["write_roots"], [])
+            self.assertFalse(plan["allow_network"])
 
             repo = root / "repo"; repo.mkdir()
             subprocess.run(["git", "init", "-q", str(repo)], check=True)
@@ -114,6 +119,7 @@ class ConfirmationTests(unittest.TestCase):
             plan = b.resolve_write_plan(request, cfg)
             self.assertEqual(plan["effective"], "repository")
             self.assertIn(repo.resolve(), plan["write_roots"])
+            self.assertTrue(plan["allow_network"])
 
     def test_write_plan_prompts_for_non_repository_mutation_and_explicit_system_scope(self):
         with tempfile.TemporaryDirectory() as td:
@@ -124,6 +130,7 @@ class ConfirmationTests(unittest.TestCase):
             plan = b.resolve_write_plan(request, cfg)
             self.assertEqual(plan["effective"], "system")
             self.assertEqual(plan["confirmation_category"], "non_repository_filesystem_mutation")
+            self.assertTrue(plan["allow_network"])
             request["write_scope"] = "system"
             plan = b.resolve_write_plan(request, cfg)
             self.assertEqual(plan["confirmation_category"], "system_write")
@@ -232,6 +239,19 @@ class ShellTests(unittest.TestCase):
             self.assertNotEqual(out["exit_code"], 0)
             self.assertFalse(outside.exists())
 
+    @unittest.skipUnless(sys.platform == "darwin" and b.SANDBOX_EXEC.exists(), "macOS sandbox-exec required")
+    def test_read_only_sandbox_denies_network_but_repository_scope_can_use_it(self):
+        with tempfile.TemporaryDirectory() as td:
+            td = Path(td)
+            cmd = "python3 -c \"import socket; s=socket.socket(); s.bind(('127.0.0.1',0)); print(s.getsockname()[1])\""
+            blocked = b.run_shell(td, cmd, b"", 10, sandbox_write_roots=[], sandbox_allow_network=False)
+            self.assertNotEqual(blocked["exit_code"], 0)
+            self.assertTrue(blocked["network_sandboxed"])
+
+            allowed = b.run_shell(td, cmd, b"", 10, sandbox_write_roots=[], sandbox_allow_network=True)
+            self.assertEqual(allowed["exit_code"], 0)
+            self.assertFalse(allowed["network_sandboxed"])
+
     def test_nonexistent_shell_is_rejected(self):
         with tempfile.TemporaryDirectory() as td:
             with self.assertRaisesRegex(ValueError, "configured shell"):
@@ -327,7 +347,27 @@ class ProcessTests(unittest.TestCase):
             self.assertEqual(result["status"], "completed")
             self.assertEqual(result["exit_code"], 0)
             self.assertEqual(result["write_scope"]["effective"], "repository")
+            self.assertTrue(result["write_scope"]["allow_network"])
             self.assertTrue((repo / "marker").exists())
+
+    def test_repository_network_mutation_requires_confirmation_before_started(self):
+        with tempfile.TemporaryDirectory() as td:
+            root = Path(td) / "root"; root.mkdir()
+            repo = root / "repo"; repo.mkdir()
+            subprocess.run(["git", "init", "-q", str(repo)], check=True)
+            state = Path(td) / "state"
+            cfg = self.make_cfg(root, state, operator_confirmation_mode="reject")
+            raw = json.dumps({
+                "protocol": 1, "id": "netwrite1", "cwd": str(repo),
+                "command": "curl -X POST https://example.invalid -d x=y", "timeout_seconds": 10,
+            }).encode()
+            up, _, calls, err = self.run_with_remote("netwrite1.json", raw, cfg)
+            self.assertIsNone(err)
+            self.assertEqual(calls["shell"], 0)
+            result = json.loads(up["results/netwrite1.json"])
+            self.assertEqual(result["status"], "rejected")
+            self.assertEqual(result["operator_confirmation"]["category"], "http_mutation")
+            self.assertFalse((state / "requests" / "netwrite1" / "started.json").exists())
 
     def test_completed_replay_is_hash_bound_and_no_reexecution(self):
         with tempfile.TemporaryDirectory() as td:

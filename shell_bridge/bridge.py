@@ -46,6 +46,32 @@ HIGH_IMPACT_COMMAND_RULES = (
         re.compile(r"(?im)(?<![\w-])gh\s+api\b[^\n;]*(?:(?:-X|--method(?:=|\s+))\s*(?:POST|PUT|PATCH|DELETE))\b"),
     ),
     (
+        "github_content_control_plane",
+        re.compile(
+            r"(?im)(?<![\w-])gh\s+(?:"
+            r"issue\s+(?:create|close|delete|edit|reopen|transfer|comment|lock|unlock|pin|unpin)|"
+            r"pr\s+(?:create|close|edit|merge|ready|reopen|review|comment|lock|unlock)|"
+            r"release\s+(?:create|delete|edit|upload|delete-asset)|"
+            r"workflow\s+(?:run|enable|disable)|"
+            r"secret\s+(?:set|delete)|variable\s+(?:set|delete)|"
+            r"gist\s+(?:create|delete|edit)"
+            r")\b"
+        ),
+    ),
+    (
+        "http_mutation",
+        re.compile(
+            r"(?im)(?<![\w-])(?:"
+            r"curl\b[^\n;]*(?:(?:-X\s*(?:POST|PUT|PATCH|DELETE)\b)|(?:--request(?:=|\s+)(?:POST|PUT|PATCH|DELETE)\b)|(?:\s-(?:d|F|T)(?:\s|[^A-Za-z]))|(?:--(?:data(?:-[\w-]+)?|form(?:-string)?|upload-file)(?:=|\s+)))|"
+            r"wget\b[^\n;]*(?:(?:--method(?:=|\s+)(?:POST|PUT|PATCH|DELETE)\b)|(?:--post-(?:data|file)(?:=|\s+)))"
+            r")"
+        ),
+    ),
+    (
+        "remote_shell_or_copy",
+        re.compile(r"(?im)(?:^|[;&|]\s*|\n)\s*(?:ssh|scp|sftp|rsync)\b"),
+    ),
+    (
         "git_destructive_push",
         re.compile(r"(?im)(?<![\w-])git\s+push\b[^\n;]*(?:--force(?:-with-lease)?\b|--delete\b|(?:^|\s)-f(?:\s|$))"),
     ),
@@ -252,37 +278,37 @@ def resolve_write_plan(request: dict, cfg: dict) -> dict:
         raise ValueError("write_scope must be auto, read_only, repository, or system")
 
     if requested == "system":
-        return {"requested": requested, "effective": "system", "write_roots": None, "confirmation_category": "system_write"}
+        return {"requested": requested, "effective": "system", "write_roots": None, "allow_network": True, "confirmation_category": "system_write"}
     if requested == "read_only":
-        return {"requested": requested, "effective": "read_only", "write_roots": []}
+        return {"requested": requested, "effective": "read_only", "write_roots": [], "allow_network": False}
 
     if _trusted_workspace_coordinator(request["command"]):
         roots = [allowed_root, Path(cfg["state_dir"]).expanduser().resolve()]
-        return {"requested": requested, "effective": "repository", "write_roots": roots, "trusted_coordinator": True}
+        return {"requested": requested, "effective": "repository", "write_roots": roots, "allow_network": True, "trusted_coordinator": True}
 
     repo_roots = _git_repository_write_roots(request["cwd"], allowed_root)
     if requested == "repository":
         if repo_roots is None:
             raise ValueError("write_scope=repository requires cwd inside a Git repository/worktree or the trusted workspace coordinator")
-        return {"requested": requested, "effective": "repository", "write_roots": repo_roots}
+        return {"requested": requested, "effective": "repository", "write_roots": repo_roots, "allow_network": True}
 
     if repo_roots is not None:
-        return {"requested": requested, "effective": "repository", "write_roots": repo_roots}
+        return {"requested": requested, "effective": "repository", "write_roots": repo_roots, "allow_network": True}
 
     write_hint = non_repository_write_category(request["command"])
     if write_hint is not None:
         return {
-            "requested": requested, "effective": "system", "write_roots": None,
+            "requested": requested, "effective": "system", "write_roots": None, "allow_network": True,
             "confirmation_category": f"non_repository_{write_hint}",
         }
-    return {"requested": requested, "effective": "read_only", "write_roots": []}
+    return {"requested": requested, "effective": "read_only", "write_roots": [], "allow_network": False}
 
 
 def _sbpl_string(value: str) -> str:
     return value.replace("\\", "\\\\").replace('"', '\\"')
 
 
-def sandbox_profile(write_roots: list[Path]) -> str:
+def sandbox_profile(write_roots: list[Path], *, allow_network: bool = True) -> str:
     roots: list[Path] = []
     for root in write_roots:
         try:
@@ -292,7 +318,8 @@ def sandbox_profile(write_roots: list[Path]) -> str:
         if resolved not in roots:
             roots.append(resolved)
     clauses = " ".join(f'(subpath "{_sbpl_string(str(root))}")' for root in roots)
-    return f'(version 1)(allow default)(deny file-write*)(allow file-write* (literal "/dev/null") {clauses})'
+    network_clause = "" if allow_network else "(deny network*)"
+    return f'(version 1)(allow default)(deny file-write*){network_clause}(allow file-write* (literal "/dev/null") {clauses})'
 
 
 def operator_confirmation_mode(cfg: dict) -> str:
@@ -407,7 +434,8 @@ def run_shell(cwd: Path, command: str, stdin: bytes, timeout: int, shell: str = 
               max_output_bytes: int = DEFAULT_MAX_OUTPUT_BYTES,
               request_id: str | None = None,
               on_spawn=None,
-              sandbox_write_roots: list[Path] | None = None) -> dict:
+              sandbox_write_roots: list[Path] | None = None,
+              sandbox_allow_network: bool = True) -> dict:
     shell_path = Path(shell)
     if not shell_path.is_absolute() or not shell_path.is_file() or not os.access(shell_path, os.X_OK):
         raise ValueError("configured shell must be an existing absolute file")
@@ -420,10 +448,10 @@ def run_shell(cwd: Path, command: str, stdin: bytes, timeout: int, shell: str = 
     env = child_environment(request_id, sandboxed=sandboxed)
     if sandboxed:
         if sys.platform != "darwin" or not SANDBOX_EXEC.is_file() or not os.access(SANDBOX_EXEC, os.X_OK):
-            raise ValueError("filesystem write sandbox is unavailable; refusing non-system shell execution")
+            raise ValueError("execution sandbox is unavailable; refusing non-system shell execution")
         sandbox_temp = Path(tempfile.mkdtemp(prefix=f"chatgpt-shell-{request_id or 'request'}-"))
         profile_roots = [sandbox_temp, *sandbox_write_roots]
-        argv = [str(SANDBOX_EXEC), "-p", sandbox_profile(profile_roots), *argv]
+        argv = [str(SANDBOX_EXEC), "-p", sandbox_profile(profile_roots, allow_network=sandbox_allow_network), *argv]
         env["TMPDIR"] = str(sandbox_temp)
         env["TMP"] = str(sandbox_temp)
         env["TEMP"] = str(sandbox_temp)
@@ -549,6 +577,7 @@ def run_shell(cwd: Path, command: str, stdin: bytes, timeout: int, shell: str = 
         "stdout_sha256": sha256_bytes(stdout),
         "stderr_sha256": sha256_bytes(stderr),
         "filesystem_sandboxed": sandboxed,
+        "network_sandboxed": sandboxed and not sandbox_allow_network,
         "sandbox_write_roots": None if sandbox_write_roots is None else [str(Path(root).resolve()) for root in sandbox_write_roots],
     }
 
@@ -804,7 +833,8 @@ def process_one(name: str, cfg: dict) -> None:
         return
 
     confirmation = None
-    category = high_impact_command_category(v["command"]) or write_plan.get("confirmation_category")
+    high_impact_category = high_impact_command_category(v["command"])
+    category = high_impact_category or write_plan.get("confirmation_category")
     if category is not None:
         confirmation = request_operator_confirmation(
             request_id=v["id"], cwd=v["cwd"], command=v["command"], category=category, cfg=cfg,
@@ -818,6 +848,10 @@ def process_one(name: str, cfg: dict) -> None:
             })
             _persist_then_publish(result, local_result, finished_marker, name, cfg)
             return
+        # Approval of a recognised external/control-plane command grants network
+        # authority for this exact request while preserving its filesystem scope.
+        if high_impact_category is not None:
+            write_plan["allow_network"] = True
 
     atomic_write(started_marker, json.dumps({
         "request_sha256": request_sha,
@@ -840,6 +874,7 @@ def process_one(name: str, cfg: dict) -> None:
             cfg.get("shell", DEFAULT_SHELL), max_output_bytes,
             request_id=v["id"], on_spawn=on_spawn,
             sandbox_write_roots=write_plan["write_roots"],
+            sandbox_allow_network=write_plan.get("allow_network", True),
         )
         if exec_result.get("aborted_by_daemon_shutdown"):
             result = result_envelope(v["id"], request_sha, "indeterminate", {
