@@ -455,6 +455,7 @@ def run_shell(cwd: Path, command: str, stdin: bytes, timeout: int, shell: str = 
         env["TMPDIR"] = str(sandbox_temp)
         env["TMP"] = str(sandbox_temp)
         env["TEMP"] = str(sandbox_temp)
+        env["TMPPREFIX"] = str(sandbox_temp / "zsh")
 
     started = time.time()
     try:

@@ -240,6 +240,14 @@ class ShellTests(unittest.TestCase):
             self.assertFalse(outside.exists())
 
     @unittest.skipUnless(sys.platform == "darwin" and b.SANDBOX_EXEC.exists(), "macOS sandbox-exec required")
+    def test_read_only_sandbox_allows_zsh_heredoc_runtime_temp(self):
+        with tempfile.TemporaryDirectory() as td:
+            root = Path(td)
+            out = b.run_shell(root, "cat <<'EOF'\nhello\nEOF", b"", 10, sandbox_write_roots=[])
+            self.assertEqual(out["exit_code"], 0, out["stderr_text"])
+            self.assertEqual(out["stdout_text"], "hello\n")
+
+    @unittest.skipUnless(sys.platform == "darwin" and b.SANDBOX_EXEC.exists(), "macOS sandbox-exec required")
     def test_read_only_sandbox_denies_network_but_repository_scope_can_use_it(self):
         with tempfile.TemporaryDirectory() as td:
             td = Path(td)
