@@ -1,5 +1,12 @@
 # Project state
 
+
+## Conversation Harness ownership — 30 September 2026
+
+Conversation Harness v1 remains in this repository as a standalone local reference implementation. Conversation Harness v2 has been extracted to `krahd/conversation-harness`, where provider/conversation-agnostic continuity and multi-repository work identity can evolve independently of the Git transport bridge. Canonical research remains in `krahd/research/projects/conversational-work-continuity/`.
+
+`llm-git-bridge` should therefore expose stable executor/workspace capabilities that v2 can consume, but it should not absorb the v2 application, provider adapters, operational work-thread database or user interface.
+
 ## Decisions already made
 
 - project name: `llm-git-bridge`;
