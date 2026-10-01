@@ -14,9 +14,9 @@ This repository now contains two deliberately different ways to solve the "the L
 | Mode | Use it when | Remote authority |
 | --- | --- | --- |
 | **Protocol-v2 `llm-git-bridge`** | You want the narrowest, Git-specific interface for snapshots, validated patches, commits and optional pushes. | Structured Git transactions only; no arbitrary remote shell. |
-| **ChatGPT Shell Bridge v5** | You want ordinary ChatGPT/agent sessions to inspect and operate on a local Mac more transparently, including workflows that need ordinary shell tools. | Raw shell as the logged-in user; use the durable workspace coordinator for Git mutations. |
+| **ChatGPT Shell Bridge v5** | You want ordinary ChatGPT/agent sessions to inspect and operate on a local Mac more transparently, including workflows that need ordinary shell tools. | Default shell is filesystem-and-network read-only outside Git and repository-scoped inside Git; broader or high-impact mutations require local operator confirmation. Use the durable workspace coordinator for substantial Git mutations. |
 
-The protocol-v2 bridge remains the safer default when its Git transaction model is sufficient. Shell Bridge v5 trades a larger trust boundary for transparency and generality. It is not a sandbox.
+The protocol-v2 bridge remains the safer default when its Git transaction model is sufficient. Shell Bridge v5 uses a macOS execution sandbox for its default child-shell scopes, but an explicitly approved `system` request intentionally restores the logged-in user's authority; it is not a VM or complete OS security boundary.
 
 For a fresh self-service Shell Bridge installation, including automatic Drive-mailbox bootstrap and host-neutral repository-root configuration, see [`shell_bridge/README.md`](shell_bridge/README.md).
 
