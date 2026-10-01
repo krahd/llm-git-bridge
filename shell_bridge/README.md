@@ -13,9 +13,11 @@ This is intentionally different from the repository's protocol-v2 `llm-git-bridg
 
 ## Security boundary
 
-**High-impact operator confirmation.** On macOS, Shell Bridge pauses recognised high-impact control-plane/destructive commands *before* recording `STARTED` and presents a native confirmation dialogue to the logged-in operator. The dialogue shows the request ID, risk category, working directory, and actual command; **Cancel** is the default. Declined or timed-out requests are terminally `rejected` and never reach the shell. Built-in recognition currently covers GitHub repository control-plane changes (`gh repo create/delete/rename/archive/unarchive/edit`), mutating `gh api` requests, force/delete pushes, `git reset --hard`, forced `git clean`, and recursive forced `rm`. On non-macOS hosts, recognised commands are rejected by default. Set `operator_confirmation_mode` to `auto` (default), `dialog`, `reject`, or explicitly `off`; `off` weakens this safeguard. Detection is defence in depth, not a complete shell parser or sandbox.
+**Filesystem write sandbox by default.** Shell Bridge v5 now treats raw shell execution as read-only unless the request is already inside an existing Git repository/worktree or is an invocation of the trusted workspace coordinator. On macOS, the child shell runs under `sandbox-exec`: read-only mode denies filesystem writes (apart from temporary runtime locations), while repository mode permits writes only to the current repository/worktree, its Git metadata, and temporary runtime locations. The workspace coordinator receives a bounded repository/state scope so it can create and operate its isolated worktrees. A request may explicitly ask for `"write_scope": "read_only"`, `"repository"`, or `"system"`; `auto` is the default. `system` write scope is never silent: it requires operator confirmation before `STARTED`.
 
-**Shell Bridge is not a sandbox.** Accepted commands run as the logged-in macOS user. The configured `ALLOWED_ROOT` limits the request's initial working directory, but the shell process itself has the permissions of that user. Treat the Drive mailbox as privileged infrastructure and do not put passwords, tokens, private keys, or other secrets directly in request command text, because request/result/journal bytes may persist.
+**High-impact operator confirmation.** On macOS, Shell Bridge pauses recognised high-impact control-plane/destructive commands *before* recording `STARTED` and presents a native confirmation dialogue to the logged-in operator. The dialogue shows the request ID, risk category, working directory, and actual command; **Cancel** is the default. Declined or timed-out requests are terminally `rejected` and never reach the shell. Built-in recognition covers GitHub repository control-plane changes (`gh repo create/delete/rename/archive/unarchive/edit`), mutating `gh api` requests, force/delete pushes, `git reset --hard`, forced `git clean`, recursive forced `rm`, and common non-repository filesystem/system/package mutations. On non-macOS hosts, recognised commands are rejected by default. Set `operator_confirmation_mode` to `auto` (default), `dialog`, `reject`, or explicitly `off`; `off` weakens this safeguard. Command recognition remains defence in depth: filesystem sandboxing is the hard local-write boundary, while remote/network side effects still require explicit classification and operator discipline.
+
+**The sandbox is scoped, not a VM.** Approved `system` requests run with the logged-in macOS user's normal authority, and network/control-plane side effects cannot be made read-only by a filesystem sandbox. Treat the Drive mailbox as privileged infrastructure and do not put passwords, tokens, private keys, or other secrets directly in request command text, because request/result/journal bytes may persist.
 
 For repository changes, use `workspace.py` rather than editing canonical branches directly. GitHub remains the canonical shared repository state; the Mac checkout is authoritative for current local execution state; Drive is transport only.
 
@@ -76,9 +78,12 @@ Create a raw JSON file named `<id>.json` in the mailbox `requests/` folder:
   "id": "repo-status-001",
   "cwd": "/Users/me/repos/example",
   "command": "git status --short --branch",
-  "timeout_seconds": 30
+  "timeout_seconds": 30,
+  "write_scope": "auto"
 }
 ```
+
+`write_scope` is optional. `auto` means repository-scoped writes when `cwd` is inside an existing Git repository/worktree, and filesystem read-only otherwise. Use `read_only` to force read-only execution, `repository` to require a Git repository/worktree scope, or `system` for an intentional write beyond repository scope; `system` triggers the native operator confirmation gate. Obvious non-repository write commands detected under `auto` are also promoted to the confirmation gate instead of being run silently.
 
 IDs must be globally unique for the mailbox. The daemon publishes the terminal result under the same filename in `results/`.
 

@@ -18,8 +18,8 @@ The system must preserve a tunnel-like shell/Git experience while making the *sa
 
 ## Non-goals
 
-- The raw shell transport is not an OS sandbox and cannot infer shell semantics perfectly.
-- Recognised high-impact control-plane/destructive commands require local operator confirmation before `STARTED`; this is a defence-in-depth gate, not a substitute for the raw-shell trust boundary.
+- The filesystem sandbox does not attempt to infer arbitrary network/control-plane semantics; a command can still have remote side effects even when local filesystem writes are constrained.
+- Recognised high-impact control-plane/destructive commands therefore require local operator confirmation before `STARTED` in addition to filesystem write sandboxing.
 - Cross-repository GitHub publication cannot be made truly atomic with ordinary Git pushes. Cross-repository workflows therefore use dependency ordering and durable recovery rather than pretending to provide distributed transactions.
 - v5 does not auto-integrate interrupted work merely because it is syntactically mergeable.
 
@@ -55,7 +55,7 @@ Responsibilities:
 - validate and integrate completed work through a short canonical-branch gate;
 - repair/recover state after conversation or daemon failure.
 
-Raw shell remains available for read-only inspection, bridge maintenance, and exceptional recovery. Repository mutation instructions in the client skill use workspace jobs by default.
+Raw shell remains available for inspection, bridge maintenance, and exceptional recovery, but its default write authority is no longer unrestricted. `write_scope=auto` resolves to repository-scoped filesystem writes only when `cwd` is already inside a Git repository/worktree; otherwise it is filesystem read-only. The trusted workspace coordinator receives a bounded repository/state scope. Broader `system` writes require operator confirmation before `STARTED`. Repository mutation instructions in the client skill use workspace jobs by default.
 
 ## Transport concurrency
 
@@ -307,7 +307,9 @@ The installer and doctor surface rclone's 2026 shared-client retirement warning.
 8. No force push is used for canonical integration.
 9. A job is not declared integrated until the GitHub ref is independently verified.
 10. Cleanup never precedes verified integration/recovery classification.
-11. Raw shell remains privileged and can bypass workspace conventions; the Mac Git Bridge skill must route ordinary mutations through workspace jobs. This is an explicit trust boundary, not hidden enforcement.
+11. Ordinary raw child shells are filesystem-sandboxed: outside Git they are read-only, and inside Git they can write only within the repository/worktree and its Git metadata. The Mac Git Bridge skill still routes ordinary substantial mutations through workspace jobs.
+12. A broader `system` write or recognised high-impact operation cannot begin until the local operator approves the exact request; approved system scope intentionally restores the logged-in user's normal write authority.
+13. Filesystem sandboxing does not claim to make arbitrary network/control-plane operations read-only; high-impact remote mutation detection remains a separate defence-in-depth layer.
 
 ## Acceptance model
 
