@@ -8,6 +8,8 @@ import hashlib
 import json
 import os
 import re
+import shlex
+import shutil
 import signal
 import subprocess
 import sys
@@ -28,7 +30,75 @@ DEFAULT_MAX_COMMAND_BYTES = 256 * 1024
 DEFAULT_MAX_STDIN_BYTES = 1024 * 1024
 DEFAULT_MAX_OUTPUT_BYTES = 16 * 1024 * 1024
 DEFAULT_MAX_ACTIVE_CAP = 32
+DEFAULT_OPERATOR_CONFIRMATION_TIMEOUT = 300
+SANDBOX_EXEC = Path("/usr/bin/sandbox-exec")
+WRITE_SCOPES = {"auto", "read_only", "repository", "system"}
+WORKSPACE_COORDINATOR = Path.home() / ".local/share/chatgpt-shell-bridge/workspace.py"
 ID_RE = re.compile(r"[a-z0-9][a-z0-9._-]{0,127}\Z")
+
+HIGH_IMPACT_COMMAND_RULES = (
+    (
+        "github_repository_control_plane",
+        re.compile(r"(?im)(?<![\w-])gh\s+repo\s+(?:create|delete|rename|archive|unarchive|edit)\b"),
+    ),
+    (
+        "github_api_mutation",
+        re.compile(r"(?im)(?<![\w-])gh\s+api\b[^\n;]*(?:(?:-X|--method(?:=|\s+))\s*(?:POST|PUT|PATCH|DELETE))\b"),
+    ),
+    (
+        "github_content_control_plane",
+        re.compile(
+            r"(?im)(?<![\w-])gh\s+(?:"
+            r"issue\s+(?:create|close|delete|edit|reopen|transfer|comment|lock|unlock|pin|unpin)|"
+            r"pr\s+(?:create|close|edit|merge|ready|reopen|review|comment|lock|unlock)|"
+            r"release\s+(?:create|delete|edit|upload|delete-asset)|"
+            r"workflow\s+(?:run|enable|disable)|"
+            r"secret\s+(?:set|delete)|variable\s+(?:set|delete)|"
+            r"gist\s+(?:create|delete|edit)"
+            r")\b"
+        ),
+    ),
+    (
+        "http_mutation",
+        re.compile(
+            r"(?im)(?<![\w-])(?:"
+            r"curl\b[^\n;]*(?:(?:-X\s*(?:POST|PUT|PATCH|DELETE)\b)|(?:--request(?:=|\s+)(?:POST|PUT|PATCH|DELETE)\b)|(?:\s-(?:d|F|T)(?:\s|[^A-Za-z]))|(?:--(?:data(?:-[\w-]+)?|form(?:-string)?|upload-file)(?:=|\s+)))|"
+            r"wget\b[^\n;]*(?:(?:--method(?:=|\s+)(?:POST|PUT|PATCH|DELETE)\b)|(?:--post-(?:data|file)(?:=|\s+)))"
+            r")"
+        ),
+    ),
+    (
+        "remote_shell_or_copy",
+        re.compile(r"(?im)(?:^|[;&|]\s*|\n)\s*(?:ssh|scp|sftp|rsync)\b"),
+    ),
+    (
+        "git_destructive_push",
+        re.compile(r"(?im)(?<![\w-])git\s+push\b[^\n;]*(?:--force(?:-with-lease)?\b|--delete\b|(?:^|\s)-f(?:\s|$))"),
+    ),
+    (
+        "git_destructive_local",
+        re.compile(r"(?im)(?<![\w-])git\s+(?:reset\s+--hard\b|clean\s+-[A-Za-z]*f[A-Za-z]*\b)"),
+    ),
+    (
+        "filesystem_recursive_delete",
+        re.compile(r"(?im)(?:^|[;&|]\s*|\n)\s*(?:sudo\s+)?rm\s+(?:-[A-Za-z]*r[A-Za-z]*f[A-Za-z]*|-[A-Za-z]*f[A-Za-z]*r[A-Za-z]*)\b"),
+    ),
+)
+
+NON_REPOSITORY_WRITE_RULES = (
+    (
+        "filesystem_mutation",
+        re.compile(r"(?im)(?:^|[;&|]\s*|\n)\s*(?:sudo\s+)?(?:cp|mv|rm|mkdir|rmdir|touch|chmod|chown|ln|install|tee)\b"),
+    ),
+    (
+        "system_configuration",
+        re.compile(r"(?im)(?<![\w-])(?:defaults\s+(?:write|delete|rename|import)|launchctl\s+(?:bootstrap|bootout|kickstart|enable|disable|setenv|unsetenv))\b"),
+    ),
+    (
+        "package_management",
+        re.compile(r"(?im)(?<![\w-])(?:brew|pip3?|npm|pnpm|yarn)\s+(?:install|uninstall|upgrade|update|link|unlink|add|remove)\b"),
+    ),
+)
 
 _TRANSPORT_LOCK = threading.RLock()
 _ACTIVE_LOCK = threading.RLock()
@@ -121,7 +191,193 @@ def validate_request(req: dict, request_name: str, allowed_root: Path, max_timeo
         raise ValueError("stdin_b64 must be a base64 string")
     if len(stdin) > max_stdin_bytes:
         raise ValueError("stdin is too large")
-    return {"id": rid, "cwd": cwd, "command": command, "timeout": timeout, "stdin": stdin}
+    write_scope = req.get("write_scope", "auto")
+    if write_scope not in WRITE_SCOPES:
+        raise ValueError("write_scope must be auto, read_only, repository, or system")
+    return {
+        "id": rid, "cwd": cwd, "command": command, "timeout": timeout, "stdin": stdin,
+        "write_scope": write_scope,
+    }
+
+
+def high_impact_command_category(command: str) -> str | None:
+    # Network/control-plane effects cannot be made read-only by a filesystem sandbox.
+    # These rules are therefore an additional approval gate, not the primary sandbox.
+    for category, pattern in HIGH_IMPACT_COMMAND_RULES:
+        if pattern.search(command):
+            return category
+    return None
+
+
+def non_repository_write_category(command: str) -> str | None:
+    for category, pattern in NON_REPOSITORY_WRITE_RULES:
+        if pattern.search(command):
+            return category
+    return None
+
+
+def _path_under(path: Path, root: Path) -> bool:
+    try:
+        path.resolve().relative_to(root.resolve())
+        return True
+    except ValueError:
+        return False
+
+
+def _git_repository_write_roots(cwd: Path, allowed_root: Path) -> list[Path] | None:
+    env = os.environ.copy()
+    env["GIT_OPTIONAL_LOCKS"] = "0"
+    try:
+        cp = subprocess.run(
+            ["git", "-C", str(cwd), "rev-parse", "--show-toplevel", "--git-dir", "--git-common-dir"],
+            stdout=subprocess.PIPE, stderr=subprocess.DEVNULL, text=True, timeout=3, check=False, env=env,
+        )
+    except (FileNotFoundError, subprocess.TimeoutExpired):
+        return None
+    if cp.returncode != 0:
+        return None
+    lines = [line.strip() for line in cp.stdout.splitlines() if line.strip()]
+    if len(lines) != 3:
+        return None
+    roots: list[Path] = []
+    for index, raw in enumerate(lines):
+        value = Path(raw).expanduser()
+        if not value.is_absolute():
+            value = (cwd / value).resolve()
+        else:
+            value = value.resolve()
+        if not _path_under(value, allowed_root):
+            return None
+        if value not in roots:
+            roots.append(value)
+    return roots
+
+
+def _trusted_workspace_coordinator(command: str) -> bool:
+    try:
+        argv = shlex.split(command, posix=True)
+    except ValueError:
+        return False
+    if len(argv) < 3:
+        return False
+    if not Path(argv[0]).name.startswith("python"):
+        return False
+    try:
+        script = Path(argv[1]).expanduser().resolve()
+    except OSError:
+        return False
+    if script != WORKSPACE_COORDINATOR.expanduser().resolve():
+        return False
+    return argv[2] in {"create", "exec", "ready", "integrate", "show", "list", "recover", "gc", "mark-reconciled"}
+
+
+def resolve_write_plan(request: dict, cfg: dict) -> dict:
+    allowed_root = Path(cfg["allowed_root"]).expanduser().resolve()
+    requested = request.get("write_scope", "auto")
+    if requested not in WRITE_SCOPES:
+        raise ValueError("write_scope must be auto, read_only, repository, or system")
+
+    if requested == "system":
+        return {"requested": requested, "effective": "system", "write_roots": None, "allow_network": True, "confirmation_category": "system_write"}
+    if requested == "read_only":
+        return {"requested": requested, "effective": "read_only", "write_roots": [], "allow_network": False}
+
+    if _trusted_workspace_coordinator(request["command"]):
+        roots = [allowed_root, Path(cfg["state_dir"]).expanduser().resolve()]
+        return {"requested": requested, "effective": "repository", "write_roots": roots, "allow_network": True, "trusted_coordinator": True}
+
+    repo_roots = _git_repository_write_roots(request["cwd"], allowed_root)
+    if requested == "repository":
+        if repo_roots is None:
+            raise ValueError("write_scope=repository requires cwd inside a Git repository/worktree or the trusted workspace coordinator")
+        return {"requested": requested, "effective": "repository", "write_roots": repo_roots, "allow_network": True}
+
+    if repo_roots is not None:
+        return {"requested": requested, "effective": "repository", "write_roots": repo_roots, "allow_network": True}
+
+    write_hint = non_repository_write_category(request["command"])
+    if write_hint is not None:
+        return {
+            "requested": requested, "effective": "system", "write_roots": None, "allow_network": True,
+            "confirmation_category": f"non_repository_{write_hint}",
+        }
+    return {"requested": requested, "effective": "read_only", "write_roots": [], "allow_network": False}
+
+
+def _sbpl_string(value: str) -> str:
+    return value.replace("\\", "\\\\").replace('"', '\\"')
+
+
+def sandbox_profile(write_roots: list[Path], *, allow_network: bool = True) -> str:
+    roots: list[Path] = []
+    for root in write_roots:
+        try:
+            resolved = root.expanduser().resolve()
+        except OSError:
+            continue
+        if resolved not in roots:
+            roots.append(resolved)
+    clauses = " ".join(f'(subpath "{_sbpl_string(str(root))}")' for root in roots)
+    network_clause = "" if allow_network else "(deny network*)"
+    return f'(version 1)(allow default)(deny file-write*){network_clause}(allow file-write* (literal "/dev/null") {clauses})'
+
+
+def operator_confirmation_mode(cfg: dict) -> str:
+    configured = cfg.get("operator_confirmation_mode", "auto")
+    if configured not in {"auto", "dialog", "reject", "off"}:
+        raise ValueError("operator_confirmation_mode must be auto, dialog, reject, or off")
+    if configured == "auto":
+        return "dialog" if sys.platform == "darwin" else "reject"
+    return configured
+
+
+def _confirmation_command_excerpt(command: str, limit: int = 1800) -> str:
+    if len(command) <= limit:
+        return command
+    return command[:limit] + "\n… [command truncated in dialogue; full request remains journalled]"
+
+
+def request_operator_confirmation(*, request_id: str, cwd: Path, command: str, category: str, cfg: dict) -> dict:
+    mode = operator_confirmation_mode(cfg)
+    record = {"required": True, "category": category, "mode": mode, "approved": False}
+    if mode == "off":
+        return {**record, "approved": True, "message": "operator confirmation explicitly disabled by local configuration"}
+    if mode == "reject":
+        return {**record, "message": "operator confirmation required; interactive approval is unavailable or disabled"}
+
+    timeout = cfg.get("operator_confirmation_timeout_seconds", DEFAULT_OPERATOR_CONFIRMATION_TIMEOUT)
+    if isinstance(timeout, bool) or not isinstance(timeout, int) or timeout < 1:
+        return {**record, "message": "operator confirmation timeout configuration is invalid"}
+
+    script = r'''on run argv
+set requestId to item 1 of argv
+set categoryName to item 2 of argv
+set cwdValue to item 3 of argv
+set commandValue to item 4 of argv
+set promptText to "A ChatGPT Shell Bridge request needs permission to run with elevated write authority.\n\nRequest: " & requestId & "\nCategory: " & categoryName & "\nWorking directory: " & cwdValue & "\n\nCommand:\n" & commandValue & "\n\nAllow this exact request?"
+try
+    set response to display dialog promptText with title "ChatGPT Shell Bridge" buttons {"Cancel", "Allow"} default button "Cancel" cancel button "Cancel" with icon caution
+    if button returned of response is "Allow" then return "allow"
+on error number -128
+    return "cancel"
+end try
+return "cancel"
+end run'''
+    try:
+        cp = subprocess.run(
+            ["/usr/bin/osascript", "-e", script, "--", request_id, category, str(cwd), _confirmation_command_excerpt(command)],
+            stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True, timeout=timeout, check=False,
+        )
+    except FileNotFoundError:
+        return {**record, "message": "operator confirmation required but /usr/bin/osascript is unavailable"}
+    except subprocess.TimeoutExpired:
+        return {**record, "message": "operator confirmation timed out; request was not started"}
+    approved = cp.returncode == 0 and cp.stdout.strip() == "allow"
+    return {
+        **record,
+        "approved": approved,
+        "message": "operator approved elevated request" if approved else "operator declined elevated request; request was not started",
+    }
 
 
 def _terminate_pgid(pgid: int) -> None:
@@ -152,10 +408,13 @@ def _terminate_process_group(p: subprocess.Popen) -> None:
     _terminate_pgid(p.pid)
 
 
-def child_environment(request_id: str | None = None) -> dict:
+def child_environment(request_id: str | None = None, *, sandboxed: bool = False) -> dict:
     env = os.environ.copy()
     if request_id:
         env["CHATGPT_SHELL_BRIDGE_REQUEST_ID"] = request_id
+    if sandboxed:
+        env["GIT_OPTIONAL_LOCKS"] = "0"
+        env["PYTHONDONTWRITEBYTECODE"] = "1"
     if sys.platform == "darwin" and Path("/bin/launchctl").is_file():
         try:
             cp = subprocess.run(
@@ -174,23 +433,44 @@ def child_environment(request_id: str | None = None) -> dict:
 def run_shell(cwd: Path, command: str, stdin: bytes, timeout: int, shell: str = DEFAULT_SHELL,
               max_output_bytes: int = DEFAULT_MAX_OUTPUT_BYTES,
               request_id: str | None = None,
-              on_spawn=None) -> dict:
+              on_spawn=None,
+              sandbox_write_roots: list[Path] | None = None,
+              sandbox_allow_network: bool = True) -> dict:
     shell_path = Path(shell)
     if not shell_path.is_absolute() or not shell_path.is_file() or not os.access(shell_path, os.X_OK):
         raise ValueError("configured shell must be an existing absolute file")
     if max_output_bytes < 1:
         raise ValueError("max_output_bytes must be positive")
 
+    sandboxed = sandbox_write_roots is not None
+    sandbox_temp: Path | None = None
+    argv = [str(shell_path), "-lc", command]
+    env = child_environment(request_id, sandboxed=sandboxed)
+    if sandboxed:
+        if sys.platform != "darwin" or not SANDBOX_EXEC.is_file() or not os.access(SANDBOX_EXEC, os.X_OK):
+            raise ValueError("execution sandbox is unavailable; refusing non-system shell execution")
+        sandbox_temp = Path(tempfile.mkdtemp(prefix=f"chatgpt-shell-{request_id or 'request'}-"))
+        profile_roots = [sandbox_temp, *sandbox_write_roots]
+        argv = [str(SANDBOX_EXEC), "-p", sandbox_profile(profile_roots, allow_network=sandbox_allow_network), *argv]
+        env["TMPDIR"] = str(sandbox_temp)
+        env["TMP"] = str(sandbox_temp)
+        env["TEMP"] = str(sandbox_temp)
+
     started = time.time()
-    p = subprocess.Popen(
-        [str(shell_path), "-lc", command],
-        cwd=str(cwd),
-        stdin=subprocess.PIPE,
-        stdout=subprocess.PIPE,
-        stderr=subprocess.PIPE,
-        start_new_session=True,
-        env=child_environment(request_id),
-    )
+    try:
+        p = subprocess.Popen(
+            argv,
+            cwd=str(cwd),
+            stdin=subprocess.PIPE,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            start_new_session=True,
+            env=env,
+        )
+    except Exception:
+        if sandbox_temp is not None:
+            shutil.rmtree(sandbox_temp, ignore_errors=True)
+        raise
     if on_spawn is not None:
         on_spawn(p.pid, started)
     stdout_buf = bytearray()
@@ -280,6 +560,8 @@ def run_shell(cwd: Path, command: str, stdin: bytes, timeout: int, shell: str = 
     finished = time.time()
     stdout = bytes(stdout_buf)
     stderr = bytes(stderr_buf)
+    if sandbox_temp is not None:
+        shutil.rmtree(sandbox_temp, ignore_errors=True)
     return {
         "exit_code": p.returncode,
         "timed_out": timed_out,
@@ -294,6 +576,9 @@ def run_shell(cwd: Path, command: str, stdin: bytes, timeout: int, shell: str = 
         "stderr_bytes": len(stderr),
         "stdout_sha256": sha256_bytes(stdout),
         "stderr_sha256": sha256_bytes(stderr),
+        "filesystem_sandboxed": sandboxed,
+        "network_sandboxed": sandboxed and not sandbox_allow_network,
+        "sandbox_write_roots": None if sandbox_write_roots is None else [str(Path(root).resolve()) for root in sandbox_write_roots],
     }
 
 
@@ -540,6 +825,34 @@ def process_one(name: str, cfg: dict) -> None:
         _persist_then_publish(result, local_result, finished_marker, name, cfg)
         return
 
+    try:
+        write_plan = resolve_write_plan(v, cfg)
+    except Exception as exc:
+        result = result_envelope(v["id"], request_sha, "rejected", {"cwd": str(v["cwd"]), "message": str(exc)})
+        _persist_then_publish(result, local_result, finished_marker, name, cfg)
+        return
+
+    confirmation = None
+    high_impact_category = high_impact_command_category(v["command"])
+    category = high_impact_category or write_plan.get("confirmation_category")
+    if category is not None:
+        confirmation = request_operator_confirmation(
+            request_id=v["id"], cwd=v["cwd"], command=v["command"], category=category, cfg=cfg,
+        )
+        if not confirmation["approved"]:
+            result = result_envelope(v["id"], request_sha, "rejected", {
+                "cwd": str(v["cwd"]),
+                "message": confirmation["message"],
+                "write_scope": {k: val for k, val in write_plan.items() if k != "write_roots"},
+                "operator_confirmation": confirmation,
+            })
+            _persist_then_publish(result, local_result, finished_marker, name, cfg)
+            return
+        # Approval of a recognised external/control-plane command grants network
+        # authority for this exact request while preserving its filesystem scope.
+        if high_impact_category is not None:
+            write_plan["allow_network"] = True
+
     atomic_write(started_marker, json.dumps({
         "request_sha256": request_sha,
         "started_at": time.time(),
@@ -560,6 +873,8 @@ def process_one(name: str, cfg: dict) -> None:
             v["cwd"], v["command"], v["stdin"], v["timeout"],
             cfg.get("shell", DEFAULT_SHELL), max_output_bytes,
             request_id=v["id"], on_spawn=on_spawn,
+            sandbox_write_roots=write_plan["write_roots"],
+            sandbox_allow_network=write_plan.get("allow_network", True),
         )
         if exec_result.get("aborted_by_daemon_shutdown"):
             result = result_envelope(v["id"], request_sha, "indeterminate", {
@@ -570,11 +885,14 @@ def process_one(name: str, cfg: dict) -> None:
         else:
             result = result_envelope(v["id"], request_sha, "completed", {
                 "cwd": str(v["cwd"]),
+                "write_scope": {k: val for k, val in write_plan.items() if k != "write_roots"},
+                **({"operator_confirmation": confirmation} if confirmation is not None else {}),
                 **exec_result,
             })
     except Exception as exc:
         result = result_envelope(v["id"], request_sha, "indeterminate", {
             "message": f"execution raised after STARTED: {type(exc).__name__}: {exc}",
+            "write_scope": {k: val for k, val in write_plan.items() if k != "write_roots"},
         })
     finally:
         active_marker.unlink(missing_ok=True)
@@ -620,11 +938,13 @@ def load_config(path: Path) -> dict:
         ("max_command_bytes", DEFAULT_MAX_COMMAND_BYTES),
         ("max_stdin_bytes", DEFAULT_MAX_STDIN_BYTES),
         ("max_output_bytes", DEFAULT_MAX_OUTPUT_BYTES),
+        ("operator_confirmation_timeout_seconds", DEFAULT_OPERATOR_CONFIRMATION_TIMEOUT),
     ]:
         value = cfg.get(key, default)
         if isinstance(value, bool) or not isinstance(value, int) or value < 1:
             raise ValueError(f"{key} must be a positive integer")
     max_active_requests(cfg)
+    operator_confirmation_mode(cfg)
     return cfg
 
 
@@ -713,6 +1033,11 @@ def doctor(cfg: dict, *, probe_transport: bool = True) -> dict:
         "results_folder_id": cfg.get("results_folder_id"),
         "allowed_root": str(Path(cfg["allowed_root"]).expanduser().resolve()),
         "max_active_requests": max_active_requests(cfg),
+        "operator_confirmation_mode": operator_confirmation_mode(cfg),
+        "operator_confirmation_timeout_seconds": cfg.get("operator_confirmation_timeout_seconds", DEFAULT_OPERATOR_CONFIRMATION_TIMEOUT),
+        "default_write_scope": "auto",
+        "filesystem_sandbox_available": bool(sys.platform == "darwin" and SANDBOX_EXEC.is_file() and os.access(SANDBOX_EXEC, os.X_OK)),
+        "filesystem_sandbox_path": str(SANDBOX_EXEC),
         "rclone_timeout_seconds": int(cfg.get("rclone_timeout_seconds", DEFAULT_RCLONE_TIMEOUT)),
         "state_dir": str(Path(cfg["state_dir"]).expanduser().resolve()),
         "state_counter_semantics": "current_state_dir_journal_snapshot",

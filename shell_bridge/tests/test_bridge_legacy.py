@@ -1,5 +1,6 @@
 import base64
 import json
+import subprocess
 import os
 import tempfile
 import time
@@ -65,6 +66,101 @@ class ValidationTests(unittest.TestCase):
             req = dict(base, stdin_b64=base64.b64encode(b"12345").decode())
             with self.assertRaisesRegex(ValueError, "stdin is too large"):
                 b.validate_request(req, "abc.json", root, 300, max_stdin_bytes=4)
+            req = dict(base, write_scope="anything")
+            with self.assertRaisesRegex(ValueError, "write_scope"):
+                b.validate_request(req, "abc.json", root, 300)
+            req = dict(base, write_scope="read_only")
+            self.assertEqual(b.validate_request(req, "abc.json", root, 300)["write_scope"], "read_only")
+
+
+class ConfirmationTests(unittest.TestCase):
+    def test_high_impact_classifier_covers_control_plane_and_destructive_forms(self):
+        cases = {
+            "gh repo create krahd/example --private": "github_repository_control_plane",
+            "gh repo delete krahd/example --yes": "github_repository_control_plane",
+            "gh api repos/krahd/example -X PATCH -f private=true": "github_api_mutation",
+            "gh issue create --title test --body body": "github_content_control_plane",
+            "curl -X POST https://example.invalid -d x=y": "http_mutation",
+            "ssh example.invalid 'touch /tmp/x'": "remote_shell_or_copy",
+            "git push --force-with-lease origin main": "git_destructive_push",
+            "git reset --hard HEAD~1": "git_destructive_local",
+            "git clean -fdx": "git_destructive_local",
+            "rm -rf generated": "filesystem_recursive_delete",
+        }
+        for command, expected in cases.items():
+            with self.subTest(command=command):
+                self.assertEqual(b.high_impact_command_category(command), expected)
+        self.assertIsNone(b.high_impact_command_category("git push origin feature"))
+        self.assertIsNone(b.high_impact_command_category("printf safe"))
+        self.assertIsNone(b.high_impact_command_category("curl -fsS https://example.invalid"))
+
+    def test_non_repository_mutation_classifier_covers_common_writes(self):
+        self.assertEqual(b.non_repository_write_category("touch marker"), "filesystem_mutation")
+        self.assertEqual(b.non_repository_write_category("defaults write example flag yes"), "system_configuration")
+        self.assertEqual(b.non_repository_write_category("brew install example"), "package_management")
+        self.assertIsNone(b.non_repository_write_category("git status --short"))
+        self.assertIsNone(b.non_repository_write_category("cat README.md"))
+
+    def test_write_plan_defaults_to_read_only_outside_git_and_repository_inside_git(self):
+        with tempfile.TemporaryDirectory() as td:
+            root = Path(td) / "root"; root.mkdir()
+            state = Path(td) / "state"; state.mkdir()
+            cfg = {"allowed_root": str(root), "state_dir": str(state)}
+            outside = root / "plain"; outside.mkdir()
+            request = {"cwd": outside, "command": "cat file", "write_scope": "auto"}
+            plan = b.resolve_write_plan(request, cfg)
+            self.assertEqual(plan["effective"], "read_only")
+            self.assertEqual(plan["write_roots"], [])
+            self.assertFalse(plan["allow_network"])
+
+            repo = root / "repo"; repo.mkdir()
+            subprocess.run(["git", "init", "-q", str(repo)], check=True)
+            request = {"cwd": repo, "command": "touch marker", "write_scope": "auto"}
+            plan = b.resolve_write_plan(request, cfg)
+            self.assertEqual(plan["effective"], "repository")
+            self.assertIn(repo.resolve(), plan["write_roots"])
+            self.assertTrue(plan["allow_network"])
+
+    def test_write_plan_prompts_for_non_repository_mutation_and_explicit_system_scope(self):
+        with tempfile.TemporaryDirectory() as td:
+            root = Path(td) / "root"; root.mkdir()
+            state = Path(td) / "state"; state.mkdir()
+            cfg = {"allowed_root": str(root), "state_dir": str(state)}
+            request = {"cwd": root, "command": "touch marker", "write_scope": "auto"}
+            plan = b.resolve_write_plan(request, cfg)
+            self.assertEqual(plan["effective"], "system")
+            self.assertEqual(plan["confirmation_category"], "non_repository_filesystem_mutation")
+            self.assertTrue(plan["allow_network"])
+            request["write_scope"] = "system"
+            plan = b.resolve_write_plan(request, cfg)
+            self.assertEqual(plan["confirmation_category"], "system_write")
+
+    def test_trusted_workspace_coordinator_gets_repository_scope_without_git_cwd(self):
+        with tempfile.TemporaryDirectory() as td:
+            root = Path(td) / "root"; root.mkdir()
+            state = Path(td) / "state"; state.mkdir()
+            cfg = {"allowed_root": str(root), "state_dir": str(state)}
+            request = {
+                "cwd": root,
+                "command": f"python3 {b.WORKSPACE_COORDINATOR} show --job example",
+                "write_scope": "auto",
+            }
+            plan = b.resolve_write_plan(request, cfg)
+            self.assertEqual(plan["effective"], "repository")
+            self.assertTrue(plan["trusted_coordinator"])
+            self.assertIn(root.resolve(), plan["write_roots"])
+            self.assertIn(state.resolve(), plan["write_roots"])
+
+    def test_dialog_mode_requires_explicit_allow(self):
+        cfg = {"operator_confirmation_mode": "dialog", "operator_confirmation_timeout_seconds": 10}
+        allowed = subprocess.CompletedProcess([], 0, stdout="allow\n", stderr="")
+        with patch.object(b.subprocess, "run", return_value=allowed) as run:
+            result = b.request_operator_confirmation(
+                request_id="job", cwd=Path("/tmp"), command="gh repo create x/y",
+                category="github_repository_control_plane", cfg=cfg,
+            )
+        self.assertTrue(result["approved"])
+        self.assertEqual(run.call_args.args[0][0], "/usr/bin/osascript")
 
 
 class ShellTests(unittest.TestCase):
@@ -121,6 +217,41 @@ class ShellTests(unittest.TestCase):
             self.assertTrue(out["output_limited"])
             self.assertLessEqual(out["stdout_bytes"], 4096)
 
+    @unittest.skipUnless(sys.platform == "darwin" and b.SANDBOX_EXEC.exists(), "macOS sandbox-exec required")
+    def test_read_only_sandbox_blocks_write_and_repository_scope_allows_only_repo(self):
+        with tempfile.TemporaryDirectory() as td:
+            root = Path(td)
+            repo = root / "repo"; repo.mkdir()
+            sibling = root / "sibling"; sibling.mkdir()
+            blocked = repo / "blocked"
+            out = b.run_shell(repo, "touch blocked", b"", 10, sandbox_write_roots=[])
+            self.assertNotEqual(out["exit_code"], 0)
+            self.assertTrue(out["filesystem_sandboxed"])
+            self.assertFalse(blocked.exists())
+
+            allowed = repo / "allowed"
+            out = b.run_shell(repo, "touch allowed", b"", 10, sandbox_write_roots=[repo])
+            self.assertEqual(out["exit_code"], 0)
+            self.assertTrue(allowed.exists())
+
+            outside = sibling / "outside"
+            out = b.run_shell(repo, f"touch {outside}", b"", 10, sandbox_write_roots=[repo])
+            self.assertNotEqual(out["exit_code"], 0)
+            self.assertFalse(outside.exists())
+
+    @unittest.skipUnless(sys.platform == "darwin" and b.SANDBOX_EXEC.exists(), "macOS sandbox-exec required")
+    def test_read_only_sandbox_denies_network_but_repository_scope_can_use_it(self):
+        with tempfile.TemporaryDirectory() as td:
+            td = Path(td)
+            cmd = "python3 -c \"import socket; s=socket.socket(); s.bind(('127.0.0.1',0)); print(s.getsockname()[1])\""
+            blocked = b.run_shell(td, cmd, b"", 10, sandbox_write_roots=[], sandbox_allow_network=False)
+            self.assertNotEqual(blocked["exit_code"], 0)
+            self.assertTrue(blocked["network_sandboxed"])
+
+            allowed = b.run_shell(td, cmd, b"", 10, sandbox_write_roots=[], sandbox_allow_network=True)
+            self.assertEqual(allowed["exit_code"], 0)
+            self.assertFalse(allowed["network_sandboxed"])
+
     def test_nonexistent_shell_is_rejected(self):
         with tempfile.TemporaryDirectory() as td:
             with self.assertRaisesRegex(ValueError, "configured shell"):
@@ -159,6 +290,84 @@ class ProcessTests(unittest.TestCase):
             except Exception as exc:
                 error = exc
         return uploaded, deleted, calls, error
+
+    def test_declined_high_impact_request_never_starts_shell(self):
+        with tempfile.TemporaryDirectory() as td:
+            root = Path(td) / "root"; root.mkdir()
+            state = Path(td) / "state"
+            cfg = self.make_cfg(root, state, operator_confirmation_mode="reject")
+            raw = json.dumps({
+                "protocol": 1, "id": "danger1", "cwd": str(root),
+                "command": "gh repo create krahd/should-not-exist --private",
+                "timeout_seconds": 10,
+            }).encode()
+            up, _, calls, err = self.run_with_remote("danger1.json", raw, cfg)
+            self.assertIsNone(err)
+            self.assertEqual(calls["shell"], 0)
+            result = json.loads(up["results/danger1.json"])
+            self.assertEqual(result["status"], "rejected")
+            self.assertFalse((state / "requests" / "danger1" / "started.json").exists())
+            self.assertTrue((state / "requests" / "danger1" / "finished.json").exists())
+            self.assertEqual(result["operator_confirmation"]["category"], "github_repository_control_plane")
+
+    def test_non_repository_write_requires_confirmation_before_started(self):
+        with tempfile.TemporaryDirectory() as td:
+            root = Path(td) / "root"; root.mkdir()
+            state = Path(td) / "state"
+            cfg = self.make_cfg(root, state, operator_confirmation_mode="reject")
+            raw = json.dumps({
+                "protocol": 1, "id": "write1", "cwd": str(root),
+                "command": "touch SHOULD_NOT_EXIST", "timeout_seconds": 10,
+            }).encode()
+            up, _, calls, err = self.run_with_remote("write1.json", raw, cfg)
+            self.assertIsNone(err)
+            self.assertEqual(calls["shell"], 0)
+            result = json.loads(up["results/write1.json"])
+            self.assertEqual(result["status"], "rejected")
+            self.assertEqual(result["operator_confirmation"]["category"], "non_repository_filesystem_mutation")
+            self.assertFalse((root / "SHOULD_NOT_EXIST").exists())
+            self.assertFalse((state / "requests" / "write1" / "started.json").exists())
+
+    @unittest.skipUnless(sys.platform == "darwin" and b.SANDBOX_EXEC.exists(), "macOS sandbox-exec required")
+    def test_repository_cwd_gets_repo_scoped_write_without_dialogue(self):
+        with tempfile.TemporaryDirectory() as td:
+            root = Path(td) / "root"; root.mkdir()
+            repo = root / "repo"; repo.mkdir()
+            subprocess.run(["git", "init", "-q", str(repo)], check=True)
+            state = Path(td) / "state"
+            cfg = self.make_cfg(root, state, operator_confirmation_mode="reject")
+            raw = json.dumps({
+                "protocol": 1, "id": "repowrite1", "cwd": str(repo),
+                "command": "touch marker", "timeout_seconds": 10,
+            }).encode()
+            up, _, calls, err = self.run_with_remote("repowrite1.json", raw, cfg)
+            self.assertIsNone(err)
+            self.assertEqual(calls["shell"], 1)
+            result = json.loads(up["results/repowrite1.json"])
+            self.assertEqual(result["status"], "completed")
+            self.assertEqual(result["exit_code"], 0)
+            self.assertEqual(result["write_scope"]["effective"], "repository")
+            self.assertTrue(result["write_scope"]["allow_network"])
+            self.assertTrue((repo / "marker").exists())
+
+    def test_repository_network_mutation_requires_confirmation_before_started(self):
+        with tempfile.TemporaryDirectory() as td:
+            root = Path(td) / "root"; root.mkdir()
+            repo = root / "repo"; repo.mkdir()
+            subprocess.run(["git", "init", "-q", str(repo)], check=True)
+            state = Path(td) / "state"
+            cfg = self.make_cfg(root, state, operator_confirmation_mode="reject")
+            raw = json.dumps({
+                "protocol": 1, "id": "netwrite1", "cwd": str(repo),
+                "command": "curl -X POST https://example.invalid -d x=y", "timeout_seconds": 10,
+            }).encode()
+            up, _, calls, err = self.run_with_remote("netwrite1.json", raw, cfg)
+            self.assertIsNone(err)
+            self.assertEqual(calls["shell"], 0)
+            result = json.loads(up["results/netwrite1.json"])
+            self.assertEqual(result["status"], "rejected")
+            self.assertEqual(result["operator_confirmation"]["category"], "http_mutation")
+            self.assertFalse((state / "requests" / "netwrite1" / "started.json").exists())
 
     def test_completed_replay_is_hash_bound_and_no_reexecution(self):
         with tempfile.TemporaryDirectory() as td:

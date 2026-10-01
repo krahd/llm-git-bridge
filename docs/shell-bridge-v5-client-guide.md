@@ -14,6 +14,8 @@ Never treat conversation memory, mailbox files, or a local `HEAD` alone as canon
 
 - Use a new globally unique request ID for every request.
 - Keep commands non-interactive, bounded, and comfortably below the configured timeout/output limits.
+- Leave `write_scope` as `auto` for ordinary work. In an existing Git repository/worktree this permits only repository/Git-metadata writes; outside Git it is filesystem-and-network read-only. Use `read_only` to force inspection-only execution, `repository` to require repository scope, and `system` only when a write outside repository scope is intentionally required.
+- A `system` request requires the local operator's confirmation before `STARTED`. Never relabel a broader mutation as repository/read-only merely to avoid the dialogue.
 - Submit one potentially slow or mutating request at a time.
 - After submission, inspect the matching result by exact ID; do not repeatedly list or poll the whole mailbox.
 - If the result is not visible, read `health.json` once. If the request is active/pending, do not resubmit it.
@@ -41,4 +43,6 @@ A repository-changing task is complete only when the intended change is committe
 
 ## Trust boundary
 
-Shell Bridge is a privileged local-user tunnel, not a sandbox. Never place secrets directly in request command text. Respect the operator's configured root and use the narrowest command required for the task.
+Shell Bridge uses a macOS filesystem sandbox for ordinary child shells. Outside an existing Git repository/worktree, `auto` denies filesystem writes and network access; inside one, writes are confined to that repository/worktree and its Git metadata while network remains available for repository work. The trusted workspace coordinator receives the bounded repository/state scope it needs. An explicitly approved `system` request escapes that filesystem write sandbox and therefore carries the logged-in user's normal authority. Never place secrets directly in request command text.
+
+Recognised high-impact commands trigger a native operator confirmation gate before execution regardless of their requested write scope. Do not work around or disguise a command to evade that gate. Repository creation/deletion/renaming, mutating `gh api` calls, destructive Git operations, recursive forced deletion, and common writes outside repository scope are examples. If the operator declines, treat the rejected request as authoritative and ask before constructing a different mutation. Generic read-only execution denies network access. Repository-scoped execution retains network access, so recognised remote/control-plane mutations still require explicit local confirmation; unrecognised provider-specific side effects remain outside the guarantees of command classification.

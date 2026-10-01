@@ -29,7 +29,7 @@ Live bridge identity is pinned by Drive IDs, not folder-name resolution:
 - Human path: `/Google Drive/llm-git-bridge/ChatGPT Shell Bridge`
 - Health: `health.json` at the live root.
 
-The daemon executes accepted commands with `/bin/zsh -lc` as Tomas and returns exact shell results. This remains raw shell authority, not a Git abstraction.
+The daemon executes accepted commands with `/bin/zsh -lc` as Tomas and returns exact shell results, but v5 now applies an execution-authority gate before the child shell starts. With the default `write_scope=auto`, commands outside Git are filesystem-and-network read-only; commands inside an existing repository/worktree are filesystem-write-scoped to that repository/Git metadata and retain network access; the trusted workspace coordinator receives its governed repository/state scope. Broader `system` writes and recognised high-impact external/control-plane mutations require explicit local operator confirmation before `STARTED`. An approved `system` request intentionally restores the logged-in user's ordinary authority, so v5 remains a shell transport rather than a Git abstraction or VM boundary.
 
 `health.json` is the first diagnostic surface when the request path appears unhealthy. It reports bridge version, pinned Drive IDs, active requests, process ceiling, and STARTED-without-FINISHED state without requiring a shell request.
 
@@ -47,11 +47,23 @@ Create a raw JSON file named `<id>.json` in the requests folder. IDs must be uni
   "id": "interaction-commons-status-001",
   "cwd": "/Users/tom/tom-repos/projects/interaction-commons",
   "command": "git status --short --branch",
+  "write_scope": "auto",
   "timeout_seconds": 30
 }
 ```
 
 Optional exact binary stdin may be supplied as `stdin_b64`. Upload requests as raw JSON files, not Google Docs, then read the matching raw JSON result.
+
+### Execution authority and local confirmation
+
+`write_scope` is optional and defaults to `auto`:
+
+- `auto`: when `cwd` is inside an existing Git repository/worktree, permit filesystem writes only within that repository/worktree and its Git metadata while retaining network access; otherwise deny filesystem writes and network access;
+- `read_only`: force the filesystem-and-network read-only sandbox;
+- `repository`: require an existing Git repository/worktree and confine filesystem writes to it;
+- `system`: request ordinary logged-in-user authority; this always requires the local operator to approve the exact request before `STARTED`.
+
+Recognised high-impact operations—such as GitHub repository/content control-plane changes, mutating `gh api` or obvious mutating HTTP calls, direct remote-shell/copy commands, force/delete pushes, destructive local Git, and recursive forced deletion—also require the local confirmation dialogue even from repository scope. **Never relabel, wrap, or disguise a mutation to evade the gate.** If an unrecognised write fails under the read-only sandbox, re-evaluate the intended effect and, when genuinely required, submit a new uniquely identified request with the appropriate broader scope; never replay the failed mutation ambiguously.
 
 ## Result and crash semantics
 
@@ -172,6 +184,6 @@ Do not reuse request IDs. Consumed requests are normally removed; results are du
 
 ## Trust boundary and residual OAuth warning
 
-The bridge runs as Tomas's macOS user. The initial `cwd` must be under `/Users/tom/tom-repos`, but this is not a sandbox. Treat the Drive mailbox as privileged. Never put passwords, tokens, private keys or other secrets directly in request commands because command bytes and journal state may persist.
+The bridge daemon runs as Tomas's macOS user, and the initial `cwd` must be under `/Users/tom/tom-repos`. Default child-shell scopes are constrained by the macOS execution sandbox described above; however an explicitly approved `system` request deliberately runs with the logged-in user's normal authority, and repository scope still retains network access. Treat the Drive mailbox as privileged and the confirmation gate as defence in depth, not as a VM boundary. Never put passwords, tokens, private keys or other secrets directly in request commands because command bytes and journal state may persist.
 
 The currently functioning `chatgpt-git-bridge:` rclone remote still reports rclone's 2026 retirement warning for the shared Google Drive OAuth client ID. This is an external credential/configuration risk, not a v5 concurrency defect. Surface it in diagnostics and migrate to a private OAuth client when credentials/authorisation are available; do not silently alter credentials.
