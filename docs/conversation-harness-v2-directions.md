@@ -1,6 +1,6 @@
 # Conversation Harness v2 — extraction decision and historical directions
 
-**Status:** IMPLEMENTATION EXTRACTED — historical pre-extraction directions preserved below  
+**Status:** IMPLEMENTATION EXTRACTED — historical pre-extraction directions preserved below
 **Decision date:** 30 September 2026
 
 ## Extraction decision — 30 September 2026
