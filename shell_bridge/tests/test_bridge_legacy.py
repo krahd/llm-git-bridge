@@ -135,7 +135,7 @@ class ConfirmationTests(unittest.TestCase):
             plan = b.resolve_write_plan(request, cfg)
             self.assertEqual(plan["confirmation_category"], "system_write")
 
-    def test_validate_request_preserves_optional_explanation(self):
+    def test_validate_request_preserves_required_explanation(self):
         with tempfile.TemporaryDirectory() as td:
             root = Path(td)
             req = {
@@ -147,6 +147,18 @@ class ConfirmationTests(unittest.TestCase):
             }
             validated = b.validate_request(req, "explain1.json", root, 60)
             self.assertEqual(validated["explanation"], "Check the repository state before editing.")
+
+    def test_validate_request_rejects_missing_explanation(self):
+        with tempfile.TemporaryDirectory() as td:
+            root = Path(td)
+            req = {
+                "protocol": 1,
+                "id": "explain0",
+                "cwd": str(root),
+                "command": "printf ok",
+            }
+            with self.assertRaisesRegex(ValueError, "explanation is required"):
+                b.validate_request(req, "explain0.json", root, 60)
 
     def test_validate_request_rejects_blank_explanation(self):
         with tempfile.TemporaryDirectory() as td:
@@ -190,21 +202,9 @@ class ConfirmationTests(unittest.TestCase):
         argv = run.call_args.args[0]
         self.assertEqual(argv[0:3], ["/usr/bin/osascript", "-l", "JavaScript"])
         self.assertIn("NSScrollView", argv[4])
+        self.assertIn("1080, 320", argv[4])
         self.assertEqual(argv[-1], "Create the requested GitHub repository.")
 
-    def test_dialog_mode_generates_readable_fallback_explanation(self):
-        cfg = {"operator_confirmation_mode": "dialog", "operator_confirmation_timeout_seconds": 10}
-        declined = subprocess.CompletedProcess([], 1, stdout="cancel\n", stderr="")
-        with patch.object(b.subprocess, "run", return_value=declined) as run:
-            result = b.request_operator_confirmation(
-                request_id="job", cwd=Path("/tmp"), command="touch x",
-                category="non_repository_filesystem_mutation", cfg=cfg,
-            )
-        self.assertFalse(result["approved"])
-        self.assertIn("outside the repository-scoped write sandbox", run.call_args.args[0][-1])
-
-
-class ShellTests(unittest.TestCase):
     def test_binary_stdout_stderr_and_nonzero_exit(self):
         with tempfile.TemporaryDirectory() as td:
             cmd = 'python3 -c "import sys; sys.stdout.buffer.write(bytes([97,0,98])); sys.stderr.buffer.write(bytes([101,114,114,255])); raise SystemExit(7)"'

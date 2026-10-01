@@ -177,12 +177,11 @@ def validate_request(req: dict, request_name: str, allowed_root: Path, max_timeo
     if len(command.encode("utf-8")) > max_command_bytes:
         raise ValueError("command is too large")
     explanation = req.get("explanation")
-    if explanation is not None:
-        if not isinstance(explanation, str) or not explanation.strip():
-            raise ValueError("explanation must be a non-empty string")
-        explanation = explanation.strip()
-        if len(explanation.encode("utf-8")) > 4096:
-            raise ValueError("explanation is too large")
+    if not isinstance(explanation, str) or not explanation.strip():
+        raise ValueError("explanation is required and must be a non-empty string")
+    explanation = explanation.strip()
+    if len(explanation.encode("utf-8")) > 4096:
+        raise ValueError("explanation is too large")
     timeout = req.get("timeout_seconds", 60)
     if isinstance(timeout, bool) or not isinstance(timeout, int) or timeout < 1 or timeout > max_timeout:
         raise ValueError(f"timeout_seconds must be an integer in 1..{max_timeout}")
@@ -404,13 +403,13 @@ function run(argv) {
         "\nWorking directory: " + cwdValue +
         "\n\nCommand:\n" + commandValue;
 
-    const textView = $.NSTextView.alloc.initWithFrame($.NSMakeRect(0, 0, 760, 280));
+    const textView = $.NSTextView.alloc.initWithFrame($.NSMakeRect(0, 0, 1060, 300));
     textView.setString(detailText);
     textView.setEditable(false);
     textView.setSelectable(true);
     textView.setFont($.NSFont.monospacedSystemFontOfSizeWeight(12, $.NSFontWeightRegular));
 
-    const scrollView = $.NSScrollView.alloc.initWithFrame($.NSMakeRect(0, 0, 780, 300));
+    const scrollView = $.NSScrollView.alloc.initWithFrame($.NSMakeRect(0, 0, 1080, 320));
     scrollView.setDocumentView(textView);
     scrollView.setHasVerticalScroller(true);
     scrollView.setHasHorizontalScroller(true);
