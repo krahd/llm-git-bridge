@@ -47,12 +47,13 @@ Create a raw JSON file named `<id>.json` in the requests folder. IDs must be uni
   "id": "interaction-commons-status-001",
   "cwd": "/Users/tom/tom-repos/projects/interaction-commons",
   "command": "git status --short --branch",
+  "explanation": "Check the repository status before making changes.",
   "write_scope": "auto",
   "timeout_seconds": 30
 }
 ```
 
-Optional exact binary stdin may be supplied as `stdin_b64`. Upload requests as raw JSON files, not Google Docs, then read the matching raw JSON result.
+Optional exact binary stdin may be supplied as `stdin_b64`. `explanation` is optional for protocol compatibility but clients should normally include it as a concise, human-readable statement of intent. It is shown prominently in any local approval dialogue so the operator should not need to reverse-engineer shell syntax to understand the request. Upload requests as raw JSON files, not Google Docs, then read the matching raw JSON result.
 
 ### Execution authority and local confirmation
 

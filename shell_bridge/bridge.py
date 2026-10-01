@@ -176,6 +176,13 @@ def validate_request(req: dict, request_name: str, allowed_root: Path, max_timeo
         raise ValueError("command is required")
     if len(command.encode("utf-8")) > max_command_bytes:
         raise ValueError("command is too large")
+    explanation = req.get("explanation")
+    if explanation is not None:
+        if not isinstance(explanation, str) or not explanation.strip():
+            raise ValueError("explanation must be a non-empty string")
+        explanation = explanation.strip()
+        if len(explanation.encode("utf-8")) > 4096:
+            raise ValueError("explanation is too large")
     timeout = req.get("timeout_seconds", 60)
     if isinstance(timeout, bool) or not isinstance(timeout, int) or timeout < 1 or timeout > max_timeout:
         raise ValueError(f"timeout_seconds must be an integer in 1..{max_timeout}")
@@ -196,7 +203,7 @@ def validate_request(req: dict, request_name: str, allowed_root: Path, max_timeo
         raise ValueError("write_scope must be auto, read_only, repository, or system")
     return {
         "id": rid, "cwd": cwd, "command": command, "timeout": timeout, "stdin": stdin,
-        "write_scope": write_scope,
+        "write_scope": write_scope, "explanation": explanation,
     }
 
 
@@ -331,13 +338,36 @@ def operator_confirmation_mode(cfg: dict) -> str:
     return configured
 
 
-def _confirmation_command_excerpt(command: str, limit: int = 1800) -> str:
+def _confirmation_command_excerpt(command: str, limit: int = 6000) -> str:
     if len(command) <= limit:
         return command
     return command[:limit] + "\n… [command truncated in dialogue; full request remains journalled]"
 
 
-def request_operator_confirmation(*, request_id: str, cwd: Path, command: str, category: str, cfg: dict) -> dict:
+_CONFIRMATION_EXPLANATIONS = {
+    "github_repository_control_plane": "Change GitHub repository settings or other GitHub control-plane state.",
+    "http_mutation": "Send a network request that may change remote state.",
+    "remote_shell_or_copy": "Connect to another machine or transfer files.",
+    "destructive_git": "Perform a destructive Git operation that may discard or rewrite local state.",
+    "filesystem_mutation": "Change files outside the repository-scoped write sandbox.",
+    "non_repository_filesystem_mutation": "Change files outside the repository-scoped write sandbox.",
+    "system_configuration": "Change macOS or service configuration.",
+    "package_management": "Install, remove, or update software packages.",
+    "system_write": "Write outside the repository-scoped sandbox with your normal macOS user authority.",
+}
+
+
+def _confirmation_explanation(category: str, explanation: str | None) -> str:
+    if explanation:
+        return explanation
+    fallback = _CONFIRMATION_EXPLANATIONS.get(category)
+    if fallback:
+        return fallback
+    return f"Run an elevated operation classified as {category.replace('_', ' ')}."
+
+
+def request_operator_confirmation(*, request_id: str, cwd: Path, command: str, category: str,
+                                  cfg: dict, explanation: str | None = None) -> dict:
     mode = operator_confirmation_mode(cfg)
     record = {"required": True, "category": category, "mode": mode, "approved": False}
     if mode == "off":
@@ -349,23 +379,55 @@ def request_operator_confirmation(*, request_id: str, cwd: Path, command: str, c
     if isinstance(timeout, bool) or not isinstance(timeout, int) or timeout < 1:
         return {**record, "message": "operator confirmation timeout configuration is invalid"}
 
-    script = r'''on run argv
-set requestId to item 1 of argv
-set categoryName to item 2 of argv
-set cwdValue to item 3 of argv
-set commandValue to item 4 of argv
-set promptText to "A ChatGPT Shell Bridge request needs permission to run with elevated write authority.\n\nRequest: " & requestId & "\nCategory: " & categoryName & "\nWorking directory: " & cwdValue & "\n\nCommand:\n" & commandValue & "\n\nAllow this exact request?"
-try
-    set response to display dialog promptText with title "ChatGPT Shell Bridge" buttons {"Cancel", "Allow"} default button "Cancel" cancel button "Cancel" with icon caution
-    if button returned of response is "Allow" then return "allow"
-on error number -128
-    return "cancel"
-end try
-return "cancel"
-end run'''
+    summary = _confirmation_explanation(category, explanation)
+    script = r'''ObjC.import("AppKit");
+
+function run(argv) {
+    const requestId = argv[0];
+    const categoryName = argv[1];
+    const cwdValue = argv[2];
+    const commandValue = argv[3];
+    const explanationValue = argv[4];
+
+    const alert = $.NSAlert.alloc.init;
+    alert.setMessageText("Allow ChatGPT to perform this action?");
+    alert.setInformativeText(
+        "What ChatGPT is trying to do:\n" + explanationValue +
+        "\n\nWhy approval is required:\n" + categoryName.replace(/_/g, " ")
+    );
+    alert.setAlertStyle($.NSAlertStyleWarning);
+    alert.addButtonWithTitle("Cancel");
+    alert.addButtonWithTitle("Allow");
+
+    const detailText =
+        "Request: " + requestId +
+        "\nWorking directory: " + cwdValue +
+        "\n\nCommand:\n" + commandValue;
+
+    const textView = $.NSTextView.alloc.initWithFrame($.NSMakeRect(0, 0, 760, 280));
+    textView.setString(detailText);
+    textView.setEditable(false);
+    textView.setSelectable(true);
+    textView.setFont($.NSFont.monospacedSystemFontOfSizeWeight(12, $.NSFontWeightRegular));
+
+    const scrollView = $.NSScrollView.alloc.initWithFrame($.NSMakeRect(0, 0, 780, 300));
+    scrollView.setDocumentView(textView);
+    scrollView.setHasVerticalScroller(true);
+    scrollView.setHasHorizontalScroller(true);
+    scrollView.setAutohidesScrollers(true);
+    scrollView.setBorderType($.NSBezelBorder);
+    alert.setAccessoryView(scrollView);
+
+    $.NSApplication.sharedApplication.activateIgnoringOtherApps(true);
+    const response = alert.runModal;
+    return response === $.NSAlertSecondButtonReturn ? "allow" : "cancel";
+}'''
     try:
         cp = subprocess.run(
-            ["/usr/bin/osascript", "-e", script, "--", request_id, category, str(cwd), _confirmation_command_excerpt(command)],
+            [
+                "/usr/bin/osascript", "-l", "JavaScript", "-e", script, "--",
+                request_id, category, str(cwd), _confirmation_command_excerpt(command), summary,
+            ],
             stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True, timeout=timeout, check=False,
         )
     except FileNotFoundError:
@@ -839,6 +901,7 @@ def process_one(name: str, cfg: dict) -> None:
     if category is not None:
         confirmation = request_operator_confirmation(
             request_id=v["id"], cwd=v["cwd"], command=v["command"], category=category, cfg=cfg,
+            explanation=v.get("explanation"),
         )
         if not confirmation["approved"]:
             result = result_envelope(v["id"], request_sha, "rejected", {
