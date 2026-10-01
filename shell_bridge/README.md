@@ -13,6 +13,8 @@ This is intentionally different from the repository's protocol-v2 `llm-git-bridg
 
 ## Security boundary
 
+**High-impact operator confirmation.** On macOS, Shell Bridge pauses recognised high-impact control-plane/destructive commands *before* recording `STARTED` and presents a native confirmation dialogue to the logged-in operator. The dialogue shows the request ID, risk category, working directory, and actual command; **Cancel** is the default. Declined or timed-out requests are terminally `rejected` and never reach the shell. Built-in recognition currently covers GitHub repository control-plane changes (`gh repo create/delete/rename/archive/unarchive/edit`), mutating `gh api` requests, force/delete pushes, `git reset --hard`, forced `git clean`, and recursive forced `rm`. On non-macOS hosts, recognised commands are rejected by default. Set `operator_confirmation_mode` to `auto` (default), `dialog`, `reject`, or explicitly `off`; `off` weakens this safeguard. Detection is defence in depth, not a complete shell parser or sandbox.
+
 **Shell Bridge is not a sandbox.** Accepted commands run as the logged-in macOS user. The configured `ALLOWED_ROOT` limits the request's initial working directory, but the shell process itself has the permissions of that user. Treat the Drive mailbox as privileged infrastructure and do not put passwords, tokens, private keys, or other secrets directly in request command text, because request/result/journal bytes may persist.
 
 For repository changes, use `workspace.py` rather than editing canonical branches directly. GitHub remains the canonical shared repository state; the Mac checkout is authoritative for current local execution state; Drive is transport only.

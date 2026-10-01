@@ -42,3 +42,5 @@ A repository-changing task is complete only when the intended change is committe
 ## Trust boundary
 
 Shell Bridge is a privileged local-user tunnel, not a sandbox. Never place secrets directly in request command text. Respect the operator's configured root and use the narrowest command required for the task.
+
+Recognised high-impact commands trigger a native operator confirmation gate before execution. Do not work around or disguise a command to evade that gate. Repository creation/deletion/renaming, mutating `gh api` calls, destructive Git operations, and recursive forced deletion are examples. If the operator declines, treat the rejected request as authoritative and ask before constructing a different mutation.

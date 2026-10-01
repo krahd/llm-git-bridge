@@ -1,5 +1,6 @@
 import base64
 import json
+import subprocess
 import os
 import tempfile
 import time
@@ -65,6 +66,35 @@ class ValidationTests(unittest.TestCase):
             req = dict(base, stdin_b64=base64.b64encode(b"12345").decode())
             with self.assertRaisesRegex(ValueError, "stdin is too large"):
                 b.validate_request(req, "abc.json", root, 300, max_stdin_bytes=4)
+
+
+class ConfirmationTests(unittest.TestCase):
+    def test_high_impact_classifier_covers_control_plane_and_destructive_forms(self):
+        cases = {
+            "gh repo create krahd/example --private": "github_repository_control_plane",
+            "gh repo delete krahd/example --yes": "github_repository_control_plane",
+            "gh api repos/krahd/example -X PATCH -f private=true": "github_api_mutation",
+            "git push --force-with-lease origin main": "git_destructive_push",
+            "git reset --hard HEAD~1": "git_destructive_local",
+            "git clean -fdx": "git_destructive_local",
+            "rm -rf generated": "filesystem_recursive_delete",
+        }
+        for command, expected in cases.items():
+            with self.subTest(command=command):
+                self.assertEqual(b.high_impact_command_category(command), expected)
+        self.assertIsNone(b.high_impact_command_category("git push origin feature"))
+        self.assertIsNone(b.high_impact_command_category("printf safe"))
+
+    def test_dialog_mode_requires_explicit_allow(self):
+        cfg = {"operator_confirmation_mode": "dialog", "operator_confirmation_timeout_seconds": 10}
+        allowed = subprocess.CompletedProcess([], 0, stdout="allow\n", stderr="")
+        with patch.object(b.subprocess, "run", return_value=allowed) as run:
+            result = b.request_operator_confirmation(
+                request_id="job", cwd=Path("/tmp"), command="gh repo create x/y",
+                category="github_repository_control_plane", cfg=cfg,
+            )
+        self.assertTrue(result["approved"])
+        self.assertEqual(run.call_args.args[0][0], "/usr/bin/osascript")
 
 
 class ShellTests(unittest.TestCase):
@@ -159,6 +189,25 @@ class ProcessTests(unittest.TestCase):
             except Exception as exc:
                 error = exc
         return uploaded, deleted, calls, error
+
+    def test_declined_high_impact_request_never_starts_shell(self):
+        with tempfile.TemporaryDirectory() as td:
+            root = Path(td) / "root"; root.mkdir()
+            state = Path(td) / "state"
+            cfg = self.make_cfg(root, state, operator_confirmation_mode="reject")
+            raw = json.dumps({
+                "protocol": 1, "id": "danger1", "cwd": str(root),
+                "command": "gh repo create krahd/should-not-exist --private",
+                "timeout_seconds": 10,
+            }).encode()
+            up, _, calls, err = self.run_with_remote("danger1.json", raw, cfg)
+            self.assertIsNone(err)
+            self.assertEqual(calls["shell"], 0)
+            result = json.loads(up["results/danger1.json"])
+            self.assertEqual(result["status"], "rejected")
+            self.assertFalse((state / "requests" / "danger1" / "started.json").exists())
+            self.assertTrue((state / "requests" / "danger1" / "finished.json").exists())
+            self.assertEqual(result["operator_confirmation"]["category"], "github_repository_control_plane")
 
     def test_completed_replay_is_hash_bound_and_no_reexecution(self):
         with tempfile.TemporaryDirectory() as td:

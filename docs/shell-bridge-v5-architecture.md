@@ -19,6 +19,7 @@ The system must preserve a tunnel-like shell/Git experience while making the *sa
 ## Non-goals
 
 - The raw shell transport is not an OS sandbox and cannot infer shell semantics perfectly.
+- Recognised high-impact control-plane/destructive commands require local operator confirmation before `STARTED`; this is a defence-in-depth gate, not a substitute for the raw-shell trust boundary.
 - Cross-repository GitHub publication cannot be made truly atomic with ordinary Git pushes. Cross-repository workflows therefore use dependency ordering and durable recovery rather than pretending to provide distributed transactions.
 - v5 does not auto-integrate interrupted work merely because it is syntactically mergeable.
 

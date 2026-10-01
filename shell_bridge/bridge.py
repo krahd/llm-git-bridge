@@ -28,7 +28,31 @@ DEFAULT_MAX_COMMAND_BYTES = 256 * 1024
 DEFAULT_MAX_STDIN_BYTES = 1024 * 1024
 DEFAULT_MAX_OUTPUT_BYTES = 16 * 1024 * 1024
 DEFAULT_MAX_ACTIVE_CAP = 32
+DEFAULT_OPERATOR_CONFIRMATION_TIMEOUT = 300
 ID_RE = re.compile(r"[a-z0-9][a-z0-9._-]{0,127}\Z")
+
+HIGH_IMPACT_COMMAND_RULES = (
+    (
+        "github_repository_control_plane",
+        re.compile(r"(?im)(?<![\w-])gh\s+repo\s+(?:create|delete|rename|archive|unarchive|edit)\b"),
+    ),
+    (
+        "github_api_mutation",
+        re.compile(r"(?im)(?<![\w-])gh\s+api\b[^\n;]*(?:(?:-X|--method(?:=|\s+))\s*(?:POST|PUT|PATCH|DELETE))\b"),
+    ),
+    (
+        "git_destructive_push",
+        re.compile(r"(?im)(?<![\w-])git\s+push\b[^\n;]*(?:--force(?:-with-lease)?\b|--delete\b|(?:^|\s)-f(?:\s|$))"),
+    ),
+    (
+        "git_destructive_local",
+        re.compile(r"(?im)(?<![\w-])git\s+(?:reset\s+--hard\b|clean\s+-[A-Za-z]*f[A-Za-z]*\b)"),
+    ),
+    (
+        "filesystem_recursive_delete",
+        re.compile(r"(?im)(?:^|[;&|]\s*|\n)\s*(?:sudo\s+)?rm\s+(?:-[A-Za-z]*r[A-Za-z]*f[A-Za-z]*|-[A-Za-z]*f[A-Za-z]*r[A-Za-z]*)\b"),
+    ),
+)
 
 _TRANSPORT_LOCK = threading.RLock()
 _ACTIVE_LOCK = threading.RLock()
@@ -122,6 +146,73 @@ def validate_request(req: dict, request_name: str, allowed_root: Path, max_timeo
     if len(stdin) > max_stdin_bytes:
         raise ValueError("stdin is too large")
     return {"id": rid, "cwd": cwd, "command": command, "timeout": timeout, "stdin": stdin}
+
+
+def high_impact_command_category(command: str) -> str | None:
+    # Best-effort defence in depth. Shell Bridge remains raw shell authority;
+    # this detector is not a shell parser or a sandbox.
+    for category, pattern in HIGH_IMPACT_COMMAND_RULES:
+        if pattern.search(command):
+            return category
+    return None
+
+
+def operator_confirmation_mode(cfg: dict) -> str:
+    configured = cfg.get("operator_confirmation_mode", "auto")
+    if configured not in {"auto", "dialog", "reject", "off"}:
+        raise ValueError("operator_confirmation_mode must be auto, dialog, reject, or off")
+    if configured == "auto":
+        return "dialog" if sys.platform == "darwin" else "reject"
+    return configured
+
+
+def _confirmation_command_excerpt(command: str, limit: int = 1800) -> str:
+    if len(command) <= limit:
+        return command
+    return command[:limit] + "\n… [command truncated in dialogue; full request remains journalled]"
+
+
+def request_operator_confirmation(*, request_id: str, cwd: Path, command: str, category: str, cfg: dict) -> dict:
+    mode = operator_confirmation_mode(cfg)
+    record = {"required": True, "category": category, "mode": mode, "approved": False}
+    if mode == "off":
+        return {**record, "approved": True, "message": "operator confirmation explicitly disabled by local configuration"}
+    if mode == "reject":
+        return {**record, "message": "operator confirmation required; interactive approval is unavailable or disabled"}
+
+    timeout = cfg.get("operator_confirmation_timeout_seconds", DEFAULT_OPERATOR_CONFIRMATION_TIMEOUT)
+    if isinstance(timeout, bool) or not isinstance(timeout, int) or timeout < 1:
+        return {**record, "message": "operator confirmation timeout configuration is invalid"}
+
+    script = r'''on run argv
+set requestId to item 1 of argv
+set categoryName to item 2 of argv
+set cwdValue to item 3 of argv
+set commandValue to item 4 of argv
+set promptText to "A high-impact ChatGPT Shell Bridge request is asking to run.\n\nRequest: " & requestId & "\nCategory: " & categoryName & "\nWorking directory: " & cwdValue & "\n\nCommand:\n" & commandValue & "\n\nAllow this exact request?"
+try
+    set response to display dialog promptText with title "ChatGPT Shell Bridge" buttons {"Cancel", "Allow"} default button "Cancel" cancel button "Cancel" with icon caution
+    if button returned of response is "Allow" then return "allow"
+on error number -128
+    return "cancel"
+end try
+return "cancel"
+end run'''
+    try:
+        cp = subprocess.run(
+            ["/usr/bin/osascript", "-e", script, "--", request_id, category, str(cwd), _confirmation_command_excerpt(command)],
+            stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True, timeout=timeout, check=False,
+        )
+    except FileNotFoundError:
+        return {**record, "message": "operator confirmation required but /usr/bin/osascript is unavailable"}
+    except subprocess.TimeoutExpired:
+        return {**record, "message": "operator confirmation timed out; request was not started"}
+    approved = cp.returncode == 0 and cp.stdout.strip() == "allow"
+    return {
+        **record,
+        "approved": approved,
+        "message": "operator approved high-impact request" if approved else "operator declined high-impact request; request was not started",
+    }
 
 
 def _terminate_pgid(pgid: int) -> None:
@@ -540,6 +631,21 @@ def process_one(name: str, cfg: dict) -> None:
         _persist_then_publish(result, local_result, finished_marker, name, cfg)
         return
 
+    confirmation = None
+    category = high_impact_command_category(v["command"])
+    if category is not None:
+        confirmation = request_operator_confirmation(
+            request_id=v["id"], cwd=v["cwd"], command=v["command"], category=category, cfg=cfg,
+        )
+        if not confirmation["approved"]:
+            result = result_envelope(v["id"], request_sha, "rejected", {
+                "cwd": str(v["cwd"]),
+                "message": confirmation["message"],
+                "operator_confirmation": confirmation,
+            })
+            _persist_then_publish(result, local_result, finished_marker, name, cfg)
+            return
+
     atomic_write(started_marker, json.dumps({
         "request_sha256": request_sha,
         "started_at": time.time(),
@@ -570,6 +676,7 @@ def process_one(name: str, cfg: dict) -> None:
         else:
             result = result_envelope(v["id"], request_sha, "completed", {
                 "cwd": str(v["cwd"]),
+                **({"operator_confirmation": confirmation} if confirmation is not None else {}),
                 **exec_result,
             })
     except Exception as exc:
@@ -620,11 +727,13 @@ def load_config(path: Path) -> dict:
         ("max_command_bytes", DEFAULT_MAX_COMMAND_BYTES),
         ("max_stdin_bytes", DEFAULT_MAX_STDIN_BYTES),
         ("max_output_bytes", DEFAULT_MAX_OUTPUT_BYTES),
+        ("operator_confirmation_timeout_seconds", DEFAULT_OPERATOR_CONFIRMATION_TIMEOUT),
     ]:
         value = cfg.get(key, default)
         if isinstance(value, bool) or not isinstance(value, int) or value < 1:
             raise ValueError(f"{key} must be a positive integer")
     max_active_requests(cfg)
+    operator_confirmation_mode(cfg)
     return cfg
 
 
@@ -713,6 +822,8 @@ def doctor(cfg: dict, *, probe_transport: bool = True) -> dict:
         "results_folder_id": cfg.get("results_folder_id"),
         "allowed_root": str(Path(cfg["allowed_root"]).expanduser().resolve()),
         "max_active_requests": max_active_requests(cfg),
+        "operator_confirmation_mode": operator_confirmation_mode(cfg),
+        "operator_confirmation_timeout_seconds": cfg.get("operator_confirmation_timeout_seconds", DEFAULT_OPERATOR_CONFIRMATION_TIMEOUT),
         "rclone_timeout_seconds": int(cfg.get("rclone_timeout_seconds", DEFAULT_RCLONE_TIMEOUT)),
         "state_dir": str(Path(cfg["state_dir"]).expanduser().resolve()),
         "state_counter_semantics": "current_state_dir_journal_snapshot",

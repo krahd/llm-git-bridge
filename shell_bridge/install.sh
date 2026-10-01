@@ -217,6 +217,8 @@ cfg.update({
  'max_active_requests':cfg.get('max_active_requests','auto'),'health_seconds':60.0,
  'max_request_bytes':2*1024*1024,'max_command_bytes':256*1024,
  'max_stdin_bytes':1024*1024,'max_output_bytes':16*1024*1024,
+ 'operator_confirmation_mode':cfg.get('operator_confirmation_mode','auto'),
+ 'operator_confirmation_timeout_seconds':cfg.get('operator_confirmation_timeout_seconds',300),
 })
 with open(path,'w',encoding='utf-8') as f: json.dump(cfg,f,indent=2,sort_keys=True); f.write('\n')
 PY
