@@ -86,7 +86,7 @@ Create a raw JSON file named `<id>.json` in the mailbox `requests/` folder:
 
 `write_scope` is optional. `auto` means repository-scoped writes with network access when `cwd` is inside an existing Git repository/worktree, and filesystem-and-network read-only otherwise. Use `read_only` to force read-only execution, `repository` to require a Git repository/worktree scope, or `system` for an intentional write beyond repository scope; `system` triggers the native operator confirmation gate. Obvious non-repository write commands detected under `auto` are also promoted to the confirmation gate instead of being run silently.
 
-`explanation` is optional for protocol compatibility, but clients should normally provide a concise plain-language description of the intended action. When local approval is required, the macOS dialogue presents that explanation first and places the exact command, request ID, and working directory in a wide selectable, scrollable details area. Older requests without `explanation` remain valid and receive a category-based fallback summary.
+`explanation` is required on every request and must contain a concise plain-language description of the intended action. Missing, blank, non-string, or oversized explanations are rejected before execution. When local approval is required, the macOS dialogue presents that explanation first and places the exact command, request ID, and working directory in an extra-wide selectable, scrollable details area.
 
 IDs must be globally unique for the mailbox. The daemon publishes the terminal result under the same filename in `results/`.
 

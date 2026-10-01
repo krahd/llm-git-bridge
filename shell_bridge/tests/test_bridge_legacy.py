@@ -19,14 +19,14 @@ class ValidationTests(unittest.TestCase):
             root = Path(td)
             repo = root / "projects" / "repo"
             repo.mkdir(parents=True)
-            req = {"protocol": 1, "id": "abc-123", "cwd": str(repo), "command": "git status", "timeout_seconds": 10}
+            req = {"protocol": 1, "id": "abc-123", "cwd": str(repo), "explanation": "Test request.", "command": "git status", "timeout_seconds": 10}
             out = b.validate_request(req, "abc-123.json", root, 300)
             self.assertEqual(out["cwd"], repo.resolve())
 
     def test_rejects_outside_root_and_symlink_escape(self):
         with tempfile.TemporaryDirectory() as td, tempfile.TemporaryDirectory() as other:
             root = Path(td)
-            req = {"protocol": 1, "id": "abc", "cwd": other, "command": "pwd"}
+            req = {"protocol": 1, "id": "abc", "cwd": other, "explanation": "Test request.", "command": "pwd"}
             with self.assertRaisesRegex(ValueError, "allowed_root"):
                 b.validate_request(req, "abc.json", root, 300)
             link = root / "escape"
@@ -49,14 +49,14 @@ class ValidationTests(unittest.TestCase):
 
     def test_filename_must_match_id(self):
         with tempfile.TemporaryDirectory() as td:
-            req = {"protocol": 1, "id": "abc", "cwd": td, "command": "pwd"}
+            req = {"protocol": 1, "id": "abc", "cwd": td, "explanation": "Test request.", "command": "pwd"}
             with self.assertRaisesRegex(ValueError, "filename"):
                 b.validate_request(req, "xyz.json", Path(td), 300)
 
     def test_timeout_bool_and_payload_limits_rejected(self):
         with tempfile.TemporaryDirectory() as td:
             root = Path(td)
-            base = {"protocol": 1, "id": "abc", "cwd": td, "command": "pwd"}
+            base = {"protocol": 1, "id": "abc", "cwd": td, "explanation": "Test request.", "command": "pwd"}
             req = dict(base, timeout_seconds=True)
             with self.assertRaisesRegex(ValueError, "timeout_seconds"):
                 b.validate_request(req, "abc.json", root, 300)
@@ -107,7 +107,7 @@ class ConfirmationTests(unittest.TestCase):
             state = Path(td) / "state"; state.mkdir()
             cfg = {"allowed_root": str(root), "state_dir": str(state)}
             outside = root / "plain"; outside.mkdir()
-            request = {"cwd": outside, "command": "cat file", "write_scope": "auto"}
+            request = {"cwd": outside, "explanation": "Test request.", "command": "cat file", "write_scope": "auto"}
             plan = b.resolve_write_plan(request, cfg)
             self.assertEqual(plan["effective"], "read_only")
             self.assertEqual(plan["write_roots"], [])
@@ -115,7 +115,7 @@ class ConfirmationTests(unittest.TestCase):
 
             repo = root / "repo"; repo.mkdir()
             subprocess.run(["git", "init", "-q", str(repo)], check=True)
-            request = {"cwd": repo, "command": "touch marker", "write_scope": "auto"}
+            request = {"cwd": repo, "explanation": "Test request.", "command": "touch marker", "write_scope": "auto"}
             plan = b.resolve_write_plan(request, cfg)
             self.assertEqual(plan["effective"], "repository")
             self.assertIn(repo.resolve(), plan["write_roots"])
@@ -126,7 +126,7 @@ class ConfirmationTests(unittest.TestCase):
             root = Path(td) / "root"; root.mkdir()
             state = Path(td) / "state"; state.mkdir()
             cfg = {"allowed_root": str(root), "state_dir": str(state)}
-            request = {"cwd": root, "command": "touch marker", "write_scope": "auto"}
+            request = {"cwd": root, "explanation": "Test request.", "command": "touch marker", "write_scope": "auto"}
             plan = b.resolve_write_plan(request, cfg)
             self.assertEqual(plan["effective"], "system")
             self.assertEqual(plan["confirmation_category"], "non_repository_filesystem_mutation")
@@ -135,7 +135,7 @@ class ConfirmationTests(unittest.TestCase):
             plan = b.resolve_write_plan(request, cfg)
             self.assertEqual(plan["confirmation_category"], "system_write")
 
-    def test_validate_request_preserves_optional_explanation(self):
+    def test_validate_request_preserves_required_explanation(self):
         with tempfile.TemporaryDirectory() as td:
             root = Path(td)
             req = {
@@ -147,6 +147,18 @@ class ConfirmationTests(unittest.TestCase):
             }
             validated = b.validate_request(req, "explain1.json", root, 60)
             self.assertEqual(validated["explanation"], "Check the repository state before editing.")
+
+    def test_validate_request_rejects_missing_explanation(self):
+        with tempfile.TemporaryDirectory() as td:
+            root = Path(td)
+            req = {
+                "protocol": 1,
+                "id": "explain0",
+                "cwd": str(root),
+                "command": "printf ok",
+            }
+            with self.assertRaisesRegex(ValueError, "explanation is required"):
+                b.validate_request(req, "explain0.json", root, 60)
 
     def test_validate_request_rejects_blank_explanation(self):
         with tempfile.TemporaryDirectory() as td:
@@ -168,7 +180,7 @@ class ConfirmationTests(unittest.TestCase):
             cfg = {"allowed_root": str(root), "state_dir": str(state)}
             request = {
                 "cwd": root,
-                "command": f"python3 {b.WORKSPACE_COORDINATOR} show --job example",
+                "explanation": "Test request.", "command": f"python3 {b.WORKSPACE_COORDINATOR} show --job example",
                 "write_scope": "auto",
             }
             plan = b.resolve_write_plan(request, cfg)
@@ -190,21 +202,9 @@ class ConfirmationTests(unittest.TestCase):
         argv = run.call_args.args[0]
         self.assertEqual(argv[0:3], ["/usr/bin/osascript", "-l", "JavaScript"])
         self.assertIn("NSScrollView", argv[4])
+        self.assertIn("1080, 320", argv[4])
         self.assertEqual(argv[-1], "Create the requested GitHub repository.")
 
-    def test_dialog_mode_generates_readable_fallback_explanation(self):
-        cfg = {"operator_confirmation_mode": "dialog", "operator_confirmation_timeout_seconds": 10}
-        declined = subprocess.CompletedProcess([], 1, stdout="cancel\n", stderr="")
-        with patch.object(b.subprocess, "run", return_value=declined) as run:
-            result = b.request_operator_confirmation(
-                request_id="job", cwd=Path("/tmp"), command="touch x",
-                category="non_repository_filesystem_mutation", cfg=cfg,
-            )
-        self.assertFalse(result["approved"])
-        self.assertIn("outside the repository-scoped write sandbox", run.call_args.args[0][-1])
-
-
-class ShellTests(unittest.TestCase):
     def test_binary_stdout_stderr_and_nonzero_exit(self):
         with tempfile.TemporaryDirectory() as td:
             cmd = 'python3 -c "import sys; sys.stdout.buffer.write(bytes([97,0,98])); sys.stderr.buffer.write(bytes([101,114,114,255])); raise SystemExit(7)"'
@@ -347,7 +347,7 @@ class ProcessTests(unittest.TestCase):
             cfg = self.make_cfg(root, state, operator_confirmation_mode="reject")
             raw = json.dumps({
                 "protocol": 1, "id": "danger1", "cwd": str(root),
-                "command": "gh repo create krahd/should-not-exist --private",
+                "explanation": "Test request.", "command": "gh repo create krahd/should-not-exist --private",
                 "timeout_seconds": 10,
             }).encode()
             up, _, calls, err = self.run_with_remote("danger1.json", raw, cfg)
@@ -366,7 +366,7 @@ class ProcessTests(unittest.TestCase):
             cfg = self.make_cfg(root, state, operator_confirmation_mode="reject")
             raw = json.dumps({
                 "protocol": 1, "id": "write1", "cwd": str(root),
-                "command": "touch SHOULD_NOT_EXIST", "timeout_seconds": 10,
+                "explanation": "Test request.", "command": "touch SHOULD_NOT_EXIST", "timeout_seconds": 10,
             }).encode()
             up, _, calls, err = self.run_with_remote("write1.json", raw, cfg)
             self.assertIsNone(err)
@@ -387,7 +387,7 @@ class ProcessTests(unittest.TestCase):
             cfg = self.make_cfg(root, state, operator_confirmation_mode="reject")
             raw = json.dumps({
                 "protocol": 1, "id": "repowrite1", "cwd": str(repo),
-                "command": "touch marker", "timeout_seconds": 10,
+                "explanation": "Test request.", "command": "touch marker", "timeout_seconds": 10,
             }).encode()
             up, _, calls, err = self.run_with_remote("repowrite1.json", raw, cfg)
             self.assertIsNone(err)
@@ -408,7 +408,7 @@ class ProcessTests(unittest.TestCase):
             cfg = self.make_cfg(root, state, operator_confirmation_mode="reject")
             raw = json.dumps({
                 "protocol": 1, "id": "netwrite1", "cwd": str(repo),
-                "command": "curl -X POST https://example.invalid -d x=y", "timeout_seconds": 10,
+                "explanation": "Test request.", "command": "curl -X POST https://example.invalid -d x=y", "timeout_seconds": 10,
             }).encode()
             up, _, calls, err = self.run_with_remote("netwrite1.json", raw, cfg)
             self.assertIsNone(err)
@@ -423,7 +423,7 @@ class ProcessTests(unittest.TestCase):
             root = Path(td) / "root"; root.mkdir()
             state = Path(td) / "state"
             cfg = self.make_cfg(root, state)
-            raw = json.dumps({"protocol":1,"id":"job1","cwd":str(root),"command":"printf hello","timeout_seconds":10}).encode()
+            raw = json.dumps({"protocol":1,"id":"job1","cwd":str(root),"explanation": "Test request.", "command":"printf hello","timeout_seconds":10}).encode()
             up, deleted, calls, err = self.run_with_remote("job1.json", raw, cfg)
             self.assertIsNone(err); self.assertEqual(calls["shell"], 1)
             first = json.loads(up["results/job1.json"])
@@ -431,7 +431,7 @@ class ProcessTests(unittest.TestCase):
             up2, _, calls2, err2 = self.run_with_remote("job1.json", raw, cfg)
             self.assertIsNone(err2); self.assertEqual(calls2["shell"], 0)
             self.assertEqual(json.loads(up2["results/job1.json"])["request_sha256"], first["request_sha256"])
-            changed = json.dumps({"protocol":1,"id":"job1","cwd":str(root),"command":"printf CHANGED","timeout_seconds":10}).encode()
+            changed = json.dumps({"protocol":1,"id":"job1","cwd":str(root),"explanation": "Test request.", "command":"printf CHANGED","timeout_seconds":10}).encode()
             up3, _, calls3, err3 = self.run_with_remote("job1.json", changed, cfg)
             self.assertIsNone(err3); self.assertEqual(calls3["shell"], 0)
             conflict = json.loads(up3["results/job1.json"])
@@ -443,7 +443,7 @@ class ProcessTests(unittest.TestCase):
             root = Path(td) / "root"; root.mkdir()
             state = Path(td) / "state"
             rdir = state / "requests" / "job2"; rdir.mkdir(parents=True)
-            raw = json.dumps({"protocol":1,"id":"job2","cwd":str(root),"command":"touch SHOULD_NOT_EXIST"}).encode()
+            raw = json.dumps({"protocol":1,"id":"job2","cwd":str(root),"explanation": "Test request.", "command":"touch SHOULD_NOT_EXIST"}).encode()
             (rdir / "request.json").write_bytes(raw)
             (rdir / "started.json").write_text(json.dumps({"request_sha256": b.sha256_bytes(raw)}))
             cfg = self.make_cfg(root, state)
@@ -457,7 +457,7 @@ class ProcessTests(unittest.TestCase):
             root = Path(td) / "root"; root.mkdir()
             state = Path(td) / "state"
             cfg = self.make_cfg(root, state)
-            raw = json.dumps({"protocol":1,"id":"job3","cwd":str(root),"command":"printf once","timeout_seconds":10}).encode()
+            raw = json.dumps({"protocol":1,"id":"job3","cwd":str(root),"explanation": "Test request.", "command":"printf once","timeout_seconds":10}).encode()
             _, _, calls, err = self.run_with_remote("job3.json", raw, cfg, fail_upload_once=True)
             self.assertIsInstance(err, RuntimeError)
             self.assertEqual(calls["shell"], 1)

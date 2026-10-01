@@ -177,12 +177,11 @@ def validate_request(req: dict, request_name: str, allowed_root: Path, max_timeo
     if len(command.encode("utf-8")) > max_command_bytes:
         raise ValueError("command is too large")
     explanation = req.get("explanation")
-    if explanation is not None:
-        if not isinstance(explanation, str) or not explanation.strip():
-            raise ValueError("explanation must be a non-empty string")
-        explanation = explanation.strip()
-        if len(explanation.encode("utf-8")) > 4096:
-            raise ValueError("explanation is too large")
+    if not isinstance(explanation, str) or not explanation.strip():
+        raise ValueError("explanation is required and must be a non-empty string")
+    explanation = explanation.strip()
+    if len(explanation.encode("utf-8")) > 4096:
+        raise ValueError("explanation is too large")
     timeout = req.get("timeout_seconds", 60)
     if isinstance(timeout, bool) or not isinstance(timeout, int) or timeout < 1 or timeout > max_timeout:
         raise ValueError(f"timeout_seconds must be an integer in 1..{max_timeout}")
@@ -344,30 +343,9 @@ def _confirmation_command_excerpt(command: str, limit: int = 6000) -> str:
     return command[:limit] + "\n… [command truncated in dialogue; full request remains journalled]"
 
 
-_CONFIRMATION_EXPLANATIONS = {
-    "github_repository_control_plane": "Change GitHub repository settings or other GitHub control-plane state.",
-    "http_mutation": "Send a network request that may change remote state.",
-    "remote_shell_or_copy": "Connect to another machine or transfer files.",
-    "destructive_git": "Perform a destructive Git operation that may discard or rewrite local state.",
-    "filesystem_mutation": "Change files outside the repository-scoped write sandbox.",
-    "non_repository_filesystem_mutation": "Change files outside the repository-scoped write sandbox.",
-    "system_configuration": "Change macOS or service configuration.",
-    "package_management": "Install, remove, or update software packages.",
-    "system_write": "Write outside the repository-scoped sandbox with your normal macOS user authority.",
-}
-
-
-def _confirmation_explanation(category: str, explanation: str | None) -> str:
-    if explanation:
-        return explanation
-    fallback = _CONFIRMATION_EXPLANATIONS.get(category)
-    if fallback:
-        return fallback
-    return f"Run an elevated operation classified as {category.replace('_', ' ')}."
-
 
 def request_operator_confirmation(*, request_id: str, cwd: Path, command: str, category: str,
-                                  cfg: dict, explanation: str | None = None) -> dict:
+                                  cfg: dict, explanation: str) -> dict:
     mode = operator_confirmation_mode(cfg)
     record = {"required": True, "category": category, "mode": mode, "approved": False}
     if mode == "off":
@@ -379,7 +357,7 @@ def request_operator_confirmation(*, request_id: str, cwd: Path, command: str, c
     if isinstance(timeout, bool) or not isinstance(timeout, int) or timeout < 1:
         return {**record, "message": "operator confirmation timeout configuration is invalid"}
 
-    summary = _confirmation_explanation(category, explanation)
+    summary = explanation
     script = r'''ObjC.import("AppKit");
 
 function run(argv) {
@@ -404,13 +382,13 @@ function run(argv) {
         "\nWorking directory: " + cwdValue +
         "\n\nCommand:\n" + commandValue;
 
-    const textView = $.NSTextView.alloc.initWithFrame($.NSMakeRect(0, 0, 760, 280));
+    const textView = $.NSTextView.alloc.initWithFrame($.NSMakeRect(0, 0, 1060, 300));
     textView.setString(detailText);
     textView.setEditable(false);
     textView.setSelectable(true);
     textView.setFont($.NSFont.monospacedSystemFontOfSizeWeight(12, $.NSFontWeightRegular));
 
-    const scrollView = $.NSScrollView.alloc.initWithFrame($.NSMakeRect(0, 0, 780, 300));
+    const scrollView = $.NSScrollView.alloc.initWithFrame($.NSMakeRect(0, 0, 1080, 320));
     scrollView.setDocumentView(textView);
     scrollView.setHasVerticalScroller(true);
     scrollView.setHasHorizontalScroller(true);
