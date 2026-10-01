@@ -66,3 +66,17 @@ The runtime now enforces the audited recovery gate: a job with a `started` or `i
 - The installed harness manifest and canonical GitHub `main` were independently reconciled at `dc7287547cb7429a05c078ff3d8cf6efbc59325a`; `browser-status` reported the loopback API healthy and the staged Safari extension byte-integral.
 - Historical references to “ping” above describe the read-only Unix-socket protocol action. The CLI now also exposes `llm-git-harness ping` as a direct read-only convenience; it sends no mutation request ID.
 - The remaining v1 acceptance boundary is unchanged: load and pair the temporary Safari extension, then run the real pending-handoff → fresh ChatGPT tab → prompt-fill → manual Send pilot.
+
+
+## V2 extraction disposition — 30 September 2026
+
+The real Safari acceptance pilot reached a stable boundary:
+
+- extension build 0.1.4 is staged and its local browser API/integrity checks pass;
+- opening a pending handoff successfully opens a fresh ChatGPT tab;
+- the continuation prompt is still not populated in Safari despite content-script and explicit scripting fallbacks;
+- failed delivery safely returns the handoff to pending rather than losing it.
+
+This unresolved browser-actuator defect is now treated as evidence about the weakness of the Safari/WebExtension boundary, not as a reason to make v2 depend on that boundary. Conversation Harness v2 has moved to `krahd/conversation-harness`; v1 remains here as a bounded reference implementation for durable jobs, leases/fencing, operations, handoffs, recovery and browser-delivery experiments.
+
+Do not report v1 prompt-fill acceptance as complete. Do not make successful Safari injection a gate for v2 research or implementation.

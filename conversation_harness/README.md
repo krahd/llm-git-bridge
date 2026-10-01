@@ -2,6 +2,13 @@
 
 Conversation Harness v1 is an **independent companion service** for durable conversational work. It may coexist indefinitely with ChatGPT Shell Bridge v5. It does not replace, restart, configure, or share runtime state with the shell bridge.
 
+
+## V2 extraction
+
+As of 30 September 2026, Conversation Harness v2 is developed in the separate private repository `krahd/conversation-harness`. This directory remains the v1 local reference implementation and empirical predecessor.
+
+The separation is deliberate: v2 models durable work continuity across provider conversations, models and multiple Git repositories, so `llm-git-bridge` is one possible executor/transport rather than the owner of the continuity system. Preserve v1 protocol/state-machine and failure evidence here; do not expand this directory into the new provider-agnostic application.
+
 Runtime namespace:
 
 ```text

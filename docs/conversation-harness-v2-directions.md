@@ -1,7 +1,33 @@
-# Conversation Harness v2 — deferred design directions
+# Conversation Harness v2 — extraction decision and historical directions
 
-Status: DEFERRED DESIGN ONLY — do not expand v1 implementation scope
-Date: 2026-09-30
+**Status:** IMPLEMENTATION EXTRACTED — historical pre-extraction directions preserved below  
+**Decision date:** 30 September 2026
+
+## Extraction decision — 30 September 2026
+
+Conversation Harness v2 is no longer an implementation subproject of `krahd/llm-git-bridge`. The dedicated private repository `krahd/conversation-harness` now owns v2 implementation and implementation-facing architecture.
+
+This repository retains:
+
+- Conversation Harness v1 as the local Mac/Safari reference implementation and empirical predecessor;
+- the Shell Bridge/workspace coordinator as one executor/transport that v2 may use through an adapter;
+- historical v1/v2 design evidence needed to understand the extraction.
+
+The extraction was prompted by the widening problem boundary and by the real Safari acceptance pilot. In v1 build 0.1.4, Safari reliably opened the new ChatGPT tab but still failed to populate the prompt. Rather than make browser-extension behaviour the architectural centre, v2 treats browsers/providers as replaceable adapters beneath a durable provider- and conversation-agnostic work layer.
+
+The v2 implementation now assumes:
+
+- durable work identity above provider conversations;
+- multiple Git repositories without a GitHub-specific core assumption;
+- Git/documents/artefacts as semantic work state and a separate operational event/state store;
+- provider capability negotiation, including optional private/undocumented acceleration behind safe fallback;
+- a Rust/SQLite core bias;
+- controlled browser/CDP integration where web-only provider capabilities require it;
+- canonical research in `krahd/research/projects/conversational-work-continuity/`.
+
+The earlier rule that v2 must wait for successful Safari prompt-fill acceptance is therefore superseded. v1 remains valuable reference evidence, but closing the Safari-specific actuator defect is not a prerequisite for v2 architecture or research.
+
+## Historical directions preserved below
 
 ## Boundary
 
