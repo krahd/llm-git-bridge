@@ -273,7 +273,7 @@ TMP_REQ="$(mktemp)"; RESULT_TMP="$(mktemp)"
 python3 - "$TMP_REQ" "$RID" "$ALLOWED_ROOT" <<'PY'
 import json,sys
 path,rid,root=sys.argv[1:]
-json.dump({'protocol':1,'id':rid,'cwd':root,'command':"printf 'SHELL_BRIDGE_OK\\n'; git --version; pwd",'timeout_seconds':30},open(path,'w'),separators=(',',':'),sort_keys=True)
+json.dump({'protocol':1,'id':rid,'cwd':root,'explanation':'Verify the newly installed Shell Bridge can execute a harmless repository smoke test.','command':"printf 'SHELL_BRIDGE_OK\\n'; git --version; pwd",'timeout_seconds':30},open(path,'w'),separators=(',',':'),sort_keys=True)
 PY
 "${R[@]}" copyto "$TMP_REQ" "${REMOTE}requests/${RID}.json"
 FOUND=0

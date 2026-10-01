@@ -140,7 +140,7 @@ class V5CrashTests(unittest.TestCase):
             root = Path(td)/"root"; root.mkdir()
             state = Path(td)/"state"
             rdir = state/"requests"/"jobx"; rdir.mkdir(parents=True)
-            raw = json.dumps({"protocol":1,"id":"jobx","cwd":str(root),"command":"true"}).encode()
+            raw = json.dumps({"protocol":1,"id":"jobx","cwd":str(root),"explanation":"Test request.","command":"true"}).encode()
             (rdir/"request.json").write_bytes(raw)
             (rdir/"started.json").write_text(json.dumps({"request_sha256":b.sha256_bytes(raw)}))
             (rdir/"active.json").write_text(json.dumps({"request_id":"jobx","pgid":999999}))
