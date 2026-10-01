@@ -135,6 +135,32 @@ class ConfirmationTests(unittest.TestCase):
             plan = b.resolve_write_plan(request, cfg)
             self.assertEqual(plan["confirmation_category"], "system_write")
 
+    def test_validate_request_preserves_optional_explanation(self):
+        with tempfile.TemporaryDirectory() as td:
+            root = Path(td)
+            req = {
+                "protocol": 1,
+                "id": "explain1",
+                "cwd": str(root),
+                "command": "printf ok",
+                "explanation": "Check the repository state before editing.",
+            }
+            validated = b.validate_request(req, "explain1.json", root, 60)
+            self.assertEqual(validated["explanation"], "Check the repository state before editing.")
+
+    def test_validate_request_rejects_blank_explanation(self):
+        with tempfile.TemporaryDirectory() as td:
+            root = Path(td)
+            req = {
+                "protocol": 1,
+                "id": "explain2",
+                "cwd": str(root),
+                "command": "printf ok",
+                "explanation": "   ",
+            }
+            with self.assertRaisesRegex(ValueError, "explanation"):
+                b.validate_request(req, "explain2.json", root, 60)
+
     def test_trusted_workspace_coordinator_gets_repository_scope_without_git_cwd(self):
         with tempfile.TemporaryDirectory() as td:
             root = Path(td) / "root"; root.mkdir()
@@ -158,9 +184,24 @@ class ConfirmationTests(unittest.TestCase):
             result = b.request_operator_confirmation(
                 request_id="job", cwd=Path("/tmp"), command="gh repo create x/y",
                 category="github_repository_control_plane", cfg=cfg,
+                explanation="Create the requested GitHub repository.",
             )
         self.assertTrue(result["approved"])
-        self.assertEqual(run.call_args.args[0][0], "/usr/bin/osascript")
+        argv = run.call_args.args[0]
+        self.assertEqual(argv[0:3], ["/usr/bin/osascript", "-l", "JavaScript"])
+        self.assertIn("NSScrollView", argv[4])
+        self.assertEqual(argv[-1], "Create the requested GitHub repository.")
+
+    def test_dialog_mode_generates_readable_fallback_explanation(self):
+        cfg = {"operator_confirmation_mode": "dialog", "operator_confirmation_timeout_seconds": 10}
+        declined = subprocess.CompletedProcess([], 1, stdout="cancel\n", stderr="")
+        with patch.object(b.subprocess, "run", return_value=declined) as run:
+            result = b.request_operator_confirmation(
+                request_id="job", cwd=Path("/tmp"), command="touch x",
+                category="non_repository_filesystem_mutation", cfg=cfg,
+            )
+        self.assertFalse(result["approved"])
+        self.assertIn("outside the repository-scoped write sandbox", run.call_args.args[0][-1])
 
 
 class ShellTests(unittest.TestCase):
