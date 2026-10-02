@@ -367,6 +367,8 @@ function run(argv) {
     const commandValue = argv[3];
     const explanationValue = argv[4];
 
+    const app = $.NSApplication.sharedApplication;
+    app.setActivationPolicy($.NSApplicationActivationPolicyRegular);
     const alert = $.NSAlert.alloc.init;
     alert.setMessageText("Allow ChatGPT to perform this action?");
     alert.setInformativeText(
@@ -396,7 +398,7 @@ function run(argv) {
     scrollView.setBorderType($.NSBezelBorder);
     alert.setAccessoryView(scrollView);
 
-    $.NSApplication.sharedApplication.activateIgnoringOtherApps(true);
+    app.activateIgnoringOtherApps(true);
     const response = alert.runModal;
     return response === $.NSAlertSecondButtonReturn ? "allow" : "cancel";
 }'''

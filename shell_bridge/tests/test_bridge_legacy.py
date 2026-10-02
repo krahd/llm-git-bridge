@@ -201,6 +201,7 @@ class ConfirmationTests(unittest.TestCase):
         self.assertTrue(result["approved"])
         argv = run.call_args.args[0]
         self.assertEqual(argv[0:3], ["/usr/bin/osascript", "-l", "JavaScript"])
+        self.assertIn("setActivationPolicy($.NSApplicationActivationPolicyRegular)", argv[4])
         self.assertIn("NSScrollView", argv[4])
         self.assertIn("1080, 320", argv[4])
         self.assertEqual(argv[-1], "Create the requested GitHub repository.")
