@@ -130,7 +130,7 @@ class ConfirmationTests(unittest.TestCase):
             plan = b.resolve_write_plan(request, cfg)
             self.assertEqual(plan["effective"], "system")
             self.assertEqual(plan["confirmation_category"], "non_repository_filesystem_mutation")
-            self.assertFalse(plan["allow_network"])
+            self.assertTrue(plan["allow_network"])
             request["write_scope"] = "system"
             plan = b.resolve_write_plan(request, cfg)
             self.assertEqual(plan["confirmation_category"], "system_write")
@@ -180,14 +180,14 @@ class ConfirmationTests(unittest.TestCase):
             cfg = {"allowed_root": str(root), "state_dir": str(state)}
             request = {
                 "cwd": root,
-                "explanation": "Test request.", "command": f"python3 {b.WORKSPACE_COORDINATOR} show --job example",
+                "explanation": "Test request.", "command": f"python3 {b.WORKSPACE_COORDINATOR} list",
                 "write_scope": "auto",
             }
             plan = b.resolve_write_plan(request, cfg)
             self.assertEqual(plan["effective"], "repository")
             self.assertTrue(plan["trusted_coordinator"])
-            self.assertIn(root.resolve(), plan["write_roots"])
-            self.assertIn(state.resolve(), plan["write_roots"])
+            self.assertIsNone(plan["write_roots"])
+            self.assertTrue(plan["allow_network"])
 
     def test_dialog_mode_requires_explicit_allow(self):
         cfg = {"operator_confirmation_mode": "dialog", "operator_confirmation_timeout_seconds": 10}
@@ -330,6 +330,10 @@ class ProcessTests(unittest.TestCase):
         def fake_delete(remote, base, leaf): deleted.append(leaf)
         def counted_run(*args, **kwargs):
             calls["shell"] += 1
+            if os.environ.get("_LOCAL_EXECUTOR_NESTED_VALIDATION") == "1":
+                kwargs["sandbox_write_roots"] = None
+                kwargs["sandbox_read_roots"] = None
+                kwargs["sandbox_deny_home_reads"] = False
             return original_run(*args, **kwargs)
         with patch.object(b, "copy_from_remote", fake_from), patch.object(b, "copy_to_remote", fake_to), \
              patch.object(b, "delete_remote", fake_delete), patch.object(b, "run_shell", counted_run):

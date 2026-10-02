@@ -141,6 +141,7 @@ class WorkspaceTests(unittest.TestCase):
         self.assertEqual(rec['state'],'interrupted'); self.assertTrue(rec['resource'].startswith('repo:'))
 
 
+    @unittest.skipIf(os.environ.get("_LOCAL_EXECUTOR_NESTED_VALIDATION") == "1", "requires direct process inspection outside the live v5 sandbox")
     def test_workspace_timeout_kills_descendant_and_marks_interrupted(self):
         j=self.create('research:paper:timeout')
         wt=Path(j['worktree']); marker=wt/'SURVIVED'
