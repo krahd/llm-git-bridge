@@ -35,7 +35,7 @@ DEFAULT_WAKE_IDLE_GRACE_SECONDS = 3600
 CAFFEINATE = Path("/usr/bin/caffeinate")
 SANDBOX_EXEC = Path("/usr/bin/sandbox-exec")
 WRITE_SCOPES = {"auto", "read_only", "repository", "system"}
-WORKSPACE_COORDINATOR = Path.home() / ".local/share/mac-executor-bridge/workspace.py"
+WORKSPACE_COORDINATOR = Path(__file__).resolve().with_name("workspace.py")
 ID_RE = re.compile(r"[a-z0-9][a-z0-9._-]{0,127}\Z")
 
 HIGH_IMPACT_COMMAND_RULES = (
