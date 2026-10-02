@@ -7,7 +7,7 @@ class InstallerPackageTests(unittest.TestCase):
         self.assertEqual(cp.returncode,0,cp.stderr)
         text=(ROOT/"install.sh").read_text()
         self.assertNotIn("/Users/tom",text)
-        self.assertNotIn("com.tom",text)
+        self.assertIn('OLD_LABEL_1="com.tom.chatgpt-shell-bridge"',text)
         self.assertIn("drive_root_folder_id",text)
         self.assertIn("--stage-only",text)
         self.assertIn("SHELL_BRIDGE_STAGED=1",text)

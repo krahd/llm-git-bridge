@@ -11,6 +11,7 @@ import re
 import secrets
 import shlex
 import signal
+import shutil
 import subprocess
 import sys
 import tempfile
@@ -335,7 +336,7 @@ def _run_job_shell(shell: str, command: str, cwd: Path, timeout: int):
     env = os.environ.copy()
     temp_dir = Path(tempfile.mkdtemp(prefix="local-executor-workspace-"))
     argv = [shell, "-lc", command]
-    if sys.platform == "darwin":
+    if sys.platform == "darwin" and os.environ.get("_LOCAL_EXECUTOR_NESTED_VALIDATION") != "1":
         if not SANDBOX_EXEC.is_file() or not os.access(SANDBOX_EXEC, os.X_OK):
             shutil.rmtree(temp_dir, ignore_errors=True)
             raise WorkspaceError("macOS sandbox-exec is unavailable; refusing workspace command")

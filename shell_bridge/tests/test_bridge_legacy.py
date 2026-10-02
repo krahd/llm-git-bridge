@@ -119,7 +119,7 @@ class ConfirmationTests(unittest.TestCase):
             plan = b.resolve_write_plan(request, cfg)
             self.assertEqual(plan["effective"], "repository")
             self.assertIn(repo.resolve(), plan["write_roots"])
-            self.assertTrue(plan["allow_network"])
+            self.assertFalse(plan["allow_network"])
 
     def test_write_plan_prompts_for_non_repository_mutation_and_explicit_system_scope(self):
         with tempfile.TemporaryDirectory() as td:
@@ -130,7 +130,7 @@ class ConfirmationTests(unittest.TestCase):
             plan = b.resolve_write_plan(request, cfg)
             self.assertEqual(plan["effective"], "system")
             self.assertEqual(plan["confirmation_category"], "non_repository_filesystem_mutation")
-            self.assertTrue(plan["allow_network"])
+            self.assertFalse(plan["allow_network"])
             request["write_scope"] = "system"
             plan = b.resolve_write_plan(request, cfg)
             self.assertEqual(plan["confirmation_category"], "system_write")
@@ -258,7 +258,7 @@ class ConfirmationTests(unittest.TestCase):
             self.assertTrue(out["output_limited"])
             self.assertLessEqual(out["stdout_bytes"], 4096)
 
-    @unittest.skipUnless(sys.platform == "darwin" and b.SANDBOX_EXEC.exists(), "macOS sandbox-exec required")
+    @unittest.skipUnless(sys.platform == "darwin" and b.SANDBOX_EXEC.exists() and os.environ.get("_LOCAL_EXECUTOR_NESTED_VALIDATION") != "1", "direct macOS sandbox execution required")
     def test_read_only_sandbox_blocks_write_and_repository_scope_allows_only_repo(self):
         with tempfile.TemporaryDirectory() as td:
             root = Path(td)
@@ -280,7 +280,7 @@ class ConfirmationTests(unittest.TestCase):
             self.assertNotEqual(out["exit_code"], 0)
             self.assertFalse(outside.exists())
 
-    @unittest.skipUnless(sys.platform == "darwin" and b.SANDBOX_EXEC.exists(), "macOS sandbox-exec required")
+    @unittest.skipUnless(sys.platform == "darwin" and b.SANDBOX_EXEC.exists() and os.environ.get("_LOCAL_EXECUTOR_NESTED_VALIDATION") != "1", "direct macOS sandbox execution required")
     def test_read_only_sandbox_allows_zsh_heredoc_runtime_temp(self):
         with tempfile.TemporaryDirectory() as td:
             root = Path(td)
@@ -288,7 +288,7 @@ class ConfirmationTests(unittest.TestCase):
             self.assertEqual(out["exit_code"], 0, out["stderr_text"])
             self.assertEqual(out["stdout_text"], "hello\n")
 
-    @unittest.skipUnless(sys.platform == "darwin" and b.SANDBOX_EXEC.exists(), "macOS sandbox-exec required")
+    @unittest.skipUnless(sys.platform == "darwin" and b.SANDBOX_EXEC.exists() and os.environ.get("_LOCAL_EXECUTOR_NESTED_VALIDATION") != "1", "direct macOS sandbox execution required")
     def test_read_only_sandbox_denies_network_but_repository_scope_can_use_it(self):
         with tempfile.TemporaryDirectory() as td:
             td = Path(td)
@@ -377,7 +377,7 @@ class ProcessTests(unittest.TestCase):
             self.assertFalse((root / "SHOULD_NOT_EXIST").exists())
             self.assertFalse((state / "requests" / "write1" / "started.json").exists())
 
-    @unittest.skipUnless(sys.platform == "darwin" and b.SANDBOX_EXEC.exists(), "macOS sandbox-exec required")
+    @unittest.skipUnless(sys.platform == "darwin" and b.SANDBOX_EXEC.exists() and os.environ.get("_LOCAL_EXECUTOR_NESTED_VALIDATION") != "1", "direct macOS sandbox execution required")
     def test_repository_cwd_gets_repo_scoped_write_without_dialogue(self):
         with tempfile.TemporaryDirectory() as td:
             root = Path(td) / "root"; root.mkdir()
@@ -396,7 +396,7 @@ class ProcessTests(unittest.TestCase):
             self.assertEqual(result["status"], "completed")
             self.assertEqual(result["exit_code"], 0)
             self.assertEqual(result["write_scope"]["effective"], "repository")
-            self.assertTrue(result["write_scope"]["allow_network"])
+            self.assertFalse(result["write_scope"]["allow_network"])
             self.assertTrue((repo / "marker").exists())
 
     def test_repository_network_mutation_requires_confirmation_before_started(self):

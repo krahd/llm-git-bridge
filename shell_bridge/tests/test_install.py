@@ -7,31 +7,30 @@ class InstallScriptTests(unittest.TestCase):
     def setUpClass(cls):
         cls.text = (pathlib.Path(__file__).parents[1] / "install.sh").read_text()
 
-    def test_canonical_launchagent_label_is_default(self):
-        self.assertIn("SHELL_BRIDGE_LABEL:-io.llm-git-bridge.daemon", self.text)
+    def test_v6_product_and_launchagent_identity_are_distinct(self):
+        self.assertIn('APP_NAME="local-executor-bridge"', self.text)
+        self.assertIn('LOCAL_EXECUTOR_LABEL:-net.laurenzo.local-executor-bridge', self.text)
+        self.assertIn('BASE_PATH="${BASE_PATH:-Local Executor Bridge}"', self.text)
 
-    def test_installer_retires_legacy_launchagent_before_live_activation(self):
-        self.assertIn("LEGACY_LABEL=\"io.llm-git-bridge.chatgpt-shell-bridge\"", self.text)
-        self.assertIn("launchctl bootout \"gui/${UID_NOW}/${LEGACY_LABEL}\"", self.text)
-        self.assertIn("legacy-launchagent", self.text)
-        stage = self.text.index('if [ \"$STAGE_ONLY\" -eq 1 ]; then')
-        retire = self.text.index("# Retire the one known pre-canonical LaunchAgent")
-        self.assertGreater(retire, stage)
+    def test_old_services_are_retired_only_after_new_smoke_test(self):
+        self.assertIn('OLD_LABEL_1="com.tom.chatgpt-shell-bridge"', self.text)
+        self.assertIn('OLD_LABEL_2="io.llm-git-bridge.daemon"', self.text)
+        self.assertIn('--retire-old-after-smoke', self.text)
+        smoke = self.text.index("SHELL_BRIDGE_INSTALLED=1")
+        retire = self.text.index('if [ "$RETIRE_OLD_AFTER_SMOKE" -eq 1 ]; then')
+        self.assertGreater(retire, smoke)
 
-    def test_launchagent_runs_shell_bridge_daemon_not_watch(self):
+    def test_launchagent_runs_daemon(self):
         self.assertIn("'ProgramArguments':[python,bridge,'daemon','--config',config]", self.text)
-        self.assertNotIn("[python,bridge,'watch'", self.text)
+
+    def test_wake_lease_defaults_are_written(self):
+        self.assertIn("'wake_lease_enabled'", self.text)
+        self.assertIn("'wake_grace_seconds'", self.text)
 
     def test_installer_warns_when_private_oauth_client_is_missing_without_printing_secrets(self):
-        self.assertIn("rclone config redacted \"${REMOTE%:}\"", self.text)
+        self.assertIn('rclone config redacted "${REMOTE%:}"', self.text)
         self.assertIn("no private OAuth client_id", self.text)
         self.assertNotIn("config show", self.text)
-
-    def test_installer_retires_known_legacy_launchagent(self):
-        self.assertIn("io.llm-git-bridge.chatgpt-shell-bridge", self.text)
-        self.assertIn("LEGACY_PLIST", self.text)
-        self.assertIn("launchctl bootout", self.text)
-        self.assertIn("legacy-launchagent", self.text)
 
     def test_installer_writes_runtime_provenance_manifest(self):
         self.assertIn("install-manifest.json", self.text)

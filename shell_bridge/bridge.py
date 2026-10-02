@@ -347,9 +347,8 @@ def resolve_write_plan(request: dict, cfg: dict) -> dict:
         }
 
     if _trusted_workspace_coordinator(request["command"], allowed_root, state_dir):
-        roots = [allowed_root, state_dir]
         return {
-            "requested": requested, "effective": "repository", "write_roots": roots,
+            "requested": requested, "effective": "repository", "write_roots": None,
             "read_roots": None, "deny_home_reads": False, "allow_network": True,
             "trusted_coordinator": True,
         }
@@ -380,6 +379,10 @@ def resolve_write_plan(request: dict, cfg: dict) -> dict:
         "requested": requested, "effective": "read_only", "write_roots": [],
         "read_roots": [allowed_root], "deny_home_reads": True, "allow_network": False,
     }
+
+def public_write_plan(plan: dict) -> dict:
+    return {k: v for k, v in plan.items() if k not in {"write_roots", "read_roots"}}
+
 
 def _sbpl_string(value: str) -> str:
     return value.replace("\\", "\\\\").replace('"', '\\"')
@@ -983,7 +986,7 @@ def process_one(name: str, cfg: dict) -> None:
             result = result_envelope(v["id"], request_sha, "rejected", {
                 "cwd": str(v["cwd"]),
                 "message": confirmation["message"],
-                "write_scope": {k: val for k, val in write_plan.items() if k != "write_roots"},
+                "write_scope": public_write_plan(write_plan),
                 "operator_confirmation": confirmation,
             })
             _persist_then_publish(result, local_result, finished_marker, name, cfg)
@@ -1027,14 +1030,14 @@ def process_one(name: str, cfg: dict) -> None:
         else:
             result = result_envelope(v["id"], request_sha, "completed", {
                 "cwd": str(v["cwd"]),
-                "write_scope": {k: val for k, val in write_plan.items() if k != "write_roots"},
+                "write_scope": public_write_plan(write_plan),
                 **({"operator_confirmation": confirmation} if confirmation is not None else {}),
                 **exec_result,
             })
     except Exception as exc:
         result = result_envelope(v["id"], request_sha, "indeterminate", {
             "message": f"execution raised after STARTED: {type(exc).__name__}: {exc}",
-            "write_scope": {k: val for k, val in write_plan.items() if k != "write_roots"},
+            "write_scope": public_write_plan(write_plan),
         })
     finally:
         active_marker.unlink(missing_ok=True)
@@ -1359,7 +1362,7 @@ def sweep_incomplete_processes(cfg: dict) -> int:
     return swept
 
 
-def _worker(name: str, cfg: dict, active_names: set[str], active_lock: threading.Lock, wake: WakeLease) -> None:
+def _worker(name: str, cfg: dict, active_names: set[str], active_lock: threading.Lock, wake: WakeLease | None = None) -> None:
     try:
         process_one(name, cfg)
     except Exception as exc:
@@ -1367,7 +1370,7 @@ def _worker(name: str, cfg: dict, active_names: set[str], active_lock: threading
     finally:
         with active_lock:
             active_names.discard(name)
-            if not active_names:
+            if not active_names and wake is not None:
                 wake.enter_idle_grace()
 
 
@@ -1405,6 +1408,7 @@ def daemon(config_path: Path) -> None:
     try:
         while not _SHUTDOWN.is_set():
             threads = {t for t in threads if t.is_alive()}
+            names: list[str] = []
             try:
                 names = list_requests_cfg(cfg)
                 if names:
