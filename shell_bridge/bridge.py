@@ -19,7 +19,7 @@ import time
 from pathlib import Path
 
 PROTOCOL = 1
-VERSION = "5"
+VERSION = "6"
 DEFAULT_MAX_TIMEOUT = 300
 DEFAULT_POLL_SECONDS = 2.0
 DEFAULT_RCLONE_TIMEOUT = 30
@@ -31,7 +31,10 @@ DEFAULT_MAX_STDIN_BYTES = 1024 * 1024
 DEFAULT_MAX_OUTPUT_BYTES = 16 * 1024 * 1024
 DEFAULT_MAX_ACTIVE_CAP = 32
 DEFAULT_OPERATOR_CONFIRMATION_TIMEOUT = 300
+DEFAULT_WAKE_GRACE_SECONDS = 3600.0
+PRODUCT_NAME = "Local Executor Bridge"
 SANDBOX_EXEC = Path("/usr/bin/sandbox-exec")
+DEFAULT_CAFFEINATE = Path("/usr/bin/caffeinate")
 WRITE_SCOPES = {"auto", "read_only", "repository", "system"}
 WORKSPACE_COORDINATOR = Path.home() / ".local/share/chatgpt-shell-bridge/workspace.py"
 ID_RE = re.compile(r"[a-z0-9][a-z0-9._-]{0,127}\Z")
@@ -104,6 +107,7 @@ _TRANSPORT_LOCK = threading.RLock()
 _ACTIVE_LOCK = threading.RLock()
 _ACTIVE: dict[str, dict] = {}
 _SHUTDOWN = threading.Event()
+_WAKE_LEASE = None
 
 
 def sha256_bytes(data: bytes) -> str:
@@ -259,14 +263,22 @@ def _git_repository_write_roots(cwd: Path, allowed_root: Path) -> list[Path] | N
     return roots
 
 
-def _trusted_workspace_coordinator(command: str) -> bool:
+def _trusted_workspace_coordinator(command: str, allowed_root: Path, state_dir: Path) -> bool:
+    """Recognise exactly one workspace.py invocation with no outer-shell control operators.
+
+    The coordinator itself is privileged because it must fetch/push and manage worktrees.
+    Remote shell text carried by `workspace exec` is sandboxed *inside* workspace.py.
+    """
     try:
+        lexer = shlex.shlex(command, posix=True, punctuation_chars=";&|<>`$()")
+        lexer.whitespace_split = True
+        tokens = list(lexer)
+        if any(token and all(ch in ";&|<>`$()" for ch in token) for token in tokens):
+            return False
         argv = shlex.split(command, posix=True)
     except ValueError:
         return False
-    if len(argv) < 3:
-        return False
-    if not Path(argv[0]).name.startswith("python"):
+    if len(argv) < 3 or not Path(argv[0]).name.startswith("python"):
         return False
     try:
         script = Path(argv[1]).expanduser().resolve()
@@ -274,47 +286,108 @@ def _trusted_workspace_coordinator(command: str) -> bool:
         return False
     if script != WORKSPACE_COORDINATOR.expanduser().resolve():
         return False
-    return argv[2] in {"create", "exec", "ready", "integrate", "show", "list", "recover", "gc", "mark-reconciled"}
+    subcommand = argv[2]
+    allowed_subcommands = {"create", "ensure", "exec", "ready", "integrate", "show", "list", "recover", "gc", "mark-reconciled"}
+    if subcommand not in allowed_subcommands:
+        return False
 
+    def option(name: str) -> str | None:
+        try:
+            i = argv.index(name)
+        except ValueError:
+            return None
+        return argv[i + 1] if i + 1 < len(argv) else None
+
+    root = allowed_root.expanduser().resolve()
+    if subcommand in {"create", "ensure", "recover"}:
+        raw_repo = option("--repo")
+        if not raw_repo:
+            return False
+        try:
+            Path(raw_repo).expanduser().resolve().relative_to(root)
+        except (ValueError, OSError):
+            return False
+    elif subcommand == "gc":
+        raw_repo = option("--repo")
+        if not raw_repo:
+            return False
+        try:
+            Path(raw_repo).expanduser().resolve().relative_to(root)
+        except (ValueError, OSError):
+            return False
+    elif subcommand in {"exec", "ready", "integrate", "show", "mark-reconciled"}:
+        job_id = option("--job")
+        if not job_id or not ID_RE.fullmatch(job_id):
+            return False
+        job_file = state_dir.expanduser().resolve() / "workspaces" / "jobs" / f"{job_id}.json"
+        try:
+            job = json.loads(job_file.read_text("utf-8"))
+            Path(job["repo"]).expanduser().resolve().relative_to(root)
+        except (OSError, ValueError, KeyError, json.JSONDecodeError):
+            return False
+    return True
 
 def resolve_write_plan(request: dict, cfg: dict) -> dict:
     allowed_root = Path(cfg["allowed_root"]).expanduser().resolve()
+    state_dir = Path(cfg["state_dir"]).expanduser().resolve()
     requested = request.get("write_scope", "auto")
     if requested not in WRITE_SCOPES:
         raise ValueError("write_scope must be auto, read_only, repository, or system")
 
     if requested == "system":
-        return {"requested": requested, "effective": "system", "write_roots": None, "allow_network": True, "confirmation_category": "system_write"}
+        return {
+            "requested": requested, "effective": "system", "write_roots": None,
+            "read_roots": None, "deny_home_reads": False, "allow_network": True,
+            "confirmation_category": "system_write",
+        }
     if requested == "read_only":
-        return {"requested": requested, "effective": "read_only", "write_roots": [], "allow_network": False}
+        return {
+            "requested": requested, "effective": "read_only", "write_roots": [],
+            "read_roots": [allowed_root], "deny_home_reads": True, "allow_network": False,
+        }
 
-    if _trusted_workspace_coordinator(request["command"]):
-        roots = [allowed_root, Path(cfg["state_dir"]).expanduser().resolve()]
-        return {"requested": requested, "effective": "repository", "write_roots": roots, "allow_network": True, "trusted_coordinator": True}
+    if _trusted_workspace_coordinator(request["command"], allowed_root, state_dir):
+        roots = [allowed_root, state_dir]
+        return {
+            "requested": requested, "effective": "repository", "write_roots": roots,
+            "read_roots": None, "deny_home_reads": False, "allow_network": True,
+            "trusted_coordinator": True,
+        }
 
     repo_roots = _git_repository_write_roots(request["cwd"], allowed_root)
     if requested == "repository":
         if repo_roots is None:
-            raise ValueError("write_scope=repository requires cwd inside a Git repository/worktree or the trusted workspace coordinator")
-        return {"requested": requested, "effective": "repository", "write_roots": repo_roots, "allow_network": True}
+            raise ValueError("write_scope=repository requires cwd inside a Git repository/worktree or an exact trusted workspace coordinator invocation")
+        return {
+            "requested": requested, "effective": "repository", "write_roots": repo_roots,
+            "read_roots": [allowed_root], "deny_home_reads": True, "allow_network": False,
+        }
 
     if repo_roots is not None:
-        return {"requested": requested, "effective": "repository", "write_roots": repo_roots, "allow_network": True}
+        return {
+            "requested": requested, "effective": "repository", "write_roots": repo_roots,
+            "read_roots": [allowed_root], "deny_home_reads": True, "allow_network": False,
+        }
 
     write_hint = non_repository_write_category(request["command"])
     if write_hint is not None:
         return {
-            "requested": requested, "effective": "system", "write_roots": None, "allow_network": True,
+            "requested": requested, "effective": "system", "write_roots": None,
+            "read_roots": None, "deny_home_reads": False, "allow_network": True,
             "confirmation_category": f"non_repository_{write_hint}",
         }
-    return {"requested": requested, "effective": "read_only", "write_roots": [], "allow_network": False}
-
+    return {
+        "requested": requested, "effective": "read_only", "write_roots": [],
+        "read_roots": [allowed_root], "deny_home_reads": True, "allow_network": False,
+    }
 
 def _sbpl_string(value: str) -> str:
     return value.replace("\\", "\\\\").replace('"', '\\"')
 
 
-def sandbox_profile(write_roots: list[Path], *, allow_network: bool = True) -> str:
+def sandbox_profile(write_roots: list[Path], *, allow_network: bool = True,
+                    read_roots: list[Path] | None = None,
+                    deny_home_reads: bool = False) -> str:
     roots: list[Path] = []
     for root in write_roots:
         try:
@@ -323,10 +396,26 @@ def sandbox_profile(write_roots: list[Path], *, allow_network: bool = True) -> s
             continue
         if resolved not in roots:
             roots.append(resolved)
-    clauses = " ".join(f'(subpath "{_sbpl_string(str(root))}")' for root in roots)
-    network_clause = "" if allow_network else "(deny network*)"
-    return f'(version 1)(allow default)(deny file-write*){network_clause}(allow file-write* (literal "/dev/null") {clauses})'
-
+    write_clauses = " ".join(f'(subpath "{_sbpl_string(str(root))}")' for root in roots)
+    parts = ["(version 1)", "(allow default)", "(deny file-write*)"]
+    if not allow_network:
+        parts.append("(deny network*)")
+    if deny_home_reads:
+        home = Path.home().resolve()
+        parts.append(f'(deny file-read* (subpath "{_sbpl_string(str(home))}"))')
+        allowed_reads: list[Path] = []
+        for root in read_roots or []:
+            try:
+                resolved = root.expanduser().resolve()
+            except OSError:
+                continue
+            if resolved not in allowed_reads:
+                allowed_reads.append(resolved)
+        read_clauses = " ".join(f'(subpath "{_sbpl_string(str(root))}")' for root in allowed_reads)
+        if read_clauses:
+            parts.append(f"(allow file-read* {read_clauses})")
+    parts.append(f'(allow file-write* (literal "/dev/null") {write_clauses})')
+    return "".join(parts)
 
 def operator_confirmation_mode(cfg: dict) -> str:
     configured = cfg.get("operator_confirmation_mode", "auto")
@@ -475,7 +564,9 @@ def run_shell(cwd: Path, command: str, stdin: bytes, timeout: int, shell: str = 
               request_id: str | None = None,
               on_spawn=None,
               sandbox_write_roots: list[Path] | None = None,
-              sandbox_allow_network: bool = True) -> dict:
+              sandbox_allow_network: bool = True,
+              sandbox_read_roots: list[Path] | None = None,
+              sandbox_deny_home_reads: bool = False) -> dict:
     shell_path = Path(shell)
     if not shell_path.is_absolute() or not shell_path.is_file() or not os.access(shell_path, os.X_OK):
         raise ValueError("configured shell must be an existing absolute file")
@@ -491,7 +582,12 @@ def run_shell(cwd: Path, command: str, stdin: bytes, timeout: int, shell: str = 
             raise ValueError("execution sandbox is unavailable; refusing non-system shell execution")
         sandbox_temp = Path(tempfile.mkdtemp(prefix=f"chatgpt-shell-{request_id or 'request'}-"))
         profile_roots = [sandbox_temp, *sandbox_write_roots]
-        argv = [str(SANDBOX_EXEC), "-p", sandbox_profile(profile_roots, allow_network=sandbox_allow_network), *argv]
+        argv = [str(SANDBOX_EXEC), "-p", sandbox_profile(
+            profile_roots,
+            allow_network=sandbox_allow_network,
+            read_roots=[sandbox_temp, *(sandbox_read_roots or [])],
+            deny_home_reads=sandbox_deny_home_reads,
+        ), *argv]
         env["TMPDIR"] = str(sandbox_temp)
         env["TMP"] = str(sandbox_temp)
         env["TEMP"] = str(sandbox_temp)
@@ -620,6 +716,8 @@ def run_shell(cwd: Path, command: str, stdin: bytes, timeout: int, shell: str = 
         "filesystem_sandboxed": sandboxed,
         "network_sandboxed": sandboxed and not sandbox_allow_network,
         "sandbox_write_roots": None if sandbox_write_roots is None else [str(Path(root).resolve()) for root in sandbox_write_roots],
+        "sandbox_read_roots": None if sandbox_read_roots is None else [str(Path(root).resolve()) for root in sandbox_read_roots],
+        "home_read_restricted": bool(sandboxed and sandbox_deny_home_reads),
     }
 
 
@@ -917,6 +1015,8 @@ def process_one(name: str, cfg: dict) -> None:
             request_id=v["id"], on_spawn=on_spawn,
             sandbox_write_roots=write_plan["write_roots"],
             sandbox_allow_network=write_plan.get("allow_network", True),
+            sandbox_read_roots=write_plan.get("read_roots"),
+            sandbox_deny_home_reads=bool(write_plan.get("deny_home_reads", False)),
         )
         if exec_result.get("aborted_by_daemon_shutdown"):
             result = result_envelope(v["id"], request_sha, "indeterminate", {
@@ -1063,6 +1163,101 @@ def _private_oauth_client_configured(cfg: dict) -> bool | None:
     return False
 
 
+class WakeLease:
+    """Own one macOS idle-sleep assertion while executor work is active or in grace."""
+
+    def __init__(self, cfg: dict):
+        self.enabled = bool(cfg.get("wake_lease_enabled", True))
+        self.grace_seconds = float(cfg.get("wake_grace_seconds", DEFAULT_WAKE_GRACE_SECONDS))
+        self.caffeinate = Path(cfg.get("caffeinate_path", str(DEFAULT_CAFFEINATE))).expanduser()
+        self._lock = threading.RLock()
+        self._proc: subprocess.Popen | None = None
+        self._state = "off"
+        self._reason: str | None = None
+        self._acquired_at: float | None = None
+        self._idle_since: float | None = None
+        self._release_at_mono: float | None = None
+
+    def _ensure_process(self) -> None:
+        if not self.enabled or self._proc is not None:
+            return
+        if sys.platform != "darwin" or not self.caffeinate.is_file() or not os.access(self.caffeinate, os.X_OK):
+            return
+        self._proc = subprocess.Popen(
+            [str(self.caffeinate), "-i", "-w", str(os.getpid())],
+            stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
+            start_new_session=True,
+        )
+        self._acquired_at = time.time()
+
+    def acquire(self, reason: str) -> None:
+        with self._lock:
+            self._ensure_process()
+            if self._proc is None:
+                return
+            self._state = "busy"
+            self._reason = reason
+            self._idle_since = None
+            self._release_at_mono = None
+
+    def enter_idle_grace(self) -> None:
+        with self._lock:
+            if self._proc is None or self._state == "grace":
+                return
+            self._state = "grace"
+            self._reason = "idle_grace"
+            self._idle_since = time.time()
+            self._release_at_mono = time.monotonic() + max(0.0, self.grace_seconds)
+
+    def tick(self) -> None:
+        with self._lock:
+            if self._proc is not None and self._proc.poll() is not None:
+                self._proc = None
+                self._state = "off"
+                self._reason = None
+                self._release_at_mono = None
+            if self._proc is not None and self._release_at_mono is not None and time.monotonic() >= self._release_at_mono:
+                self._release_locked()
+
+    def _release_locked(self) -> None:
+        proc = self._proc
+        self._proc = None
+        self._state = "off"
+        self._reason = None
+        self._idle_since = None
+        self._release_at_mono = None
+        if proc is not None and proc.poll() is None:
+            try:
+                proc.terminate()
+                proc.wait(timeout=1)
+            except Exception:
+                try:
+                    proc.kill()
+                except Exception:
+                    pass
+
+    def close(self) -> None:
+        with self._lock:
+            self._release_locked()
+
+    def snapshot(self) -> dict:
+        with self._lock:
+            remaining = None
+            if self._release_at_mono is not None:
+                remaining = max(0.0, self._release_at_mono - time.monotonic())
+            return {
+                "enabled": self.enabled,
+                "state": self._state,
+                "reason": self._reason,
+                "acquired_at": None if self._acquired_at is None else time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime(self._acquired_at)),
+                "idle_since": None if self._idle_since is None else time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime(self._idle_since)),
+                "grace_seconds": self.grace_seconds,
+                "grace_remaining_seconds": None if remaining is None else round(remaining, 3),
+                "mechanism": "caffeinate -i -w <daemon-pid>",
+                "pid": None if self._proc is None else self._proc.pid,
+            }
+
+
 def doctor(cfg: dict, *, probe_transport: bool = True) -> dict:
     info = {
         "protocol": PROTOCOL,
@@ -1077,7 +1272,10 @@ def doctor(cfg: dict, *, probe_transport: bool = True) -> dict:
         "max_active_requests": max_active_requests(cfg),
         "operator_confirmation_mode": operator_confirmation_mode(cfg),
         "operator_confirmation_timeout_seconds": cfg.get("operator_confirmation_timeout_seconds", DEFAULT_OPERATOR_CONFIRMATION_TIMEOUT),
+        "product_name": PRODUCT_NAME,
         "default_write_scope": "auto",
+        "raw_repository_network_default": "deny",
+        "raw_home_read_default": "deny_except_allowed_root",
         "filesystem_sandbox_available": bool(sys.platform == "darwin" and SANDBOX_EXEC.is_file() and os.access(SANDBOX_EXEC, os.X_OK)),
         "filesystem_sandbox_path": str(SANDBOX_EXEC),
         "rclone_timeout_seconds": int(cfg.get("rclone_timeout_seconds", DEFAULT_RCLONE_TIMEOUT)),
@@ -1095,6 +1293,10 @@ def doctor(cfg: dict, *, probe_transport: bool = True) -> dict:
     }
     with _ACTIVE_LOCK:
         info["active_requests"] = sorted(_ACTIVE)
+    info["wake_lease"] = _WAKE_LEASE.snapshot() if _WAKE_LEASE is not None else {
+        "enabled": bool(cfg.get("wake_lease_enabled", True)), "state": "off", "reason": None,
+        "grace_seconds": float(cfg.get("wake_grace_seconds", DEFAULT_WAKE_GRACE_SECONDS)),
+    }
     if probe_transport:
         try:
             cp = run_rclone(["version"], cfg, check=False)
@@ -1157,7 +1359,7 @@ def sweep_incomplete_processes(cfg: dict) -> int:
     return swept
 
 
-def _worker(name: str, cfg: dict, active_names: set[str], active_lock: threading.Lock) -> None:
+def _worker(name: str, cfg: dict, active_names: set[str], active_lock: threading.Lock, wake: WakeLease) -> None:
     try:
         process_one(name, cfg)
     except Exception as exc:
@@ -1165,6 +1367,8 @@ def _worker(name: str, cfg: dict, active_names: set[str], active_lock: threading
     finally:
         with active_lock:
             active_names.discard(name)
+            if not active_names:
+                wake.enter_idle_grace()
 
 
 def _signal_shutdown(_signum, _frame):
@@ -1176,9 +1380,14 @@ def _signal_shutdown(_signum, _frame):
 
 
 def daemon(config_path: Path) -> None:
+    global _WAKE_LEASE
     cfg = load_config(config_path)
     lock_file = acquire_instance_lock(cfg)
+    wake = WakeLease(cfg)
+    _WAKE_LEASE = wake
     ensure_remote_dirs(cfg)
+    if _result_state_counts(cfg).get("started_without_finished", 0):
+        wake.acquire("recovery")
     swept = sweep_incomplete_processes(cfg)
     if swept:
         print(f"startup contained {swept} recorded incomplete process group(s)", flush=True)
@@ -1198,6 +1407,8 @@ def daemon(config_path: Path) -> None:
             threads = {t for t in threads if t.is_alive()}
             try:
                 names = list_requests_cfg(cfg)
+                if names:
+                    wake.acquire("request_queue")
                 for name in names:
                     if _SHUTDOWN.is_set():
                         break
@@ -1207,11 +1418,15 @@ def daemon(config_path: Path) -> None:
                         if len(active_names) >= limit:
                             break
                         active_names.add(name)
-                    t = threading.Thread(target=_worker, args=(name, cfg, active_names, active_lock), daemon=True)
+                    t = threading.Thread(target=_worker, args=(name, cfg, active_names, active_lock, wake), daemon=True)
                     threads.add(t)
                     t.start()
             except Exception as exc:
                 print(f"poll error: {type(exc).__name__}: {exc}", flush=True)
+            with active_lock:
+                if not active_names and not names:
+                    wake.enter_idle_grace()
+            wake.tick()
             now = time.monotonic()
             if now - last_health >= health_seconds:
                 publish_health(cfg)
@@ -1223,6 +1438,8 @@ def daemon(config_path: Path) -> None:
         deadline = time.monotonic() + 5
         for t in list(threads):
             t.join(timeout=max(0.0, deadline - time.monotonic()))
+        wake.close()
+        _WAKE_LEASE = None
         lock_file.close()
         for sig, handler in old_handlers.items():
             signal.signal(sig, handler)

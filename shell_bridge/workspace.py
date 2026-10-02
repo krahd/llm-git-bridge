@@ -17,6 +17,8 @@ import tempfile
 import time
 from pathlib import Path
 
+SANDBOX_EXEC = Path("/usr/bin/sandbox-exec")
+
 JOB_BRANCH_PREFIX = "ai/workspace/"
 RESOURCE_RE = re.compile(r"[A-Za-z0-9][A-Za-z0-9._:/-]{0,199}\Z")
 
@@ -287,17 +289,68 @@ def _terminate_tree(proc: subprocess.Popen) -> None:
             continue
 
 
+def _workspace_git_roots(cwd: Path) -> list[Path]:
+    cp = subprocess.run(
+        ["git", "-C", str(cwd), "rev-parse", "--show-toplevel", "--git-dir", "--git-common-dir"],
+        stdout=subprocess.PIPE, stderr=subprocess.DEVNULL, text=True, check=False,
+    )
+    roots = [cwd.resolve()]
+    if cp.returncode == 0:
+        for raw in cp.stdout.splitlines():
+            raw = raw.strip()
+            if not raw:
+                continue
+            p = Path(raw)
+            if not p.is_absolute():
+                p = (cwd / p).resolve()
+            else:
+                p = p.resolve()
+            if p not in roots:
+                roots.append(p)
+    return roots
+
+
+def _sbpl_string(value: str) -> str:
+    return value.replace("\\", "\\\\").replace('"', '\\"')
+
+
+def _workspace_sandbox_profile(cwd: Path, temp_dir: Path) -> str:
+    roots = _workspace_git_roots(cwd)
+    write_roots = [*roots, temp_dir.resolve()]
+    clauses = " ".join(f'(subpath "{_sbpl_string(str(p))}")' for p in write_roots)
+    read_clauses = " ".join(f'(subpath "{_sbpl_string(str(p))}")' for p in roots)
+    home = _sbpl_string(str(Path.home().resolve()))
+    return (
+        '(version 1)(allow default)(deny file-write*)(deny network*)'
+        f'(deny file-read* (subpath "{home}"))'
+        f'(allow file-read* {read_clauses})'
+        f'(allow file-write* (literal "/dev/null") {clauses})'
+    )
+
+
 def _run_job_shell(shell: str, command: str, cwd: Path, timeout: int):
-    # Deliberately inherit the outer shell-bridge process group. If the outer
-    # request is contained, the entire workspace command tree is contained too.
-    proc=subprocess.Popen([shell,"-lc",command],cwd=cwd,stdout=subprocess.PIPE,stderr=subprocess.PIPE,text=True,env=os.environ.copy())
+    # Remote workspace commands are untrusted payloads. The coordinator remains
+    # privileged for its own Git fetch/checkpoint/push operations, but the payload
+    # is confined to its worktree/Git metadata with no network or other home reads.
+    env = os.environ.copy()
+    temp_dir = Path(tempfile.mkdtemp(prefix="local-executor-workspace-"))
+    argv = [shell, "-lc", command]
+    if sys.platform == "darwin":
+        if not SANDBOX_EXEC.is_file() or not os.access(SANDBOX_EXEC, os.X_OK):
+            shutil.rmtree(temp_dir, ignore_errors=True)
+            raise WorkspaceError("macOS sandbox-exec is unavailable; refusing workspace command")
+        argv = [str(SANDBOX_EXEC), "-p", _workspace_sandbox_profile(cwd, temp_dir), *argv]
+        env.update({"TMPDIR": str(temp_dir), "TMP": str(temp_dir), "TEMP": str(temp_dir)})
+    proc = subprocess.Popen(argv, cwd=cwd, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True, env=env)
     try:
-        stdout,stderr=proc.communicate(timeout=timeout)
+        stdout, stderr = proc.communicate(timeout=timeout)
     except subprocess.TimeoutExpired:
         _terminate_tree(proc)
-        stdout,stderr=proc.communicate()
+        stdout, stderr = proc.communicate()
         raise WorkspaceError(f"command timed out after {timeout}s")
-    return proc.returncode,stdout,stderr
+    finally:
+        shutil.rmtree(temp_dir, ignore_errors=True)
+    return proc.returncode, stdout, stderr
 
 
 def exec_job(args) -> dict:
@@ -429,9 +482,9 @@ def integrate_job(args) -> dict:
             job["state"]="conflicted"; job["last_error"]=(merge.stderr or merge.stdout).strip(); save_job(state,job)
             raise WorkspaceError("squash merge conflicted; job requires reconciliation")
         if args.validate:
-            cp=subprocess.run([args.shell,"-lc",args.validate],cwd=tmp,text=True,stdout=subprocess.PIPE,stderr=subprocess.PIPE,timeout=args.timeout)
-            if cp.returncode != 0:
-                raise WorkspaceError(f"integration validation failed rc={cp.returncode}: {(cp.stderr or cp.stdout)[-3000:]}")
+            rc, stdout, stderr = _run_job_shell(args.shell, args.validate, tmp, args.timeout)
+            if rc != 0:
+                raise WorkspaceError(f"integration validation failed rc={rc}: {(stderr or stdout)[-3000:]}")
         if git(tmp,"diff","--cached","--quiet",check=False).returncode == 0:
             raise WorkspaceError("job has no canonical changes to integrate")
         msg=args.message or f"Integrate workspace {job['job_id']}"

@@ -1,30 +1,32 @@
 #!/bin/bash
 set -euo pipefail
 
-APP_NAME="chatgpt-shell-bridge"
-LABEL="${SHELL_BRIDGE_LABEL:-io.llm-git-bridge.daemon}"
-LEGACY_LABEL="io.llm-git-bridge.chatgpt-shell-bridge"
-LEGACY_PLIST="$HOME/Library/LaunchAgents/$LEGACY_LABEL.plist"
+APP_NAME="local-executor-bridge"
+LABEL="${LOCAL_EXECUTOR_LABEL:-net.laurenzo.local-executor-bridge}"
+OLD_LABEL_1="com.tom.chatgpt-shell-bridge"
+OLD_LABEL_2="io.llm-git-bridge.daemon"
 INSTALL_DIR="${INSTALL_DIR:-$HOME/.local/share/$APP_NAME}"
 CONFIG_DIR="${CONFIG_DIR:-$HOME/.config/$APP_NAME}"
 STATE_DIR="${STATE_DIR:-$HOME/.local/state/$APP_NAME}"
 PLIST="${PLIST:-$HOME/Library/LaunchAgents/$LABEL.plist}"
 ALLOWED_ROOT="${ALLOWED_ROOT:-}"
-BASE_PATH="${BASE_PATH:-ChatGPT Shell Bridge}"
+BASE_PATH="${BASE_PATH:-Local Executor Bridge}"
 SHELL_BIN="${SHELL_BIN:-/bin/zsh}"
 SMOKE_ATTEMPTS="${SMOKE_ATTEMPTS:-30}"
 SMOKE_SLEEP="${SMOKE_SLEEP:-2}"
 UID_NOW="$(id -u)"
 STARTED_AGENT=0
 STAGE_ONLY=0
+RETIRE_OLD_AFTER_SMOKE=0
 TMP_REQ=""
 RESULT_TMP=""
 TMP_MARKER=""
 
-usage(){ echo "Usage: install.sh [--stage-only]"; }
+usage(){ echo "Usage: install.sh [--stage-only] [--retire-old-after-smoke]"; }
 while [ "$#" -gt 0 ]; do
   case "$1" in
     --stage-only) STAGE_ONLY=1 ;;
+    --retire-old-after-smoke) RETIRE_OLD_AFTER_SMOKE=1 ;;
     -h|--help) usage; exit 0 ;;
     *) echo "ERROR: unknown option: $1" >&2; usage >&2; exit 2 ;;
   esac
@@ -219,6 +221,8 @@ cfg.update({
  'max_stdin_bytes':1024*1024,'max_output_bytes':16*1024*1024,
  'operator_confirmation_mode':cfg.get('operator_confirmation_mode','auto'),
  'operator_confirmation_timeout_seconds':cfg.get('operator_confirmation_timeout_seconds',300),
+ 'wake_lease_enabled':cfg.get('wake_lease_enabled',True),
+ 'wake_grace_seconds':cfg.get('wake_grace_seconds',3600.0),
 })
 with open(path,'w',encoding='utf-8') as f: json.dump(cfg,f,indent=2,sort_keys=True); f.write('\n')
 PY
@@ -247,19 +251,7 @@ if [ "$STAGE_ONLY" -eq 1 ]; then
   exit 0
 fi
 
-# Retire the one known pre-canonical LaunchAgent. Archive its plist for recovery.
-if [ "$LABEL" != "$LEGACY_LABEL" ]; then
-  launchctl bootout "gui/${UID_NOW}/${LEGACY_LABEL}" >/dev/null 2>&1 || \
-    launchctl bootout "gui/${UID_NOW}" "$LEGACY_PLIST" >/dev/null 2>&1 || true
-  if [ -f "$LEGACY_PLIST" ]; then
-    LEGACY_ARCHIVE_DIR="$STATE_DIR/legacy-launchagent"
-    mkdir -p "$LEGACY_ARCHIVE_DIR"
-    chmod 700 "$LEGACY_ARCHIVE_DIR"
-    LEGACY_STAMP="$(date +%Y%m%d%H%M%S)"
-    mv "$LEGACY_PLIST" "$LEGACY_ARCHIVE_DIR/${LEGACY_LABEL}.${LEGACY_STAMP}.plist"
-  fi
-fi
-
+# v6 never retires the old service before the new service passes its smoke test.
 launchctl bootout "gui/${UID_NOW}" "$PLIST" >/dev/null 2>&1 || true
 launchctl bootstrap "gui/${UID_NOW}" "$PLIST"
 STARTED_AGENT=1
@@ -291,6 +283,19 @@ print('SHELL_BRIDGE_INSTALLED=1')
 PY
 "${R[@]}" deletefile "${REMOTE}results/${RID}.json" >/dev/null 2>&1 || true
 STARTED_AGENT=0
+
+if [ "$RETIRE_OLD_AFTER_SMOKE" -eq 1 ]; then
+  for old_label in "$OLD_LABEL_1" "$OLD_LABEL_2"; do
+    old_plist="$HOME/Library/LaunchAgents/$old_label.plist"
+    launchctl bootout "gui/${UID_NOW}/${old_label}" >/dev/null 2>&1 || \
+      launchctl bootout "gui/${UID_NOW}" "$old_plist" >/dev/null 2>&1 || true
+    if [ -f "$old_plist" ]; then
+      archive_dir="$STATE_DIR/retired-launchagents"
+      mkdir -p "$archive_dir"; chmod 700 "$archive_dir"
+      mv "$old_plist" "$archive_dir/${old_label}.$(date +%Y%m%d%H%M%S).plist"
+    fi
+  done
+fi
 
 echo "ROOT_ID:   $ROOT_ID"
 echo "REQUESTS:  $REQUESTS_ID"

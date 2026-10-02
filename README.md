@@ -1,5 +1,7 @@
 # llm-git-bridge
 
+> **Local Executor Bridge v6 candidate:** the current hardening/convergence candidate is documented in [`docs/local-executor-bridge-v6.md`](docs/local-executor-bridge-v6.md). It is intentionally separate from the conversation/work-thread successor project and is staged side-by-side with v5 until cutover acceptance.
+
 `llm-git-bridge` lets an LLM or agent work safely with Git repositories that remain on your own machine.
 
 It exposes a deliberately small mailbox protocol for repository discovery, filtered snapshots, patch transactions, local validation commands, commits, and optional Git pushes. Google Drive through `rclone` is the first transport, but the core protocol is provider-neutral: the remote client does not need direct filesystem access, a GitHub token, or arbitrary shell access on the host.
