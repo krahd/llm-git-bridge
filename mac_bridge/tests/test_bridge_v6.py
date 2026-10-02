@@ -1,0 +1,338 @@
+import json
+import os
+import tempfile
+import threading
+import time
+import unittest
+from pathlib import Path
+from unittest.mock import patch
+
+import sys
+sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
+import bridge as b
+
+
+class V6ConfigTests(unittest.TestCase):
+    def test_root_id_allows_missing_base_path_and_targets_relative_root(self):
+        with tempfile.TemporaryDirectory() as td:
+            root = Path(td) / "root"; root.mkdir()
+            cfgp = Path(td) / "cfg.json"
+            cfgp.write_text(json.dumps({
+                "remote": "x:", "drive_root_folder_id": "root123",
+                "allowed_root": str(root), "state_dir": str(Path(td)/"state"),
+                "shell": b.DEFAULT_SHELL,
+            }))
+            cfg = b.load_config(cfgp)
+            self.assertEqual(b._target(cfg, "requests"), "x:requests")
+            self.assertEqual(b._rclone_prefix(cfg), ["--drive-root-folder-id", "root123"])
+
+    def test_auto_limit_is_bounded_and_integer_override_validated(self):
+        auto = b.max_active_requests({})
+        self.assertGreaterEqual(auto, 4)
+        self.assertLessEqual(auto, b.DEFAULT_MAX_ACTIVE_CAP)
+        self.assertEqual(b.max_active_requests({"max_active_requests": 9}), 9)
+        for bad in [0, -1, True, "9", 257]:
+            with self.assertRaises(ValueError):
+                b.max_active_requests({"max_active_requests": bad})
+
+
+class V6InstanceLockTests(unittest.TestCase):
+    def test_same_instance_id_cannot_lock_different_state_dirs(self):
+        with tempfile.TemporaryDirectory() as td:
+            cfg1={"state_dir":str(Path(td)/"state-a"),"bridge_instance_id":"same-instance","drive_root_folder_id":"root123"}
+            cfg2={"state_dir":str(Path(td)/"state-b"),"bridge_instance_id":"same-instance","drive_root_folder_id":"root123"}
+            first=b.acquire_instance_lock(cfg1)
+            try:
+                with self.assertRaisesRegex(RuntimeError, "another shell-bridge instance"):
+                    b.acquire_instance_lock(cfg2)
+            finally:
+                first.close()
+            second=b.acquire_instance_lock(cfg2)
+            second.close()
+
+    def test_distinct_instance_ids_can_lock_independently(self):
+        with tempfile.TemporaryDirectory() as td:
+            cfg1={"state_dir":str(Path(td)/"state-a"),"bridge_instance_id":"instance-a","drive_root_folder_id":"root123"}
+            cfg2={"state_dir":str(Path(td)/"state-b"),"bridge_instance_id":"instance-b","drive_root_folder_id":"root123"}
+            first=b.acquire_instance_lock(cfg1)
+            second=b.acquire_instance_lock(cfg2)
+            second.close(); first.close()
+
+
+class V6RcloneTests(unittest.TestCase):
+    def test_rclone_timeout_is_bounded(self):
+        with tempfile.TemporaryDirectory() as td:
+            fake = Path(td) / "rclone"
+            fake.write_text("#!/bin/sh\nsleep 5\n")
+            fake.chmod(0o755)
+            env = os.environ.copy()
+            env["PATH"] = f"{td}{os.pathsep}{env['PATH']}"
+            with patch.dict(os.environ, env, clear=True):
+                started = time.monotonic()
+                with self.assertRaisesRegex(RuntimeError, "timed out"):
+                    b.run_rclone(["version"], {"rclone_timeout_seconds": 1})
+                self.assertLess(time.monotonic() - started, 3)
+
+    def test_process_group_probe_permission_error_is_contained(self):
+        calls = []
+        def fake_killpg(pgid, sig):
+            calls.append((pgid, sig))
+            if sig == 0:
+                raise PermissionError(1, "Operation not permitted")
+        with patch.object(b.os, "killpg", fake_killpg):
+            b._terminate_pgid(12345)
+        self.assertIn((12345, b.signal.SIGTERM), calls)
+        self.assertIn((12345, b.signal.SIGKILL), calls)
+
+    def test_root_id_prefix_is_passed_to_rclone(self):
+        class CP:
+            returncode = 0
+            stdout = b""
+            stderr = b""
+        seen = []
+        def fake_run(argv, **kwargs):
+            seen.append(argv)
+            return CP()
+        with patch.object(b.subprocess, "run", fake_run):
+            b.run_rclone(["lsf", "x:requests"], {"drive_root_folder_id":"abc","rclone_timeout_seconds":5})
+        self.assertEqual(seen[0][:4], ["rclone", "--drive-root-folder-id", "abc", "lsf"])
+
+    def test_subprocess_fallback_calls_can_overlap(self):
+        class CP:
+            returncode = 0
+            stdout = b""
+            stderr = b""
+        entered_first = threading.Event()
+        entered_second = threading.Event()
+        release = threading.Event()
+        counter = {"n": 0}
+        counter_lock = threading.Lock()
+        errors = []
+        def fake_run(argv, **kwargs):
+            with counter_lock:
+                counter["n"] += 1
+                n = counter["n"]
+                if n == 1:
+                    entered_first.set()
+                elif n == 2:
+                    entered_second.set()
+            release.wait(2)
+            return CP()
+        def call():
+            try:
+                b.run_rclone(["version"], {"rclone_timeout_seconds": 5})
+            except Exception as exc:
+                errors.append(exc)
+        with patch.object(b.subprocess, "run", fake_run):
+            t1 = threading.Thread(target=call); t1.start()
+            self.assertTrue(entered_first.wait(0.5))
+            t2 = threading.Thread(target=call); t2.start()
+            try:
+                self.assertTrue(entered_second.wait(0.5), "second fallback was globally serialized")
+            finally:
+                release.set(); t1.join(2); t2.join(2)
+        self.assertEqual(errors, [])
+
+
+class V6CrashTests(unittest.TestCase):
+    def test_started_active_is_contained_before_indeterminate(self):
+        with tempfile.TemporaryDirectory() as td:
+            root = Path(td)/"root"; root.mkdir()
+            state = Path(td)/"state"
+            rdir = state/"requests"/"jobx"; rdir.mkdir(parents=True)
+            raw = json.dumps({"protocol":1,"id":"jobx","cwd":str(root),"explanation":"Test request.","command":"true"}).encode()
+            (rdir/"request.json").write_bytes(raw)
+            (rdir/"started.json").write_text(json.dumps({"request_sha256":b.sha256_bytes(raw)}))
+            (rdir/"active.json").write_text(json.dumps({"request_id":"jobx","pgid":999999}))
+            cfg={"remote":"x:","base_path":"Bridge","state_dir":str(state),"allowed_root":str(root),"shell":b.DEFAULT_SHELL}
+            uploaded={}
+            def from_remote(remote, base, leaf, local): Path(local).write_bytes(raw)
+            def to_remote(local, remote, base, leaf): uploaded[leaf]=Path(local).read_bytes()
+            with patch.object(b,"copy_from_remote",from_remote), patch.object(b,"copy_to_remote",to_remote), \
+                 patch.object(b,"delete_remote",lambda *a:None), patch.object(b,"_terminate_pgid") as term, \
+                 patch.object(b.os,"killpg",side_effect=ProcessLookupError):
+                b.process_one("jobx.json",cfg)
+            result=json.loads(uploaded["results/jobx.json"])
+            self.assertEqual(result["status"],"indeterminate")
+            self.assertFalse((rdir/"active.json").exists())
+            term.assert_not_called()
+
+    def test_recorded_active_permission_probe_still_attempts_containment(self):
+        with tempfile.TemporaryDirectory() as td:
+            marker=Path(td)/"active.json"
+            marker.write_text(json.dumps({"request_id":"jobx","pgid":12345}))
+            with patch.object(b.os,"killpg",side_effect=PermissionError(1,"Operation not permitted")), patch.object(b,"_terminate_pgid") as term:
+                b._contain_recorded_active(marker,"jobx")
+            term.assert_called_once_with(12345)
+
+    def test_startup_sweep_contains_recorded_active_without_remote_request(self):
+        with tempfile.TemporaryDirectory() as td:
+            state=Path(td)/"state"; rdir=state/"requests"/"orphan"; rdir.mkdir(parents=True)
+            (rdir/"started.json").write_text(json.dumps({"request_sha256":"x"}))
+            (rdir/"active.json").write_text(json.dumps({"request_id":"orphan","pgid":12345}))
+            with patch.object(b,"_contain_recorded_active") as contain:
+                n=b.sweep_incomplete_processes({"state_dir":str(state)})
+            self.assertEqual(n,1); contain.assert_called_once(); self.assertFalse((rdir/"active.json").exists())
+
+
+class V6HealthTests(unittest.TestCase):
+    def test_doctor_reports_private_oauth_without_exposing_client_id(self):
+        with tempfile.TemporaryDirectory() as td:
+            root=Path(td)/"root"; root.mkdir(); state=Path(td)/"state"
+            cfg={"remote":"x:","base_path":"Bridge","drive_root_folder_id":"abc","allowed_root":str(root),"state_dir":str(state),"shell":b.DEFAULT_SHELL,"rclone_timeout_seconds":30}
+            class CP:
+                def __init__(self, returncode=0, stdout=b"", stderr=b""):
+                    self.returncode=returncode; self.stdout=stdout; self.stderr=stderr
+            def fake_run(args, _cfg, check=False, capture=True):
+                if args == ["version"]: return CP(stdout=b"rclone v1.75.1\n")
+                if args and args[0] == "about": return CP()
+                if args[:2] == ["config", "redacted"]:
+                    return CP(stdout=b"[x]\ntype = drive\nclient_id = XXX\nclient_secret = XXX\n")
+                raise AssertionError(args)
+            with patch.object(b,"run_rclone",side_effect=fake_run):
+                info=b.doctor(cfg)
+            self.assertTrue(info["private_oauth_client_configured"])
+            self.assertNotIn("XXX", json.dumps(info))
+            self.assertNotIn("client_secret", json.dumps(info))
+
+    def test_health_payload_documents_snapshot_and_staleness_semantics(self):
+        with tempfile.TemporaryDirectory() as td:
+            root=Path(td)/"root"; root.mkdir(); state=Path(td)/"state"
+            cfg={"remote":"x:","base_path":"Bridge","drive_root_folder_id":"abc","bridge_instance_id":"instance-a","allowed_root":str(root),"state_dir":str(state),"shell":b.DEFAULT_SHELL,"rclone_timeout_seconds":30,"health_seconds":60}
+            with patch.object(b,"copy_to_remote_cfg",lambda *a,**k: None):
+                b.publish_health(cfg)
+            payload=json.loads((state/"health.json").read_text())
+            self.assertEqual(payload["state_counter_semantics"],"current_state_dir_journal_snapshot")
+            self.assertEqual(payload["health_interval_seconds"],60.0)
+            self.assertGreaterEqual(payload["health_stale_after_seconds"],90.0)
+            self.assertEqual(payload["publisher_pid"],os.getpid())
+            self.assertEqual(payload["state_dir"],str(state.resolve()))
+
+    def test_health_payload_skips_expensive_transport_probe(self):
+        with tempfile.TemporaryDirectory() as td:
+            root=Path(td)/"root"; root.mkdir(); state=Path(td)/"state"
+            cfg={"remote":"x:","base_path":"Bridge","drive_root_folder_id":"abc","allowed_root":str(root),"state_dir":str(state),"shell":b.DEFAULT_SHELL,"rclone_timeout_seconds":30}
+            seen=[]
+            with patch.object(b,"copy_to_remote_cfg",lambda local,c,leaf: seen.append((c["rclone_timeout_seconds"],leaf))), patch.object(b,"run_rclone") as rr:
+                b.publish_health(cfg)
+            rr.assert_not_called()
+            self.assertEqual(seen,[(5,"health.json")])
+
+class V6ConcurrencyTests(unittest.TestCase):
+    def test_workers_overlap_but_same_request_name_not_double_admitted(self):
+        cfg={"remote":"x:","base_path":"Bridge","allowed_root":"/tmp","state_dir":"/tmp/x"}
+        started=[]; release=threading.Event(); active=set(); lock=threading.Lock()
+        def fake_process(name, _cfg):
+            started.append((name,time.monotonic()))
+            release.wait(2)
+        threads=[]
+        with patch.object(b,"process_one",fake_process):
+            for name in ["a.json","b.json"]:
+                with lock: active.add(name)
+                t=threading.Thread(target=b._worker,args=(name,cfg,active,lock)); threads.append(t); t.start()
+            deadline=time.monotonic()+1
+            while len(started)<2 and time.monotonic()<deadline: time.sleep(.01)
+            self.assertEqual({x[0] for x in started},{"a.json","b.json"})
+            self.assertLess(abs(started[0][1]-started[1][1]),0.5)
+            release.set()
+            for t in threads:t.join(2)
+        self.assertEqual(active,set())
+
+
+class V6SecurityTests(unittest.TestCase):
+    def test_repository_mode_is_offline_by_default(self):
+        with tempfile.TemporaryDirectory() as td:
+            repo=Path(td)/"repo"; repo.mkdir()
+            os.system(f"git -C {repo} init -q")
+            plan=b.resolve_write_plan({"cwd":repo,"command":"printf ok","write_scope":"repository"},{"allowed_root":td,"state_dir":str(Path(td)/"state")})
+            self.assertFalse(plan["allow_network"])
+
+    def test_sandbox_profile_blocks_common_credential_locations(self):
+        profile=b.sandbox_profile([], allow_network=False)
+        self.assertIn('(deny network*)', profile)
+        self.assertIn(str(Path.home()/'.ssh'), profile)
+        self.assertIn(str(Path.home()/'.config'/'rclone'), profile)
+        self.assertIn(str(Path.home()/'Library'/'Keychains'), profile)
+
+    def test_sandboxed_child_environment_does_not_inherit_tokens_or_ssh_agent(self):
+        with patch.dict(os.environ,{"PATH":"/usr/bin:/bin","HOME":"/Users/example","SSH_AUTH_SOCK":"/tmp/agent","GH_TOKEN":"secret","AWS_SECRET_ACCESS_KEY":"secret","LANG":"en_US.UTF-8"},clear=True):
+            env=b.child_environment("r1",sandboxed=True)
+        self.assertNotIn("SSH_AUTH_SOCK",env)
+        self.assertNotIn("GH_TOKEN",env)
+        self.assertNotIn("AWS_SECRET_ACCESS_KEY",env)
+        self.assertEqual(env["MAC_EXECUTOR_BRIDGE_REQUEST_ID"],"r1")
+
+    def test_confirmation_dialog_has_no_default_or_keyboard_activated_button(self):
+        cfg={"operator_confirmation_mode":"dialog","operator_confirmation_timeout_seconds":10}
+        allowed=__import__('subprocess').CompletedProcess([],0,stdout="allow\n",stderr="")
+        with patch.object(b.subprocess,"run",return_value=allowed) as run:
+            result=b.request_operator_confirmation(request_id="job",cwd=Path("/tmp"),command="rm -rf x",category="test",cfg=cfg,explanation="Test deliberate approval.")
+        self.assertTrue(result["approved"])
+        script=run.call_args.args[0][4]
+        self.assertIn('cancelButton.setKeyEquivalent("")',script)
+        self.assertIn('allowButton.setKeyEquivalent("")',script)
+        self.assertIn('window.setDefaultButtonCell(null)',script)
+        self.assertIn('window.setInitialFirstResponder(textView)',script)
+        self.assertIn('window.makeFirstResponder(textView)',script)
+
+
+
+
+class V6CoordinatorBoundaryTests(unittest.TestCase):
+    def test_coordinator_is_exact_direct_argv_and_rejects_shell_chaining(self):
+        import sys
+        with tempfile.TemporaryDirectory() as td:
+            script=Path(td)/"workspace.py"; script.write_text("# test\n")
+            old=b.WORKSPACE_COORDINATOR
+            try:
+                b.WORKSPACE_COORDINATOR=script
+                cmd=f"{sys.executable} {script} exec --job job1 --command 'printf x > file.txt'"
+                argv=b._trusted_workspace_coordinator_argv(cmd)
+                self.assertIsNotNone(argv)
+                self.assertEqual(argv[2],"exec")
+                self.assertIn("printf x > file.txt",argv)
+                self.assertIsNone(b._trusted_workspace_coordinator_argv(cmd+" && touch /tmp/escape"))
+            finally:
+                b.WORKSPACE_COORDINATOR=old
+
+    def test_coordinator_plan_is_direct_not_broad_filesystem_sandbox(self):
+        import sys
+        with tempfile.TemporaryDirectory() as td:
+            root=Path(td)/"root"; root.mkdir(); state=Path(td)/"state"; state.mkdir()
+            script=Path(td)/"workspace.py"; script.write_text("# test\n")
+            old=b.WORKSPACE_COORDINATOR
+            try:
+                b.WORKSPACE_COORDINATOR=script
+                req={"cwd":root,"command":f"{sys.executable} {script} show --job job1",
+                     "write_scope":"auto","explanation":"test"}
+                plan=b.resolve_write_plan(req,{"allowed_root":str(root),"state_dir":str(state)})
+                self.assertTrue(plan["trusted_coordinator"])
+                self.assertIsNone(plan["write_roots"])
+                self.assertEqual(plan["direct_argv"][2],"show")
+            finally:
+                b.WORKSPACE_COORDINATOR=old
+
+
+class V6WakeLeaseTests(unittest.TestCase):
+    def test_wake_lease_busy_grace_release_and_crash_binding(self):
+        class Proc:
+            def __init__(self): self.pid=987; self.terminated=False; self.killed=False
+            def poll(self): return None if not self.terminated and not self.killed else 0
+            def terminate(self): self.terminated=True
+            def wait(self,timeout=None): return 0
+            def kill(self): self.killed=True
+        proc=Proc()
+        with patch.object(b.sys,"platform","darwin"), patch.object(b,"CAFFEINATE",Path("/usr/bin/caffeinate")), patch.object(b.subprocess,"Popen",return_value=proc) as popen:
+            lease=b.WakeLease({"wake_idle_grace_seconds":0})
+            lease.busy("test")
+            argv=popen.call_args.args[0]
+            self.assertEqual(argv[:3],[str(b.CAFFEINATE),"-i","-w"])
+            self.assertEqual(argv[3],str(os.getpid()))
+            self.assertEqual(lease.snapshot()["state"],"busy")
+            lease.idle()
+            self.assertEqual(lease.snapshot()["state"],"off")
+            self.assertTrue(proc.terminated)
+
+
+if __name__ == "__main__":
+    unittest.main(verbosity=2)
