@@ -40,6 +40,22 @@ WRITE_SCOPES = {"auto", "read_only", "repository", "system"}
 WORKSPACE_COORDINATOR = Path(__file__).resolve().with_name("workspace.py")
 ID_RE = re.compile(r"[a-z0-9][a-z0-9._-]{0,127}\Z")
 
+PROHIBITED_COMMAND_RULES = (
+    (
+        "public_repository_create",
+        re.compile(r"(?im)(?<![\w-])gh\s+repo\s+create\b(?:(?!--private\b)[^\n;])*(?:--public\b|$)"),
+    ),
+    (
+        "public_repository_visibility",
+        re.compile(r"(?im)(?<![\w-])gh\s+repo\s+edit\b[^\n;]*--visibility(?:=|\s+)public\b"),
+    ),
+    (
+        "public_repository_api",
+        re.compile(r"(?im)(?<![\w-])gh\s+api\b[^\n;]*(?:visibility(?:=|\s+|[\"']\s*:\s*[\"'])public|private(?:=|\s+|[\"']\s*:\s*)false)"),
+    ),
+)
+
+
 HIGH_IMPACT_COMMAND_RULES = (
     (
         "github_repository_control_plane",
@@ -209,6 +225,14 @@ def validate_request(req: dict, request_name: str, allowed_root: Path, max_timeo
         "id": rid, "cwd": cwd, "command": command, "timeout": timeout, "stdin": stdin,
         "write_scope": write_scope, "explanation": explanation,
     }
+
+
+def prohibited_command_reason(command: str) -> str | None:
+    """Return a non-waivable policy reason for commands agents must never execute."""
+    for reason, pattern in PROHIBITED_COMMAND_RULES:
+        if pattern.search(command):
+            return reason
+    return None
 
 
 def high_impact_command_category(command: str) -> str | None:
@@ -1014,6 +1038,16 @@ def process_one(name: str, cfg: dict) -> None:
         v = validate_request(req, name, allowed_root, max_timeout, max_command_bytes, max_stdin_bytes)
     except Exception as exc:
         result = result_envelope(rid_guess, request_sha, "rejected", {"message": str(exc)})
+        _persist_then_publish(result, local_result, finished_marker, name, cfg)
+        return
+
+    prohibited_reason = prohibited_command_reason(v["command"])
+    if prohibited_reason is not None:
+        result = result_envelope(v["id"], request_sha, "rejected", {
+            "cwd": str(v["cwd"]),
+            "message": "repository visibility policy forbids agents from creating a public repository or making a repository public",
+            "policy_reason": prohibited_reason,
+        })
         _persist_then_publish(result, local_result, finished_marker, name, cfg)
         return
 

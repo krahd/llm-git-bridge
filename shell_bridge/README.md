@@ -1,5 +1,7 @@
 # Local Executor Bridge v6
 
+**Repository visibility policy:** agent requests may create repositories only with explicit private visibility. Creating a public repository or changing repository visibility to public is non-waivable and must be rejected before operator approval. Existing public repositories remain operable.
+
 Local Executor Bridge v6 is the repository’s single production local executor. One daemon owns shell execution, the mailbox and durable request state, operator approvals, and the trusted Git workspace coordinator.
 
 The older protocol-v2 Git implementation remains compatibility code; it is not a second production daemon. Git work is owned by this bridge through `workspace.py`.

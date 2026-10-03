@@ -6,7 +6,7 @@ When modifying the project:
 
 - preserve provider-neutral terminology in core code and protocol;
 - do not broaden raw shell authority beyond the Local Executor Bridge v6 resolved-scope and operator-approval model; repository/workspace execution is sandboxed but the bridge is not an OS security boundary;
-- do not add automatic push/merge behaviour without explicit policy and tests;
+- repository visibility is a non-waivable policy boundary: agents must never create public repositories or make repositories public; agent-created repositories must be explicitly private, and enforcement must reject rather than merely request approval;
 - local filesystem paths must not appear in the remote repository index;
 - retain stale-SHA checks and safe branch-prefix validation;
 - minimise mailbox/Drive round trips without racing ambiguous Drive writes; Google Drive permits duplicate filenames;
