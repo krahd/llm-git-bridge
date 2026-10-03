@@ -26,6 +26,18 @@ class CutoverIdentityTests(unittest.TestCase):
         compat = text.index("ln -sfn")
         self.assertGreater(compat, smoke)
 
+
+    def test_cutover_verifies_staged_manifest_and_approval_helper_before_service_switch(self):
+        text = (pathlib.Path(__file__).parents[1] / "cutover.sh").read_text()
+        manifest = text.index('install-manifest.json')
+        stop_old = text.index('# Stop old consumers first.')
+        self.assertLess(manifest, stop_old)
+        self.assertIn('approval_helper_sha256', text)
+        self.assertIn('staged v6 install manifest integrity check failed', text)
+        self.assertIn('EXPECTED_APPROVAL_APP="$NEW_INSTALL_DIR/Local Executor Approval.app"', text)
+        self.assertIn('staged v6 approval app executable missing', text)
+        self.assertLess(text.index('staged v6 approval app executable missing'), stop_old)
+
     def test_cutover_preserves_legacy_workspace_state_on_upgrade(self):
         text = (pathlib.Path(__file__).parents[1] / "cutover.sh").read_text()
         self.assertIn("LEGACY_STATE_DIR", text)

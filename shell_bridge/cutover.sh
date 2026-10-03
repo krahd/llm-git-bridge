@@ -49,6 +49,29 @@ need python3; need rclone; need launchctl
 [ -f "$NEW_CONFIG" ] || fail "staged v6 config missing: $NEW_CONFIG"
 [ -f "$NEW_INSTALL_DIR/bridge.py" ] || fail "staged v6 bridge missing: $NEW_INSTALL_DIR/bridge.py"
 [ -f "$NEW_INSTALL_DIR/workspace.py" ] || fail "staged v6 coordinator missing: $NEW_INSTALL_DIR/workspace.py"
+[ -f "$NEW_INSTALL_DIR/approval_helper.py" ] || fail "staged v6 approval helper missing: $NEW_INSTALL_DIR/approval_helper.py"
+[ -f "$NEW_INSTALL_DIR/install-manifest.json" ] || fail "staged v6 install manifest missing: $NEW_INSTALL_DIR/install-manifest.json"
+
+python3 - "$NEW_INSTALL_DIR/install-manifest.json" "$NEW_INSTALL_DIR/bridge.py" "$NEW_INSTALL_DIR/workspace.py" "$NEW_INSTALL_DIR/approval_helper.py" <<'PYMANIFEST' || fail "staged v6 install manifest integrity check failed"
+import hashlib,json,sys
+manifest_path,bridge_path,workspace_path,approval_helper_path=sys.argv[1:]
+def sha256(path):
+    with open(path,'rb') as f: return hashlib.sha256(f.read()).hexdigest()
+try:
+    m=json.load(open(manifest_path,encoding='utf-8'))
+except Exception:
+    raise SystemExit(2)
+if m.get('schema') != 1: raise SystemExit(3)
+source=m.get('source_commit')
+if not isinstance(source,str) or len(source)!=40 or any(c not in '0123456789abcdef' for c in source.lower()): raise SystemExit(4)
+expected={
+    'bridge_sha256':sha256(bridge_path),
+    'workspace_sha256':sha256(workspace_path),
+    'approval_helper_sha256':sha256(approval_helper_path),
+}
+for key,value in expected.items():
+    if m.get(key) != value: raise SystemExit(5)
+PYMANIFEST
 
 # This script is intentionally out-of-band. Running it as a request through the
 # bridge being replaced would make that request itself an active consumer while
@@ -64,7 +87,18 @@ vals=[c.get('remote',''),c.get('drive_root_folder_id',''),c.get('allowed_root','
 if not all(isinstance(x,str) and x for x in vals): raise SystemExit(2)
 print('\t'.join(vals))
 PYCFG
-) || fail "staged v6 config is incomplete"
+ ) || fail "staged v6 config is incomplete"
+
+EXPECTED_APPROVAL_APP="$NEW_INSTALL_DIR/Local Executor Approval.app"
+CONFIG_APPROVAL_APP="$(python3 - "$NEW_CONFIG" <<'PYAPP'
+import json,sys
+c=json.load(open(sys.argv[1],encoding='utf-8'))
+v=c.get('operator_approval_app','')
+print(v if isinstance(v,str) else '')
+PYAPP
+)"
+[ "$CONFIG_APPROVAL_APP" = "$EXPECTED_APPROVAL_APP" ] || fail "staged v6 approval app path does not match install directory"
+[ -x "$EXPECTED_APPROVAL_APP/Contents/MacOS/approval-helper" ] || fail "staged v6 approval app executable missing"
 
 # Existing durable workspace state must survive an in-place v5 upgrade.
 if [ -d "$LEGACY_STATE_DIR/workspaces" ]; then
