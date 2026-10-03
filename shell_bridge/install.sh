@@ -234,7 +234,7 @@ python3 - "$PLIST" "$LABEL" "$PYTHON_BIN" "$INSTALL_DIR/bridge.py" "$CONFIG_DIR/
 import plistlib,sys
 plist,label,python,bridge,config,path_value,state,home=sys.argv[1:]
 obj={'Label':label,'ProgramArguments':[python,bridge,'daemon','--config',config],
-'EnvironmentVariables':{'PATH':path_value,'HOME':home},'RunAtLoad':True,'KeepAlive':True,'Umask':0o077,
+'EnvironmentVariables':{'PATH':path_value,'HOME':home,'LOCAL_EXECUTOR_BRIDGE_STATE_DIR':state,'CHATGPT_SHELL_BRIDGE_STATE_DIR':state},'RunAtLoad':True,'KeepAlive':True,'Umask':0o077,
 'StandardOutPath':state+'/stdout.log','StandardErrorPath':state+'/stderr.log'}
 with open(plist,'wb') as f: plistlib.dump(obj,f,fmt=plistlib.FMT_XML,sort_keys=True)
 PY

@@ -82,10 +82,13 @@ def repo_id(repo: Path, remote: str = "origin") -> str:
 def state_root(cli: str | None = None) -> Path:
     if cli:
         return Path(cli).expanduser().resolve()
-    return Path(os.environ.get(
-        "CHATGPT_SHELL_BRIDGE_STATE_DIR",
-        str(Path.home() / ".local/state/chatgpt-shell-bridge"),
-    )).expanduser().resolve()
+    configured = (
+        os.environ.get("LOCAL_EXECUTOR_BRIDGE_STATE_DIR")
+        or os.environ.get("CHATGPT_SHELL_BRIDGE_STATE_DIR")
+    )
+    return Path(
+        configured or str(Path.home() / ".local/state/local-executor-bridge")
+    ).expanduser().resolve()
 
 
 def job_path(state: Path, job_id: str) -> Path:

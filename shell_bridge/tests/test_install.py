@@ -39,5 +39,9 @@ class InstallScriptTests(unittest.TestCase):
         self.assertIn("'workspace_sha256':sha256(workspace_path)", self.text)
 
 
+    def test_launch_agent_propagates_canonical_state_dir(self):
+        self.assertIn("LOCAL_EXECUTOR_BRIDGE_STATE_DIR", self.text)
+        self.assertIn("CHATGPT_SHELL_BRIDGE_STATE_DIR", self.text)
+
 if __name__ == "__main__":
     unittest.main()

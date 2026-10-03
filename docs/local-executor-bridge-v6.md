@@ -57,3 +57,8 @@ If a pre-mutation cutover smoke fails, restore the previous service. Never run t
 ## Scope boundary
 
 Conversation/provider persistence, WorkThreads, browser handoff, higher-level planning, and multi-device continuity belong to the separate work-continuity system. Local Executor Bridge supplies executor/workspace capabilities only.
+
+
+## Production migration invariant
+
+The v6 production cutover must not orphan durable workspace jobs. A fresh install uses the v6 state tree, but an upgrade from v5 stages the v6 LaunchAgent with the existing production state directory (`~/.local/state/chatgpt-shell-bridge`) and propagates that directory through `LOCAL_EXECUTOR_BRIDGE_STATE_DIR`. The v6 daemon trusts only the `workspace.py` shipped beside its own `bridge.py`; after a successful production smoke, a compatibility link at the historical coordinator path may point to that bundled coordinator for older clients. No stale v5 coordinator remains authoritative.

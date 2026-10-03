@@ -48,7 +48,7 @@ On a fresh host the installer will:
 3. otherwise choose the only configured remote, or ask you to select a remote when several exist;
 4. create `Local Executor Bridge/bridge-instance.json`, `requests/`, and `results/` when no mailbox exists yet;
 5. resolve and pin the exact Drive folder IDs so later operation does not depend on ambiguous folder-name lookup;
-6. install the bridge under `~/.local/share/chatgpt-shell-bridge` and its private config/state directories;
+6. install the bridge under `~/.local/share/local-executor-bridge` and its private config/state directories;
 7. install and start the macOS LaunchAgent;
 8. run `doctor` and an end-to-end smoke request.
 
@@ -104,14 +104,14 @@ Do not busy-poll the mailbox. Submit once, retain the exact request ID, inspect 
 For anything substantial, create a durable workspace rather than mutating the canonical checkout from a conversational command:
 
 ```bash
-python3 ~/.local/share/chatgpt-shell-bridge/workspace.py create \
+python3 ~/.local/share/local-executor-bridge/workspace.py create \
   --repo /path/to/repo --resource docs/example --job-id unique-job-id --push-initial
 
-python3 ~/.local/share/chatgpt-shell-bridge/workspace.py exec \
+python3 ~/.local/share/local-executor-bridge/workspace.py exec \
   --job unique-job-id --command '...' --checkpoint-message 'Describe checkpoint'
 
-python3 ~/.local/share/chatgpt-shell-bridge/workspace.py ready --job unique-job-id
-python3 ~/.local/share/chatgpt-shell-bridge/workspace.py integrate \
+python3 ~/.local/share/local-executor-bridge/workspace.py ready --job unique-job-id
+python3 ~/.local/share/local-executor-bridge/workspace.py integrate \
   --job unique-job-id --validate 'bin/test' --timeout 300
 ```
 
@@ -140,8 +140,13 @@ Local state lives under:
 
 ```text
 ~/.config/chatgpt-shell-bridge/
-~/.local/state/chatgpt-shell-bridge/
-~/.local/share/chatgpt-shell-bridge/
+~/.local/state/local-executor-bridge/
+~/.local/share/local-executor-bridge/
 ```
 
 See [`../docs/shell-bridge-v5-architecture.md`](../docs/shell-bridge-v5-architecture.md) and [`../docs/shell-bridge-v5-adversarial-audit.md`](../docs/shell-bridge-v5-adversarial-audit.md) for the design and threat-model details.
+
+
+## Upgrade compatibility
+
+Fresh v6 installs use `~/.local/share/local-executor-bridge` and `~/.local/state/local-executor-bridge`. During an in-place v5 production cutover, stage v6 with the existing production state directory so durable workspace jobs survive the service switch. After the v6 smoke succeeds, the cutover installs a compatibility link at the legacy coordinator path so older clients continue to reach the bundled v6 coordinator; the legacy path is not a second daemon.

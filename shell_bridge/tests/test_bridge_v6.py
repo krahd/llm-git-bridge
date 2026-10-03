@@ -68,4 +68,7 @@ class WakeLeaseTests(unittest.TestCase):
         lease.close()
 
 
+    def test_workspace_coordinator_is_bundled_with_bridge(self):
+        self.assertEqual(bridge.WORKSPACE_COORDINATOR, (ROOT / "workspace.py").resolve())
+
 if __name__ == "__main__": unittest.main()
