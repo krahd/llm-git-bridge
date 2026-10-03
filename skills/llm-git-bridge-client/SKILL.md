@@ -1,9 +1,11 @@
 ---
 name: llm-git-bridge-client
-description: Use llm-git-bridge as a remote LLM/agent client to discover local Git repositories through the mailbox, materialise filtered snapshots, submit protocol-v2 patch transactions, request doctor/diagnostics, interpret results, handle stale bases and crash-safe retries, coordinate multiple clients, and respect local Git authority. Trigger whenever an LLM needs to read, edit, validate, commit, or push work through llm-git-bridge rather than direct filesystem/Git access, including an explicitly authorised current/default branch such as main.
+description: Compatibility client for the retired protocol-v2 llm-git-bridge mailbox API. Use only when explicitly operating a legacy protocol-v2 installation, inspecting migration evidence, or testing backwards compatibility. For normal shell or Git repository work on Tomas Laurenzo's Mac, use Local Executor Bridge v6 through the mac-git-bridge compatibility skill instead.
 ---
 
 # LLM Git Bridge Client
+
+> **Compatibility only.** Protocol-v2 is retained for migration, historical tests, and explicit legacy clients. It must not run as a second production daemon beside Local Executor Bridge v6.
 
 Use the bridge as a **mailbox protocol**, not as shell access and not as a substitute for GitHub merge/review policy.
 

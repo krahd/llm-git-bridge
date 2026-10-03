@@ -1,3 +1,3 @@
 interface:
-  display_name: "LLM Git Bridge Client"
-  short_description: "Safely operate llm-git-bridge from an LLM client"
+  display_name: "LLM Git Bridge v2 Compatibility"
+  short_description: "Legacy protocol-v2 mailbox client for migration and compatibility"

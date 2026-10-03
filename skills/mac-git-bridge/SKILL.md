@@ -1,9 +1,9 @@
 ---
 name: mac-git-bridge
-description: Use Tomas Laurenzo's installed ChatGPT Shell Bridge to give ordinary ChatGPT web conversations raw shell and Git access to repositories on his Mac through Google Drive. Trigger whenever a conversation needs to inspect, edit, test, commit, branch, merge, rebase, fetch, pull, push, or otherwise operate on local repositories under /Users/tom/tom-repos or /Users/tom/tom-repos/projects, especially when Developer Mode, Work, Codex, or the GitHub connector are unavailable. Treat GitHub as the canonical repository state, the Mac checkout as authoritative for current local working state, and Drive only as transport. For substantial concurrent work, use the v5 workspace coordinator so conversation lifetime is decoupled from durable Git work. Repository-changing work is not complete until intended commits are pushed and the GitHub remote state is verified, unless the user explicitly requests local-only work.
+description: Use Tomas Laurenzo's installed Local Executor Bridge v6 as the single shell and Git bridge to repositories on his Mac through Google Drive. Trigger whenever a conversation needs to inspect, edit, test, commit, branch, merge, rebase, fetch, pull, push, or otherwise operate on local repositories under the configured root, especially when direct filesystem/Git access is unavailable. GitHub is canonical shared state, the Mac checkout is authoritative local execution state, and Drive is transport only. Use the bundled durable workspace coordinator for substantial work and complete repository mutations only after intended commits are pushed and the canonical remote is independently verified, unless the user explicitly requests local-only work.
 ---
 
-# Mac Git Bridge
+# Local Executor Bridge v6
 
 Use the installed Google Drive ChatGPT Shell Bridge as the normal path from a web conversation to Tomas's Mac. Do not fall back to the old semantic LLM-Git-Bridge protocol unless explicitly requested.
 
@@ -19,7 +19,7 @@ Never treat conversation memory, Drive artefacts, or a local `HEAD` alone as can
 
 For repository-changing work the default completion gate is: intended change committed -> pushed to the intended remote/branch -> remote ref independently verified. Skip commit/push only for explicitly local-only work or read-only tasks.
 
-## Canonical v5 transport
+## Canonical v6 transport
 
 Live bridge identity is pinned by Drive IDs, not folder-name resolution:
 
@@ -29,7 +29,7 @@ Live bridge identity is pinned by Drive IDs, not folder-name resolution:
 - Human path: `/Google Drive/llm-git-bridge/ChatGPT Shell Bridge`
 - Health: `health.json` at the live root.
 
-The daemon executes accepted commands with `/bin/zsh -lc` as Tomas and returns exact shell results, but v5 now applies an execution-authority gate before the child shell starts. With the default `write_scope=auto`, commands outside Git are filesystem-and-network read-only; commands inside an existing repository/worktree are filesystem-write-scoped to that repository/Git metadata and retain network access; the trusted workspace coordinator receives its governed repository/state scope. Broader `system` writes and recognised high-impact external/control-plane mutations require explicit local operator confirmation before `STARTED`. An approved `system` request intentionally restores the logged-in user's ordinary authority, so v5 remains a shell transport rather than a Git abstraction or VM boundary.
+The daemon executes accepted commands with `/bin/zsh -lc` as Tomas and returns exact shell results, but v6 now applies an execution-authority gate before the child shell starts. With the default `write_scope=auto`, commands outside Git are filesystem-and-network read-only; commands inside an existing repository/worktree are filesystem-write-scoped to that repository/Git metadata and retain network access; the trusted workspace coordinator receives its governed repository/state scope. Broader `system` writes and recognised high-impact external/control-plane mutations require explicit local operator confirmation before `STARTED`. An approved `system` request intentionally restores the logged-in user's ordinary authority, so v6 remains a shell transport rather than a Git abstraction or VM boundary.
 
 `health.json` is the first diagnostic surface when the request path appears unhealthy. It reports bridge version, pinned Drive IDs, active requests, process ceiling, and STARTED-without-FINISHED state without requiring a shell request.
 
@@ -75,11 +75,11 @@ Treat results as authoritative local execution evidence, not canonical repositor
 - `indeterminate`: STARTED was durable but FINISHED cannot be proved. Never replay a mutation automatically. Inspect actual filesystem/Git/remote state first.
 - `timed_out` or `output_limited`: shrink the operation; do not repeat the same scope blindly.
 
-v5 records active process-group identity. On timeout/restart it attempts descendant containment; a STARTED request without a proven FINISHED state is never silently re-executed.
+v6 records active process-group identity. On timeout/restart it attempts descendant containment; a STARTED request without a proven FINISHED state is never silently re-executed.
 
 ## Concurrency and execution limits
 
-v5 is **concurrent**, not single-worker. Each accepted request runs as its own supervised process group. The daemon admits multiple requests up to a bounded configured ceiling (`max_active_requests`; currently auto-resolved by health). Independent raw shell requests may overlap.
+v6 is **concurrent**, not single-worker. Each accepted request runs as its own supervised process group. The daemon admits multiple requests up to a bounded configured ceiling (`max_active_requests`; currently auto-resolved by health). Independent raw shell requests may overlap.
 
 Do not confuse transport concurrency with safe Git concurrency. Raw shell does not infer repository semantics. For long-lived or concurrent repository mutation, use the workspace coordinator described below.
 
@@ -110,7 +110,7 @@ The goal is to minimise total orchestration latency and duplicate side effects: 
 
 ## Durable workspace coordinator
 
-Installed coordinator: `/Users/tom/.local/share/chatgpt-shell-bridge/workspace.py`.
+Installed coordinator: `/Users/tom/.local/share/local-executor-bridge/workspace.py`.
 
 Use it for substantial editing, for work likely to span context windows, and whenever multiple conversations may operate on the same repository. It provides a durable job branch + Git worktree + job metadata, periodic pushed checkpoints, conflict/reconciliation detection, and a short canonical integration gate.
 
@@ -128,21 +128,21 @@ Core invariants:
 Useful commands:
 
 ```bash
-python3 /Users/tom/.local/share/chatgpt-shell-bridge/workspace.py create \
+python3 /Users/tom/.local/share/local-executor-bridge/workspace.py create \
   --repo /path/to/repo --resource papers/example --job-id <unique-id> --push-initial
 
-python3 /Users/tom/.local/share/chatgpt-shell-bridge/workspace.py exec \
+python3 /Users/tom/.local/share/local-executor-bridge/workspace.py exec \
   --job <id> --command '<bounded command>' --checkpoint-message '<message>'
 
-python3 /Users/tom/.local/share/chatgpt-shell-bridge/workspace.py ready --job <id>
+python3 /Users/tom/.local/share/local-executor-bridge/workspace.py ready --job <id>
 
-python3 /Users/tom/.local/share/chatgpt-shell-bridge/workspace.py integrate \
+python3 /Users/tom/.local/share/local-executor-bridge/workspace.py integrate \
   --job <id> --validate '<repo-root validation command>' --timeout <seconds>
 
-python3 /Users/tom/.local/share/chatgpt-shell-bridge/workspace.py show --job <id>
-python3 /Users/tom/.local/share/chatgpt-shell-bridge/workspace.py list
-python3 /Users/tom/.local/share/chatgpt-shell-bridge/workspace.py recover --repo /path/to/repo
-python3 /Users/tom/.local/share/chatgpt-shell-bridge/workspace.py gc --repo /path/to/repo
+python3 /Users/tom/.local/share/local-executor-bridge/workspace.py show --job <id>
+python3 /Users/tom/.local/share/local-executor-bridge/workspace.py list
+python3 /Users/tom/.local/share/local-executor-bridge/workspace.py recover --repo /path/to/repo
+python3 /Users/tom/.local/share/local-executor-bridge/workspace.py gc --repo /path/to/repo
 ```
 
 Integration validation runs from the temporary repository root. Paths in `--validate` must therefore be repository-root-relative.
@@ -187,4 +187,4 @@ Do not reuse request IDs. Consumed requests are normally removed; results are du
 
 The bridge daemon runs as Tomas's macOS user, and the initial `cwd` must be under `/Users/tom/tom-repos`. Default child-shell scopes are constrained by the macOS execution sandbox described above; however an explicitly approved `system` request deliberately runs with the logged-in user's normal authority, and repository scope still retains network access. Treat the Drive mailbox as privileged and the confirmation gate as defence in depth, not as a VM boundary. Never put passwords, tokens, private keys or other secrets directly in request commands because command bytes and journal state may persist.
 
-The currently functioning `chatgpt-git-bridge:` rclone remote still reports rclone's 2026 retirement warning for the shared Google Drive OAuth client ID. This is an external credential/configuration risk, not a v5 concurrency defect. Surface it in diagnostics and migrate to a private OAuth client when credentials/authorisation are available; do not silently alter credentials.
+The currently functioning `chatgpt-git-bridge:` rclone remote still reports rclone's 2026 retirement warning for the shared Google Drive OAuth client ID. This is an external credential/configuration risk, not a v6 concurrency defect. Surface it in diagnostics and migrate to a private OAuth client when credentials/authorisation are available; do not silently alter credentials.

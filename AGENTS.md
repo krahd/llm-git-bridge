@@ -5,7 +5,7 @@ This repository implements `llm-git-bridge`, a provider-agnostic bridge between 
 When modifying the project:
 
 - preserve provider-neutral terminology in core code and protocol;
-- do not introduce arbitrary remote shell execution; remember that locally configured commands can execute patched repository code and therefore are not an OS sandbox;
+- do not broaden raw shell authority beyond the Local Executor Bridge v6 resolved-scope and operator-approval model; repository/workspace execution is sandboxed but the bridge is not an OS security boundary;
 - do not add automatic push/merge behaviour without explicit policy and tests;
 - local filesystem paths must not appear in the remote repository index;
 - retain stale-SHA checks and safe branch-prefix validation;
