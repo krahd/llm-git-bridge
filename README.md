@@ -44,6 +44,8 @@ The execution scopes are:
 
 `auto` resolves to the least authority that fits the request. High-impact operations are an additional approval gate, not the primary sandbox. Approval is **effect-before-command**: the dialog explains the intended action and required authority first, then exposes request ID, working directory, and exact command as inspectable details. Elevated approval is click-only, with no Return/Space shortcut selecting an action. Missing UI support fails closed.
 
+Repository visibility is stricter than the normal approval model: agent requests that create a public repository or make a repository public are rejected outright and cannot be approved through the operator dialogue. Agent-created repositories must be explicitly private. Existing public repositories remain operable under normal policy.
+
 Recognised high-impact operations include GitHub control-plane mutation, mutating HTTP calls, remote shell/copy, destructive Git pushes/local resets, recursive forced deletion, and non-repository system/package mutation. Ordinary substantial Git work should use the workspace coordinator instead of asking for broad shell elevation.
 
 ## Durable Git work

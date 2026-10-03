@@ -8,12 +8,13 @@ Status: canonical convergence target. The hardened v6 implementation in `shell_b
 2. Shell and Git are capabilities of that daemon. Git mutation uses the bundled trusted workspace coordinator rather than a separately running Git bridge.
 3. GitHub is canonical shared repository state; Mac worktrees are authoritative local execution state; mailbox storage is transport only.
 4. Remote input never expands its own authority. Local configuration plus resolved scope decides allow / local approval / reject.
-5. Raw shell is least privilege. Generic reads are filesystem-and-network read-only; repository writes are worktree/Git scoped and offline by default.
-6. The coordinator may use credentials/network only for its own fetch/checkpoint/push/integration lifecycle. Remote `exec` and validation payloads are sandboxed inside their worktree with network and credential inheritance denied.
-7. Broad `system` execution always requires local approval. High-impact classifiers add an approval gate but are never the sole security boundary.
-8. Approval presents semantic intent first (`explanation` + authority/effect), exact command details second, and fails closed. Approval has no keyboard-default action.
-9. STARTED/FINISHED durability, bounded process groups/output/runtime, unique request IDs, and no automatic replay of indeterminate mutations remain mandatory.
-10. Substantial Git mutation is durable: isolated workspace -> checkpoint/push -> ready -> integration validation -> canonical push -> independent remote verification.
+5. Repository visibility is a non-waivable human-only publication boundary: agent requests may create repositories only explicitly private and must be rejected if they create a public repository or make one public.
+6. Raw shell is least privilege. Generic reads are filesystem-and-network read-only; repository writes are worktree/Git scoped and offline by default.
+7. The coordinator may use credentials/network only for its own fetch/checkpoint/push/integration lifecycle. Remote `exec` and validation payloads are sandboxed inside their worktree with network and credential inheritance denied.
+8. Broad `system` execution always requires local approval. High-impact classifiers add an approval gate but are never the sole security boundary.
+9. Approval presents semantic intent first (`explanation` + authority/effect), exact command details second, and fails closed. Approval has no keyboard-default action.
+10. STARTED/FINISHED durability, bounded process groups/output/runtime, unique request IDs, and no automatic replay of indeterminate mutations remain mandatory.
+11. Substantial Git mutation is durable: isolated workspace -> checkpoint/push -> ready -> integration validation -> canonical push -> independent remote verification.
 
 ## Permission resolution
 
@@ -46,11 +47,11 @@ Development and qualification may stage v6 beside the currently installed servic
 2. adversarial sandbox tests;
 3. wake-lease tests;
 4. isolated v6 end-to-end smoke;
-5. production mailbox handoff while quiescent;
-6. harmless production smoke;
-7. retire obsolete shell/Git LaunchAgents;
-8. verify v6 health and final request;
-9. update client/skill mailbox/runtime identity.
+6. production mailbox handoff while quiescent;
+7. harmless production smoke;
+8. retire obsolete shell/Git LaunchAgents;
+9. verify v6 health and final request;
+10. update client/skill mailbox/runtime identity.
 
 If a pre-mutation cutover smoke fails, restore the previous service. Never run two consumers against the same live mailbox.
 

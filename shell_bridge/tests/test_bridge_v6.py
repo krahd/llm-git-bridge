@@ -71,4 +71,20 @@ class WakeLeaseTests(unittest.TestCase):
     def test_workspace_coordinator_is_bundled_with_bridge(self):
         self.assertEqual(bridge.WORKSPACE_COORDINATOR, (ROOT / "workspace.py").resolve())
 
+
+class RepositoryVisibilityPolicyTests(unittest.TestCase):
+    def test_public_repository_creation_is_prohibited(self):
+        self.assertEqual(bridge.prohibited_command_reason("gh repo create example --public"), "public_repository_create")
+        self.assertEqual(bridge.prohibited_command_reason("gh repo create example"), "public_repository_create")
+
+    def test_private_repository_creation_is_not_prohibited(self):
+        self.assertIsNone(bridge.prohibited_command_reason("gh repo create example --private"))
+
+    def test_making_repository_public_is_prohibited(self):
+        self.assertEqual(bridge.prohibited_command_reason("gh repo edit krahd/example --visibility public"), "public_repository_visibility")
+        self.assertEqual(bridge.prohibited_command_reason("gh api -X PATCH repos/krahd/example -f visibility=public"), "public_repository_api")
+
+    def test_normal_operations_on_existing_public_repo_are_not_prohibited(self):
+        self.assertIsNone(bridge.prohibited_command_reason("git push origin main"))
+
 if __name__ == "__main__": unittest.main()

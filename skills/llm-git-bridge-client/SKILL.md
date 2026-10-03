@@ -9,6 +9,8 @@ description: Compatibility client for the retired protocol-v2 llm-git-bridge mai
 
 Use the bridge as a **mailbox protocol**, not as shell access and not as a substitute for GitHub merge/review policy.
 
+**Repository visibility is a non-waivable boundary.** Never create a public repository or make an existing repository public. Any agent-created repository must be explicitly private; public visibility transitions are human-only.
+
 ## Start every session by grounding state
 
 1. Identify the mailbox root and transport available to the current client.

@@ -9,6 +9,8 @@ Use the installed Local Executor Bridge v6 as the normal path from a web convers
 
 ## Authority hierarchy
 
+**Repository visibility is a non-waivable boundary.** Never create a public repository or make an existing repository public. Any agent-created repository must be explicitly private. A request to publish repository visibility must stop before that action and leave it to the human operator; the bridge must reject such agent commands rather than treating them as approvable high-impact operations.
+
 Keep these roles distinct:
 
 1. **GitHub remote is canonical repository state.** Published branches/commits on the intended GitHub repository are the canonical shared project record.
