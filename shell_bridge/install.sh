@@ -242,6 +242,8 @@ RCLONE_BIN="$(command -v rclone)"; PYTHON_BIN="$(command -v python3)"
 DEVELOPER_DIR_VALUE="${DEVELOPER_DIR:-$(/usr/bin/xcode-select -p 2>/dev/null || true)}"
 DIRECT_SWIFTC="$DEVELOPER_DIR_VALUE/Toolchains/XcodeDefault.xctoolchain/usr/bin/swiftc"
 if [ -x "$DIRECT_SWIFTC" ]; then SWIFTC_BIN="$DIRECT_SWIFTC"; else SWIFTC_BIN="$(command -v swiftc)" || fail "swiftc is required to build the native approval menu-bar app"; fi
+SWIFT_SDK="$DEVELOPER_DIR_VALUE/Platforms/MacOSX.platform/Developer/SDKs/MacOSX.sdk"
+[ -d "$SWIFT_SDK" ] || fail "macOS SDK is required to build the native approval menu-bar app: $SWIFT_SDK"
 mkdir -p "$APP_BUNDLE/Contents/MacOS"
 APPROVAL_ROOT="$STATE_DIR/approvals"
 python3 - "$APP_BUNDLE/Contents/Info.plist" "$APPROVAL_ROOT" <<'PYAPPPLIST'
@@ -252,7 +254,7 @@ with open(path,'wb') as f: plistlib.dump(obj,f,fmt=plistlib.FMT_XML,sort_keys=Tr
 PYAPPPLIST
 APPROVAL_BUILD_DIR="$INSTALL_DIR/.approval-build"
 mkdir -p "$APPROVAL_BUILD_DIR/home" "$APPROVAL_BUILD_DIR/tmp" "$APPROVAL_BUILD_DIR/modules"
-HOME="$APPROVAL_BUILD_DIR/home" TMPDIR="$APPROVAL_BUILD_DIR/tmp" CLANG_MODULE_CACHE_PATH="$APPROVAL_BUILD_DIR/modules" SWIFT_MODULECACHE_PATH="$APPROVAL_BUILD_DIR/modules" "$SWIFTC_BIN" -O -framework AppKit -framework Foundation "$SCRIPT_DIR/approval_gui.swift" -o "$APP_BUNDLE/Contents/MacOS/local-executor-approval"
+HOME="$APPROVAL_BUILD_DIR/home" TMPDIR="$APPROVAL_BUILD_DIR/tmp" CLANG_MODULE_CACHE_PATH="$APPROVAL_BUILD_DIR/modules" SWIFT_MODULECACHE_PATH="$APPROVAL_BUILD_DIR/modules" "$SWIFTC_BIN" -sdk "$SWIFT_SDK" -O -framework AppKit -framework Foundation "$SCRIPT_DIR/approval_gui.swift" -o "$APP_BUNDLE/Contents/MacOS/local-executor-approval"
 chmod 700 "$APP_BUNDLE/Contents/MacOS/local-executor-approval"
 APPROVAL_SELF_TEST_ROOT="$INSTALL_DIR" "$APP_BUNDLE/Contents/MacOS/local-executor-approval" --self-test
 python3 - "$APPROVAL_BUILD_DIR" <<'PYCLEANBUILD'

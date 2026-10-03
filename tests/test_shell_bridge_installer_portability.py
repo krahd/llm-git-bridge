@@ -89,6 +89,8 @@ class ShellBridgeInstallerPortabilityTests(unittest.TestCase):
         self.assertIn("values.isSymbolicLink != true", swift)
         self.assertIn("quit.isEnabled = requests.isEmpty", swift)
         self.assertIn("XcodeDefault.xctoolchain/usr/bin/swiftc", installer)
+        self.assertIn("Platforms/MacOSX.platform/Developer/SDKs/MacOSX.sdk", installer)
+        self.assertIn('"$SWIFTC_BIN" -sdk "$SWIFT_SDK"', installer)
         self.assertIn("CLANG_MODULE_CACHE_PATH", installer)
         self.assertIn("SWIFT_MODULECACHE_PATH", installer)
 
