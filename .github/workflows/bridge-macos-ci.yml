@@ -11,6 +11,9 @@ on:
 permissions:
   contents: read
 
+env:
+  LLM_GIT_BRIDGE_TEST_JOBS: 4
+
 jobs:
   test:
     name: Python 3.14 / macOS 15
@@ -34,6 +37,7 @@ jobs:
         shell: bash
         run: |
           set -euo pipefail
+          /usr/bin/xcodebuild -version
           DEVELOPER_DIR=$(/usr/bin/xcode-select -p)
           SDK="$DEVELOPER_DIR/Platforms/MacOSX.platform/Developer/SDKs/MacOSX.sdk"
           SWIFTC="$DEVELOPER_DIR/Toolchains/XcodeDefault.xctoolchain/usr/bin/swiftc"
