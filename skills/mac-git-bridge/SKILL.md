@@ -5,7 +5,7 @@ description: Use Tomas Laurenzo's installed Local Executor Bridge v6 as the sing
 
 # Local Executor Bridge v6
 
-Use the installed Google Drive ChatGPT Shell Bridge as the normal path from a web conversation to Tomas's Mac. Do not fall back to the old semantic LLM-Git-Bridge protocol unless explicitly requested.
+Use the installed Local Executor Bridge v6 as the normal path from a web conversation to Tomas's Mac. It is the single production daemon for both shell and Git capability. Do not fall back to the old semantic LLM-Git-Bridge protocol unless explicitly requested for compatibility work.
 
 ## Authority hierarchy
 
@@ -21,7 +21,7 @@ For repository-changing work the default completion gate is: intended change com
 
 ## Canonical v6 transport
 
-Live bridge identity is pinned by Drive IDs, not folder-name resolution:
+This Mac's in-place v5-to-v6 migration intentionally preserves the verified live mailbox. Pin its identity by Drive IDs, not folder-name resolution:
 
 - Root ID: `1PRsQHgVsgXhIYT_8akGFRGdhdlw9Lmk6`
 - Requests ID: `1jvTV0g4JVypFJ5olOovIPtCRIlawl4MP`
@@ -29,7 +29,7 @@ Live bridge identity is pinned by Drive IDs, not folder-name resolution:
 - Human path: `/Google Drive/llm-git-bridge/ChatGPT Shell Bridge`
 - Health: `health.json` at the live root.
 
-The daemon executes accepted commands with `/bin/zsh -lc` as Tomas and returns exact shell results, but v6 now applies an execution-authority gate before the child shell starts. With the default `write_scope=auto`, commands outside Git are filesystem-and-network read-only; commands inside an existing repository/worktree are filesystem-write-scoped to that repository/Git metadata and retain network access; the trusted workspace coordinator receives its governed repository/state scope. Broader `system` writes and recognised high-impact external/control-plane mutations require explicit local operator confirmation before `STARTED`. An approved `system` request intentionally restores the logged-in user's ordinary authority, so v6 remains a shell transport rather than a Git abstraction or VM boundary.
+The daemon executes accepted commands with `/bin/zsh -lc` as Tomas and returns exact shell results, but v6 now applies an execution-authority gate before the child shell starts. With the default `write_scope=auto`, commands outside Git are filesystem-and-network read-only; raw commands inside an existing repository/worktree are filesystem-write-scoped to that repository/Git metadata and have network access denied; the trusted workspace coordinator receives its governed repository/state scope and may use network/credentials only for its own fetch/checkpoint/push/integration lifecycle. Broader `system` writes and recognised high-impact external/control-plane mutations require explicit local operator confirmation before `STARTED`. An approved `system` request intentionally restores the logged-in user's ordinary authority, so v6 remains a shell transport rather than a Git abstraction or VM boundary.
 
 `health.json` is the first diagnostic surface when the request path appears unhealthy. It reports bridge version, pinned Drive IDs, active requests, process ceiling, and STARTED-without-FINISHED state without requiring a shell request.
 
@@ -59,7 +59,7 @@ Optional exact binary stdin may be supplied as `stdin_b64`. `explanation` is req
 
 `write_scope` is optional and defaults to `auto`:
 
-- `auto`: when `cwd` is inside an existing Git repository/worktree, permit filesystem writes only within that repository/worktree and its Git metadata while retaining network access; otherwise deny filesystem writes and network access;
+- `auto`: when `cwd` is inside an existing Git repository/worktree, permit filesystem writes only within that repository/worktree and its Git metadata while denying raw-shell network access; otherwise deny filesystem writes and network access;
 - `read_only`: force the filesystem-and-network read-only sandbox;
 - `repository`: require an existing Git repository/worktree and confine filesystem writes to it;
 - `system`: request ordinary logged-in-user authority; this always requires the local operator to approve the exact request before `STARTED`.
@@ -185,6 +185,6 @@ Do not reuse request IDs. Consumed requests are normally removed; results are du
 
 ## Trust boundary and residual OAuth warning
 
-The bridge daemon runs as Tomas's macOS user, and the initial `cwd` must be under `/Users/tom/tom-repos`. Default child-shell scopes are constrained by the macOS execution sandbox described above; however an explicitly approved `system` request deliberately runs with the logged-in user's normal authority, and repository scope still retains network access. Treat the Drive mailbox as privileged and the confirmation gate as defence in depth, not as a VM boundary. Never put passwords, tokens, private keys or other secrets directly in request commands because command bytes and journal state may persist.
+The bridge daemon runs as Tomas's macOS user, and the initial `cwd` must be under `/Users/tom/tom-repos`. Default child-shell scopes are constrained by the macOS execution sandbox described above; raw repository scope denies network access, while the trusted workspace coordinator may use network/credentials only for its governed Git lifecycle. An explicitly approved `system` request deliberately runs with the logged-in user's normal authority. Treat the Drive mailbox as privileged and the confirmation gate as defence in depth, not as a VM boundary. Never put passwords, tokens, private keys or other secrets directly in request commands because command bytes and journal state may persist.
 
 The currently functioning `chatgpt-git-bridge:` rclone remote still reports rclone's 2026 retirement warning for the shared Google Drive OAuth client ID. This is an external credential/configuration risk, not a v6 concurrency defect. Surface it in diagnostics and migrate to a private OAuth client when credentials/authorisation are available; do not silently alter credentials.
