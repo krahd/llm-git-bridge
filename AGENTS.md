@@ -10,5 +10,6 @@ When modifying the project:
 - local filesystem paths must not appear in the remote repository index;
 - retain stale-SHA checks and safe branch-prefix validation;
 - minimise mailbox/Drive round trips without racing ambiguous Drive writes; Google Drive permits duplicate filenames;
+- every ChatGPT Shell Bridge protocol-1 request must include a concise, non-empty, human-readable `explanation` describing what the command will do and why; this applies to read-only diagnostics as well as mutations;
 - keep the standard-library-only runtime unless a dependency has a clear benefit;
 - run `PYTHONPATH=src python3 -m unittest discover -s tests -v` before committing.
