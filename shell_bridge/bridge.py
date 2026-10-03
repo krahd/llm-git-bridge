@@ -10,6 +10,7 @@ import os
 import re
 import shlex
 import shutil
+import secrets
 import signal
 import subprocess
 import sys
@@ -436,6 +437,57 @@ def _confirmation_command_excerpt(command: str, limit: int = 6000) -> str:
 
 
 
+def _approval_payload_hash(*, request_id: str, cwd: Path, command: str, category: str, explanation: str) -> str:
+    payload = json.dumps({
+        "request_id": request_id, "cwd": str(cwd), "command": command,
+        "category": category, "explanation": explanation,
+    }, sort_keys=True, separators=(",", ":"), ensure_ascii=False).encode("utf-8")
+    return hashlib.sha256(payload).hexdigest()
+
+
+def _atomic_json(path: Path, obj: dict) -> None:
+    path.parent.mkdir(parents=True, exist_ok=True)
+    try:
+        path.parent.chmod(0o700)
+    except OSError:
+        pass
+    tmp = path.with_name(path.name + ".tmp-" + secrets.token_hex(6))
+    data = json.dumps(obj, sort_keys=True, separators=(",", ":"), ensure_ascii=False) + "\n"
+    fd = os.open(tmp, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
+    try:
+        with os.fdopen(fd, "w", encoding="utf-8") as f:
+            f.write(data); f.flush(); os.fsync(f.fileno())
+        os.replace(tmp, path)
+    finally:
+        try: tmp.unlink()
+        except FileNotFoundError: pass
+
+
+def _read_json_file(path: Path) -> dict | None:
+    try:
+        raw = path.read_text(encoding="utf-8")
+        obj = json.loads(raw)
+    except (OSError, json.JSONDecodeError):
+        return None
+    return obj if isinstance(obj, dict) else None
+
+
+def _launch_operator_approval_helper(app_path: Path, pending_path: Path, decision_path: Path) -> tuple[bool, str]:
+    if not app_path.is_dir():
+        return False, f"operator approval helper is not installed: {app_path}"
+    try:
+        cp = subprocess.run(
+            ["/usr/bin/open", "-n", str(app_path), "--args", str(pending_path), str(decision_path)],
+            stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True, timeout=10, check=False,
+        )
+    except (FileNotFoundError, subprocess.TimeoutExpired) as exc:
+        return False, f"operator approval helper could not be launched: {exc}"
+    if cp.returncode != 0:
+        detail = cp.stderr.strip() or cp.stdout.strip() or f"open exited {cp.returncode}"
+        return False, f"operator approval helper could not be launched: {detail}"
+    return True, ""
+
+
 def request_operator_confirmation(*, request_id: str, cwd: Path, command: str, category: str,
                                   cfg: dict, explanation: str) -> dict:
     mode = operator_confirmation_mode(cfg)
@@ -448,70 +500,66 @@ def request_operator_confirmation(*, request_id: str, cwd: Path, command: str, c
     timeout = cfg.get("operator_confirmation_timeout_seconds", DEFAULT_OPERATOR_CONFIRMATION_TIMEOUT)
     if isinstance(timeout, bool) or not isinstance(timeout, int) or timeout < 1:
         return {**record, "message": "operator confirmation timeout configuration is invalid"}
+    state_dir = Path(cfg.get("state_dir", "")).expanduser()
+    if not str(state_dir):
+        return {**record, "message": "operator confirmation state directory is unavailable"}
+    app_path = Path(cfg.get("operator_approval_app", Path(__file__).resolve().parent / "Local Executor Approval.app"))
+    approval_root = state_dir / "approvals"
+    pending_path = approval_root / "pending" / f"{request_id}.json"
+    decision_path = approval_root / "decisions" / f"{request_id}.json"
+    payload_hash = _approval_payload_hash(
+        request_id=request_id, cwd=cwd, command=command, category=category, explanation=explanation
+    )
+    now = time.time()
+    pending = _read_json_file(pending_path)
+    if pending is not None:
+        if pending.get("request_id") != request_id or pending.get("payload_sha256") != payload_hash:
+            return {**record, "message": "operator approval state does not match this request; request was not started"}
+        nonce = pending.get("nonce")
+        expires_at = pending.get("expires_at")
+        if not isinstance(nonce, str) or not nonce or not isinstance(expires_at, (int, float)):
+            return {**record, "message": "operator approval state is invalid; request was not started"}
+        if expires_at <= now:
+            return {**record, "message": "operator confirmation timed out; request was not started"}
+    else:
+        nonce = secrets.token_hex(24)
+        expires_at = now + timeout
+        pending = {
+            "protocol": 1, "kind": "operator_approval_request", "request_id": request_id,
+            "nonce": nonce, "payload_sha256": payload_hash, "category": category,
+            "cwd": str(cwd), "command": _confirmation_command_excerpt(command),
+            "explanation": explanation, "created_at": now, "expires_at": expires_at,
+        }
+        _atomic_json(pending_path, pending)
 
-    summary = explanation
-    script = r'''ObjC.import("AppKit");
+    def consume_decision() -> dict | None:
+        decision = _read_json_file(decision_path)
+        if decision is None:
+            return None
+        if (decision.get("protocol") != 1 or decision.get("kind") != "operator_approval_decision" or
+            decision.get("request_id") != request_id or decision.get("nonce") != nonce or
+            decision.get("payload_sha256") != payload_hash):
+            return {**record, "message": "operator approval decision failed request binding; request was not started"}
+        value = decision.get("decision")
+        if value == "allow":
+            return {**record, "approved": True, "message": "operator approved elevated request"}
+        if value == "cancel":
+            return {**record, "message": "operator declined elevated request; request was not started"}
+        return {**record, "message": "operator approval decision is invalid; request was not started"}
 
-function run(argv) {
-    const requestId = argv[0];
-    const categoryName = argv[1];
-    const cwdValue = argv[2];
-    const commandValue = argv[3];
-    const explanationValue = argv[4];
-
-    const app = $.NSApplication.sharedApplication;
-    app.setActivationPolicy($.NSApplicationActivationPolicyRegular);
-    const alert = $.NSAlert.alloc.init;
-    alert.setMessageText("Allow ChatGPT to perform this action?");
-    alert.setInformativeText(
-        "What ChatGPT is trying to do:\n" + explanationValue +
-        "\n\nWhy approval is required:\n" + categoryName.replace(/_/g, " ")
-    );
-    alert.setAlertStyle($.NSAlertStyleWarning);
-    alert.addButtonWithTitle("Cancel");
-    alert.addButtonWithTitle("Allow");
-
-    const detailText =
-        "Request: " + requestId +
-        "\nWorking directory: " + cwdValue +
-        "\n\nCommand:\n" + commandValue;
-
-    const textView = $.NSTextView.alloc.initWithFrame($.NSMakeRect(0, 0, 1060, 300));
-    textView.setString(detailText);
-    textView.setEditable(false);
-    textView.setSelectable(true);
-    textView.setFont($.NSFont.monospacedSystemFontOfSizeWeight(12, $.NSFontWeightRegular));
-
-    const scrollView = $.NSScrollView.alloc.initWithFrame($.NSMakeRect(0, 0, 1080, 320));
-    scrollView.setDocumentView(textView);
-    scrollView.setHasVerticalScroller(true);
-    scrollView.setHasHorizontalScroller(true);
-    scrollView.setAutohidesScrollers(true);
-    scrollView.setBorderType($.NSBezelBorder);
-    alert.setAccessoryView(scrollView);
-
-    app.activateIgnoringOtherApps(true);
-    const response = alert.runModal;
-    return response === $.NSAlertSecondButtonReturn ? "allow" : "cancel";
-}'''
-    try:
-        cp = subprocess.run(
-            [
-                "/usr/bin/osascript", "-l", "JavaScript", "-e", script, "--",
-                request_id, category, str(cwd), _confirmation_command_excerpt(command), summary,
-            ],
-            stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True, timeout=timeout, check=False,
-        )
-    except FileNotFoundError:
-        return {**record, "message": "operator confirmation required but /usr/bin/osascript is unavailable"}
-    except subprocess.TimeoutExpired:
-        return {**record, "message": "operator confirmation timed out; request was not started"}
-    approved = cp.returncode == 0 and cp.stdout.strip() == "allow"
-    return {
-        **record,
-        "approved": approved,
-        "message": "operator approved elevated request" if approved else "operator declined elevated request; request was not started",
-    }
+    existing = consume_decision()
+    if existing is not None:
+        return existing
+    launched, message = _launch_operator_approval_helper(app_path, pending_path, decision_path)
+    if not launched:
+        return {**record, "message": message}
+    deadline = min(float(expires_at), time.time() + timeout)
+    while time.time() < deadline:
+        result = consume_decision()
+        if result is not None:
+            return result
+        time.sleep(0.2)
+    return {**record, "message": "operator confirmation timed out; request was not started"}
 
 
 def _terminate_pgid(pgid: int) -> None:

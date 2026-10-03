@@ -183,7 +183,8 @@ chmod 700 "$INSTALL_DIR" "$CONFIG_DIR" "$STATE_DIR"
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
 cp "$SCRIPT_DIR/bridge.py" "$INSTALL_DIR/bridge.py"
 cp "$SCRIPT_DIR/workspace.py" "$INSTALL_DIR/workspace.py"
-chmod 700 "$INSTALL_DIR/bridge.py" "$INSTALL_DIR/workspace.py"
+cp "$SCRIPT_DIR/approval_helper.py" "$INSTALL_DIR/approval_helper.py"
+chmod 700 "$INSTALL_DIR/bridge.py" "$INSTALL_DIR/workspace.py" "$INSTALL_DIR/approval_helper.py"
 SOURCE_COMMIT="$(git -C "$SCRIPT_DIR/.." rev-parse HEAD)"
 python3 - "$INSTALL_DIR/install-manifest.json" "$SOURCE_COMMIT" "$INSTALL_DIR/bridge.py" "$INSTALL_DIR/workspace.py" <<'PYMAN'
 import hashlib,json,sys
@@ -205,6 +206,7 @@ chmod 600 "$INSTALL_DIR/install-manifest.json"
 
 python3 - "$CONFIG_DIR/config.json" "$REMOTE" "$BASE_PATH" "$ROOT_ID" "$REQUESTS_ID" "$RESULTS_ID" "$INSTANCE_ID" "$ALLOWED_ROOT" "$STATE_DIR" "$SHELL_BIN" <<'PY'
 import json,sys
+from pathlib import Path
 path,remote,base,root_id,req_id,res_id,instance,allowed,state,shell=sys.argv[1:]
 try:
     old=json.load(open(path,encoding='utf-8'))
@@ -221,6 +223,7 @@ cfg.update({
  'max_stdin_bytes':1024*1024,'max_output_bytes':16*1024*1024,
  'operator_confirmation_mode':cfg.get('operator_confirmation_mode','auto'),
  'operator_confirmation_timeout_seconds':cfg.get('operator_confirmation_timeout_seconds',300),
+ 'operator_approval_app':str(Path(state).parent.parent/'share'/'local-executor-bridge'/'Local Executor Approval.app'),
  'wake_lease_enabled':cfg.get('wake_lease_enabled',True),
  'wake_grace_seconds':cfg.get('wake_grace_seconds',3600.0),
 })
@@ -229,6 +232,20 @@ PY
 chmod 600 "$CONFIG_DIR/config.json"
 
 RCLONE_BIN="$(command -v rclone)"; PYTHON_BIN="$(command -v python3)"
+APP_BUNDLE="$INSTALL_DIR/Local Executor Approval.app"
+mkdir -p "$APP_BUNDLE/Contents/MacOS"
+python3 - "$APP_BUNDLE/Contents/Info.plist" <<'PYAPPPLIST'
+import plistlib,sys
+obj={'CFBundleIdentifier':'net.laurenzo.local-executor-approval','CFBundleName':'Local Executor Approval','CFBundleDisplayName':'Local Executor Approval','CFBundlePackageType':'APPL','CFBundleExecutable':'approval-helper','CFBundleVersion':'1','CFBundleShortVersionString':'1.0','LSUIElement':False,'NSHighResolutionCapable':True}
+with open(sys.argv[1],'wb') as f: plistlib.dump(obj,f,fmt=plistlib.FMT_XML,sort_keys=True)
+PYAPPPLIST
+cat > "$APP_BUNDLE/Contents/MacOS/approval-helper" <<EOFAPP
+#!/bin/sh
+exec "$PYTHON_BIN" "$INSTALL_DIR/approval_helper.py" "\$@"
+EOFAPP
+chmod 700 "$APP_BUNDLE/Contents/MacOS/approval-helper"
+
+
 PATH_VALUE="$(dirname "$RCLONE_BIN"):$(dirname "$PYTHON_BIN"):/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin:/usr/sbin:/sbin"
 python3 - "$PLIST" "$LABEL" "$PYTHON_BIN" "$INSTALL_DIR/bridge.py" "$CONFIG_DIR/config.json" "$PATH_VALUE" "$STATE_DIR" "$HOME" <<'PY'
 import plistlib,sys

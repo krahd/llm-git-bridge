@@ -190,21 +190,59 @@ class ConfirmationTests(unittest.TestCase):
             self.assertTrue(plan["allow_network"])
 
     def test_dialog_mode_requires_explicit_allow(self):
-        cfg = {"operator_confirmation_mode": "dialog", "operator_confirmation_timeout_seconds": 10}
-        allowed = subprocess.CompletedProcess([], 0, stdout="allow\n", stderr="")
-        with patch.object(b.subprocess, "run", return_value=allowed) as run:
-            result = b.request_operator_confirmation(
-                request_id="job", cwd=Path("/tmp"), command="gh repo create x/y",
-                category="github_repository_control_plane", cfg=cfg,
-                explanation="Create the requested GitHub repository.",
-            )
-        self.assertTrue(result["approved"])
-        argv = run.call_args.args[0]
-        self.assertEqual(argv[0:3], ["/usr/bin/osascript", "-l", "JavaScript"])
-        self.assertIn("setActivationPolicy($.NSApplicationActivationPolicyRegular)", argv[4])
-        self.assertIn("NSScrollView", argv[4])
-        self.assertIn("1080, 320", argv[4])
-        self.assertEqual(argv[-1], "Create the requested GitHub repository.")
+        with tempfile.TemporaryDirectory() as td:
+            state = Path(td) / "state"
+            app_path = Path(td) / "Local Executor Approval.app"; app_path.mkdir()
+            cfg = {"operator_confirmation_mode": "dialog", "operator_confirmation_timeout_seconds": 10,
+                   "state_dir": str(state), "operator_approval_app": str(app_path)}
+            def launch(app, pending, decision):
+                req = json.loads(pending.read_text())
+                b._atomic_json(decision, {"protocol":1,"kind":"operator_approval_decision",
+                    "request_id":req["request_id"],"nonce":req["nonce"],
+                    "payload_sha256":req["payload_sha256"],"decision":"allow","decided_at":time.time()})
+                return True, ""
+            with patch.object(b, "_launch_operator_approval_helper", side_effect=launch):
+                result = b.request_operator_confirmation(
+                    request_id="job", cwd=Path("/tmp"), command="gh repo create x/y",
+                    category="github_repository_control_plane", cfg=cfg,
+                    explanation="Create the requested GitHub repository.",
+                )
+            self.assertTrue(result["approved"])
+            pending=json.loads((state/"approvals/pending/job.json").read_text())
+            decision=json.loads((state/"approvals/decisions/job.json").read_text())
+            self.assertEqual(pending["payload_sha256"], decision["payload_sha256"])
+            self.assertEqual(pending["nonce"], decision["nonce"])
+
+    def test_dialog_reuses_durable_bound_decision_after_restart(self):
+        with tempfile.TemporaryDirectory() as td:
+            state=Path(td)/"state"; app_path=Path(td)/"Local Executor Approval.app"; app_path.mkdir()
+            cfg={"operator_confirmation_mode":"dialog","operator_confirmation_timeout_seconds":10,
+                 "state_dir":str(state),"operator_approval_app":str(app_path)}
+            calls=[]
+            def launch(app,pending,decision):
+                calls.append(1); req=json.loads(pending.read_text())
+                b._atomic_json(decision,{"protocol":1,"kind":"operator_approval_decision","request_id":"job",
+                  "nonce":req["nonce"],"payload_sha256":req["payload_sha256"],"decision":"allow","decided_at":time.time()})
+                return True,""
+            with patch.object(b,"_launch_operator_approval_helper",side_effect=launch):
+                first=b.request_operator_confirmation(request_id="job",cwd=Path("/tmp"),command="ssh host true",category="remote_shell",cfg=cfg,explanation="Run a remote check.")
+            with patch.object(b,"_launch_operator_approval_helper",side_effect=AssertionError("must not relaunch")):
+                second=b.request_operator_confirmation(request_id="job",cwd=Path("/tmp"),command="ssh host true",category="remote_shell",cfg=cfg,explanation="Run a remote check.")
+            self.assertTrue(first["approved"]); self.assertTrue(second["approved"]); self.assertEqual(len(calls),1)
+
+    def test_dialog_rejects_decision_bound_to_other_payload(self):
+        with tempfile.TemporaryDirectory() as td:
+            state=Path(td)/"state"; app_path=Path(td)/"Local Executor Approval.app"; app_path.mkdir()
+            cfg={"operator_confirmation_mode":"dialog","operator_confirmation_timeout_seconds":10,
+                 "state_dir":str(state),"operator_approval_app":str(app_path)}
+            def launch(app,pending,decision):
+                req=json.loads(pending.read_text())
+                b._atomic_json(decision,{"protocol":1,"kind":"operator_approval_decision","request_id":"job",
+                  "nonce":req["nonce"],"payload_sha256":"0"*64,"decision":"allow","decided_at":time.time()})
+                return True,""
+            with patch.object(b,"_launch_operator_approval_helper",side_effect=launch):
+                result=b.request_operator_confirmation(request_id="job",cwd=Path("/tmp"),command="ssh host true",category="remote_shell",cfg=cfg,explanation="Run a remote check.")
+            self.assertFalse(result["approved"]); self.assertIn("failed request binding",result["message"])
 
     def test_binary_stdout_stderr_and_nonzero_exit(self):
         with tempfile.TemporaryDirectory() as td:
