@@ -1,1 +1,1 @@
-"""ChatGPT Shell Bridge v5 component."""
+"""Local Executor Bridge v6 component."""

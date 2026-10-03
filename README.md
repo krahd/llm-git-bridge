@@ -1,222 +1,100 @@
-# llm-git-bridge
+# Local Executor Bridge v6
 
-> **Local Executor Bridge v6 candidate:** the current hardening/convergence candidate is documented in [`docs/local-executor-bridge-v6.md`](docs/local-executor-bridge-v6.md). It is intentionally separate from the conversation/work-thread successor project and is staged side-by-side with v5 until cutover acceptance.
+`llm-git-bridge` now has **one production bridge architecture**: Local Executor Bridge v6. One daemon owns the mailbox, shell execution, durable request/replay state, operator approvals, and the trusted Git workspace coordinator. Git is not a second remote bridge. Substantial repository work is a first-class capability of the same local executor.
 
-`llm-git-bridge` lets an LLM or agent work safely with Git repositories that remain on your own machine.
+The repository still retains the older protocol-v2 Git implementation for compatibility, migration, and historical tests, but it is **not** the recommended production architecture and should not run as a second daemon beside v6.
 
-It exposes a deliberately small mailbox protocol for repository discovery, filtered snapshots, patch transactions, local validation commands, commits, and optional Git pushes. Google Drive through `rclone` is the first transport, but the core protocol is provider-neutral: the remote client does not need direct filesystem access, a GitHub token, or arbitrary shell access on the host.
-
-> **Status:** `1.0.0rc9` protocol-v2 release candidate. RC9 retains RC8 direct current-branch authority and adds a separate default-off, qualification-gated self-update path for the bridge itself. Existing configurations keep both authorities disabled until the local operator enables them.
-
-
-## Two bridge modes
-
-This repository now contains two deliberately different ways to solve the "the LLM cannot reach my local repositories" problem:
-
-| Mode | Use it when | Remote authority |
-| --- | --- | --- |
-| **Protocol-v2 `llm-git-bridge`** | You want the narrowest, Git-specific interface for snapshots, validated patches, commits and optional pushes. | Structured Git transactions only; no arbitrary remote shell. |
-| **ChatGPT Shell Bridge v5** | You want ordinary ChatGPT/agent sessions to inspect and operate on a local Mac more transparently, including workflows that need ordinary shell tools. | Default shell is filesystem-and-network read-only outside Git and repository-scoped inside Git; broader or high-impact mutations require local operator confirmation. Use the durable workspace coordinator for substantial Git mutations. |
-
-The protocol-v2 bridge remains the safer default when its Git transaction model is sufficient. Shell Bridge v5 uses a macOS execution sandbox for its default child-shell scopes, but an explicitly approved `system` request intentionally restores the logged-in user's authority; it is not a VM or complete OS security boundary.
-
-For a fresh self-service Shell Bridge installation, including automatic Drive-mailbox bootstrap and host-neutral repository-root configuration, see [`shell_bridge/README.md`](shell_bridge/README.md).
-
-## Why use it?
-
-A native Git hosting integration is usually the simplest option when it is available and has the permissions you need. `llm-git-bridge` exists for cases where you want a different boundary:
-
-- the authoritative checkout must remain local;
-- a ChatGPT/LLM session cannot access GitHub directly, or is limited to read-only access;
-- edits should be tested against the local repository before they become commits;
-- remote clients should never receive arbitrary command execution;
-- pushes should be opt-in, branch-restricted, and local-policy controlled;
-- several LLM sessions or providers should be able to submit work to the same host through one neutral protocol.
-
-The bridge is **not** a shell proxy, a Git hosting service, or an OS sandbox.
-
-## How it works
+## Architecture
 
 ```text
-LLM / agent session
-       |
-       |  request JSON / filtered snapshots
-       v
-mailbox transport (Google Drive via rclone today)
-       |
-       v
-single local watcher
-       |
-       +--> validate request + stale base
-       +--> isolated Git worktree
-       +--> apply/stage patch
-       +--> run locally configured checks
-       +--> commit to safe branch or authorised current branch
-       +--> optional push to origin
-       |
-       v
-signed result JSON
+LLM / agent
+    |
+    | request JSON
+    v
+transport adapter (Google Drive/rclone today)
+    |
+    v
+Local Executor Bridge v6 — one daemon / one mailbox / one state tree
+    |
+    +-- sandboxed shell execution
+    |      +-- read-only outside repositories
+    |      +-- repository-scoped writes, offline by default
+    |      +-- explicit approved system elevation
+    |
+    +-- trusted Git workspace coordinator
+           +-- isolated branch + worktree
+           +-- bounded validation
+           +-- checkpoint + push
+           +-- stale/conflict reconciliation
+           +-- serialized integration + remote verification
 ```
 
-Repositories stay local. The remote mailbox contains a path-free repository index, filtered snapshots on demand, request objects, and signed results. `.git` history and common secrets are not mirrored.
+GitHub is the canonical shared repository state. The Mac checkout/worktrees are authoritative for current local execution state. The mailbox is transport only.
 
-Approved roots are an ongoing trust boundary, not a one-time import list. While the watcher runs, it periodically discovers newly created or cloned Git repositories beneath those roots and republishes the path-free index only when membership changes. `scan` remains available as an explicit full refresh/debug operation; adding a completely new filesystem root is still a local operator action.
+## Permission and approval model
 
-## Quick start
+Every request carries a required plain-language `explanation`. The bridge resolves authority locally; the remote caller cannot grant itself permissions.
 
-### Requirements
+The execution scopes are:
 
-- Python 3.11+
-- Git
-- `rclone`
-- a Google Drive account for the current transport
+- `read_only`: no filesystem writes and no network;
+- `repository`: writes only to the selected Git repository/worktree and its Git metadata; raw repository shell network is denied in v6;
+- trusted workspace coordinator: privileged only for bridge-owned Git/worktree/checkpoint/push lifecycle; remotely supplied `workspace exec` and integration validation payloads are sandboxed again inside the worktree and run without network or ambient credentials;
+- `system`: normal logged-in-user authority, always requiring local operator approval.
 
-### Recommended installer
+`auto` resolves to the least authority that fits the request. High-impact operations are an additional approval gate, not the primary sandbox. Approval is **effect-before-command**: the dialog explains the intended action and required authority first, then exposes request ID, working directory, and exact command as inspectable details. Elevated approval is click-only, with no Return/Space shortcut selecting an action. Missing UI support fails closed.
 
-Download the small bootstrap script and run it:
+Recognised high-impact operations include GitHub control-plane mutation, mutating HTTP calls, remote shell/copy, destructive Git pushes/local resets, recursive forced deletion, and non-repository system/package mutation. Ordinary substantial Git work should use the workspace coordinator instead of asking for broad shell elevation.
+
+## Durable Git work
+
+The same bridge ships `workspace.py`. For substantial or concurrent repository changes, use it instead of editing canonical `main` directly:
 
 ```bash
-curl -fsSLO https://raw.githubusercontent.com/krahd/llm-git-bridge/main/install.sh
-sh install.sh
+python3 ~/.local/share/local-executor-bridge/workspace.py create   --repo /path/to/repo --resource docs/example --job-id example-001 --push-initial
+python3 ~/.local/share/local-executor-bridge/workspace.py exec   --job example-001 --command '...' --checkpoint-message 'Checkpoint'
+python3 ~/.local/share/local-executor-bridge/workspace.py ready --job example-001
+python3 ~/.local/share/local-executor-bridge/workspace.py integrate   --job example-001 --validate 'python3 -m unittest discover -s tests' --timeout 300
 ```
 
-The installer safely clones or fast-forwards the bridge, creates the `llm-git-bridge` command, opens `rclone` configuration if needed, and then runs the bridge-owned setup wizard. The wizard can add **one or many repository roots**, choose whether repositories under each root may push validated safe branches, scan them, and report readiness. On macOS it can also install the LaunchAgent.
-
-The installer is deliberately re-runnable. Running `sh install.sh` again updates a clean installation with a fast-forward only and opens the same setup flow; existing bridge configuration lives outside the source checkout and is preserved. You can also reconfigure at any time without updating:
-
-```bash
-llm-git-bridge setup
-```
-
-No repository path is compiled into the bridge or installer. Repository roots are local operator configuration. New Git repositories created beneath an approved root are discovered automatically and inherit that root's policy.
-
-For non-interactive or advanced root management:
-
-```bash
-llm-git-bridge roots list
-llm-git-bridge roots add ~/repos --push enable
-llm-git-bridge roots scan
-```
-
-Configure symbolic validation commands per repository. Remote requests may refer to these names, but may not supply shell commands or argv themselves.
-
-```bash
-llm-git-bridge configure-command my-repo test \
-  python3 -m unittest discover -s tests -v
-```
-
-Root-level push permission is one half of the push gate: every remote transaction must still explicitly request `"push": true`. By default, transactions may write only validated safe-prefix branches. An operator may additionally allow writes to the repository's **currently checked-out branch** (for example `main`):
-
-```bash
-llm-git-bridge configure-current-branch-write enable
-```
-
-That setting is deliberately global and default-off. It does not bypass root/repository push permission, exact-base checks, tracked-clean checkout requirements, or remote branch protection. RC9 also exposes a separate default-off self-update authority for the bridge itself:
-
-```bash
-llm-git-bridge configure-self-update enable
-```
-
-Self-update accepts only an exact qualified bridge commit on a safe source branch; it does not expose arbitrary remote command execution. Per-repository push exceptions remain available:
-
-```bash
-llm-git-bridge configure-push my-repo disable
-llm-git-bridge configure-push my-repo inherit
-```
-
-If you choose not to install automatic startup, run the watcher in the foreground with `llm-git-bridge watch`.
-
-For the complete setup flow, manual installation, Google OAuth recommendations, and daemon details, see [docs/installation.md](docs/installation.md).
+Workspace checkpoints are committed and pushed. Integration re-fetches the canonical target, checks stale/overlap/conflict conditions, validates in an isolated integration worktree, pushes the target, and independently verifies the remote ref. A conversation timeout does not imply bridge failure and never authorises replay of an ambiguous mutation.
 
 ## Request example
 
-A transaction is one JSON object containing an inline unified diff:
-
 ```json
 {
-  "protocol": 2,
-  "kind": "transaction",
-  "transaction_id": "tx-example-20260913-a7f2",
-  "repo": "my-repo",
-  "base_sha": "0123456789abcdef0123456789abcdef01234567",
-  "branch": "ai/example-change",
-  "patch": "diff --git ...",
-  "run": ["test"],
-  "commit_message": "Document the example",
-  "push": true
+  "protocol": 1,
+  "id": "repo-status-001",
+  "cwd": "/Users/me/repos/example",
+  "command": "git status --short --branch",
+  "explanation": "Check repository state before making changes.",
+  "timeout_seconds": 30,
+  "write_scope": "auto"
 }
 ```
 
-The bridge checks the repository and base SHA, creates an isolated worktree, applies and validates the patch, runs only locally configured symbolic commands, commits, optionally pushes the target branch, then publishes an authenticated result. Safe-prefix branches remain the default. When current-branch writes are explicitly enabled, the transaction may instead name the exact currently checked-out branch; the bridge revalidates that branch and base before advancing the real checkout with a fast-forward-only update.
+Request IDs are unique and never reused. Terminal results distinguish `completed`, `rejected`, `indeterminate`, timeout, and output-limit outcomes. STARTED without a provable FINISHED state is never silently replayed.
 
-## Multiple clients and ChatGPT sessions
-
-Multiple remote clients can submit requests to the same mailbox. One local watcher always owns mailbox transport and result publication. Setting `max_workers` above 1 permits bounded local transaction overlap only across different canonical repository paths; the default remains serial (`max_workers=1`). Use `bin/llm-git-bridge configure-concurrency --workers 2 --max-pending-jobs 8` to enable the recommended initial concurrent setting after validating it on the host.
-
-Important consequences:
-
-- use globally unique transaction IDs for independent requests;
-- use separate branches for independent edits;
-- two requests may share the same base commit if they target different new branches;
-- a request against an already-advanced branch is rejected as stale rather than silently rebased or merged;
-- queue order is **not guaranteed to be FIFO**;
-- a long validation command blocks later requests for the **same repository**, but independent repositories can run concurrently when `max_workers > 1`;
-- the watcher uses round-robin repository admission within a bounded validated backlog, so a same-repository burst does not monopolise available worker slots.
-
-A five-request live probe on the reference host completed all five successfully and demonstrated non-FIFO ordering. See [docs/concurrency.md](docs/concurrency.md).
-
-## Performance
-
-The September 2026 performance programme reduced the original **373.2 s / 139-test** live validation baseline to a defensible `0.3.0` gold qualification median of **68.0 s / 196 tests** across three identical-tree production runs (**67.3–71.2 s**). The earlier A3 acceptance reached 50.4 s once, but A4 deliberately does not treat that fast tail as an SLA. The gold median is about **5.5x faster** and **81.8% less wall-clock time** than the original baseline while materially expanding correctness, replay, crash-recovery, transport, and adversarial coverage.
-
-After the final daemon restart, lightweight control-plane requests used the persistent `rclone rcd` path with transaction-directory listing around **0.23 s** and small request download around **0.44 s** in the post-promotion doctor/materialisation checks. Real edit latency is then dominated by the repository's configured validation commands, not the mailbox itself.
-
-These are reference-host measurements, not an SLA. See [docs/performance.md](docs/performance.md) for methodology, caveats, and comparison with native Git hosting integrations.
-
-## Security model
-
-The bridge intentionally exposes less remote authority than a shell or unrestricted Git credential.
-
-By default it:
-
-- keeps repository filesystem paths local;
-- uploads only filtered tracked text content in snapshots;
-- omits `.git` history, untracked contents, common credentials, private keys, service-account material, binaries, symlinks, and oversized files;
-- rejects stale base SHAs and tracked-dirty authoritative checkouts;
-- restricts remote-created branches to a safe prefix (`ai/` by default), while allowing the exact currently checked-out branch only when that authority is explicitly enabled locally;
-- rejects symlink/submodule changes and protected CI/automation paths;
-- accepts only locally configured symbolic command names;
-- disables push unless it is locally enabled for the repository and explicitly requested by the transaction;
-- never implements force-push or remote-triggered merge;
-- authenticates durable results and binds bridge commits to the complete request identity.
-
-**Configured validation commands are not sandboxed.** Patched code executed by a configured test/build command runs with the local user's filesystem and network privileges. Use a VM/container/separate account if you need an OS-level trust boundary.
-
-Read [docs/security.md](docs/security.md) before enabling push or running validation commands on untrusted patches.
-
-## Documentation
-
-- [Installation and setup](docs/installation.md)
-- [Using the bridge](docs/usage.md)
-- [LLM client skill](skills/llm-git-bridge-client/SKILL.md)
-- [Concurrency and multiple clients](docs/concurrency.md)
-- [Performance](docs/performance.md)
-- [Architecture](docs/architecture.md)
-- [Scheduler architecture](docs/scheduler-architecture.md)
-- [Transaction state machine](docs/transaction-state-machine.md)
-- [Protocol v2](docs/protocol.md)
-- [Security model](docs/security.md)
-- [Google Drive OAuth migration](docs/google-drive-oauth.md)
-- [Troubleshooting](docs/troubleshooting.md)
-- [Development history / project state](docs/project-state.md)
-- [Contributing](CONTRIBUTING.md)
-
-## Development
-
-Run the complete test suite with:
+## Installation
 
 ```bash
-bin/test
+git clone https://github.com/krahd/llm-git-bridge.git
+cd llm-git-bridge
+bash shell_bridge/install.sh
 ```
 
-The runtime deliberately uses only the Python standard library. See [CONTRIBUTING.md](CONTRIBUTING.md) for project invariants and validation expectations.
+The source directory remains `shell_bridge/` for compatibility with existing installations and client instructions; the product/runtime identity is Local Executor Bridge v6. The installer creates/adopts one verified mailbox, pins its Drive IDs, installs one LaunchAgent, runs `doctor`, and performs an end-to-end smoke test.
+
+The v6 installer supports staged migration. Existing bridge services are not retired until the v6 smoke test succeeds. Final cutover retires the obsolete `com.tom.chatgpt-shell-bridge` and `io.llm-git-bridge.daemon` LaunchAgents only after successful v6 acceptance.
+
+## One bridge, not two
+
+The historical protocol-v2 implementation remains in this repository because it contains compatibility machinery, migration evidence, and tests. Do not treat it as a second production service. New client/skill documentation should target Local Executor Bridge v6 and its workspace capability.
+
+The separate Conversation Harness/Buork work-continuity system owns WorkThreads, provider/session continuity, browser handoff, and higher-level work state. It consumes executor/workspace capabilities; those concerns do not belong in the bridge.
+
+## Security boundary
+
+The bridge is least-privilege infrastructure, not a VM. Sandboxed shell/workspace payloads deny unrelated home reads, ambient credentials, network where not required, and writes outside declared roots. Explicitly approved `system` execution intentionally restores the logged-in user's authority. The mailbox is privileged infrastructure; never place secrets directly in command bytes because request/result/journal data may persist.
+
+See [`docs/local-executor-bridge-v6.md`](docs/local-executor-bridge-v6.md), [`docs/shell-bridge-v5-architecture.md`](docs/shell-bridge-v5-architecture.md), and [`shell_bridge/README.md`](shell_bridge/README.md) for implementation and migration detail.

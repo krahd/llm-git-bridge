@@ -1,5 +1,12 @@
 # Project state
 
+## Unified Local Executor Bridge v6 convergence — 2 October 2026
+
+The bridge architecture has converged: the hardened implementation under `shell_bridge/` is the single production Local Executor Bridge v6. One daemon owns shell execution, durable request state, approvals, health/wake state, and the trusted Git workspace coordinator. The duplicate `mac_bridge/` staging tree is retired. Protocol-v2 remains compatibility/migration code and historical evidence, not a second production service.
+
+Authority is resolved locally using least privilege (`read_only`, repository-scoped/offline, trusted coordinator Git lifecycle, or explicitly approved `system`). Every request requires a plain-language explanation. Approval occurs before STARTED, presents intent/effect before exact command details, is foreground-visible/click-only, and fails closed.
+
+The remaining completion gate is operational: pass the complete repository suite plus standalone macOS sandbox/wake acceptance, perform the isolated v6 smoke, cut the live mailbox/service over only while quiescent, retire both obsolete LaunchAgents only after successful production smoke, and independently verify final v6 health/request behaviour.
 
 ## Conversation Harness ownership — 30 September 2026
 
