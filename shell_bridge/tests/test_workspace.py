@@ -51,34 +51,42 @@ class WorkspaceTests(unittest.TestCase):
 
     def test_two_jobs_execute_concurrently_without_repo_wide_lock(self):
         a=self.create('research:parallel:a'); b=self.create('research:parallel:b')
-        rendezvous=self.root/'rendezvous'; rendezvous.mkdir()
         errors=[]
         start=threading.Barrier(3)
-        def worker(job, path, value, marker, peer):
+        rendezvous=threading.Barrier(2)
+        writes={
+            Path(a['worktree']).resolve(): ('paper-a.txt','a-parallel\n'),
+            Path(b['worktree']).resolve(): ('paper-b.txt','b-parallel\n'),
+        }
+        original_run=w._run_job_shell
+
+        def fake_run(shell, command, cwd, timeout):
+            # This test is about job-lock granularity, not sandbox policy. Both
+            # jobs must reach the runner together; a repository-wide lock would
+            # strand the first caller at this barrier.
+            rendezvous.wait(timeout=5)
+            rel,value=writes[Path(cwd).resolve()]
+            (Path(cwd)/rel).write_text(value)
+            return 0,'',''
+
+        def worker(job):
             try:
                 start.wait()
-                command=(
-                    f"marker_dir={str(rendezvous)!r}; "
-                    f"me=\"$marker_dir/{marker}\"; peer=\"$marker_dir/{peer}\"; "
-                    "printf 'ready\n' > \"$me\"; "
-                    "i=0; while [ ! -e \"$peer\" ]; do i=$((i+1)); "
-                    "[ \"$i\" -lt 500 ] || exit 90; sleep 0.02; done; "
-                    f"printf '%s\n' {value!r} > {path!r}"
-                )
-                out=self.exec(job['job_id'], command)
+                out=self.exec(job['job_id'], 'synthetic-parallel-run')
                 if out['exit_code'] != 0:
-                    raise AssertionError(
-                        f"workspace exec failed for {marker}: rc={out['exit_code']} stderr={out['stderr']!r}"
-                    )
+                    raise AssertionError(f"workspace exec failed: {out!r}")
             except BaseException as exc:
                 errors.append(exc)
-        t1=threading.Thread(target=worker,args=(a,'paper-a.txt','a-parallel','a.ready','b.ready'))
-        t2=threading.Thread(target=worker,args=(b,'paper-b.txt','b-parallel','b.ready','a.ready'))
-        t1.start(); t2.start(); start.wait(); t1.join(30); t2.join(30)
+
+        w._run_job_shell=fake_run
+        try:
+            t1=threading.Thread(target=worker,args=(a,))
+            t2=threading.Thread(target=worker,args=(b,))
+            t1.start(); t2.start(); start.wait(); t1.join(30); t2.join(30)
+        finally:
+            w._run_job_shell=original_run
         self.assertFalse(t1.is_alive()); self.assertFalse(t2.is_alive())
         self.assertEqual(errors, [])
-        self.assertEqual((rendezvous/'a.ready').read_text(),'ready\n')
-        self.assertEqual((rendezvous/'b.ready').read_text(),'ready\n')
         self.assertEqual((Path(a['worktree'])/'paper-a.txt').read_text(),'a-parallel\n')
         self.assertEqual((Path(b['worktree'])/'paper-b.txt').read_text(),'b-parallel\n')
 

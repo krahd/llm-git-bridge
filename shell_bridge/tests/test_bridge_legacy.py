@@ -290,7 +290,7 @@ class ConfirmationTests(unittest.TestCase):
             self.assertEqual(out["stdout_text"], "hello\n")
 
     @unittest.skipUnless(sys.platform == "darwin" and b.SANDBOX_EXEC.exists() and os.environ.get("_LOCAL_EXECUTOR_NESTED_VALIDATION") != "1", "direct macOS sandbox execution required")
-    def test_read_only_sandbox_denies_network_but_repository_scope_can_use_it(self):
+    def test_sandbox_denies_network_unless_explicitly_enabled_by_trusted_path(self):
         with tempfile.TemporaryDirectory() as td:
             td = Path(td)
             cmd = "python3 -c \"import socket; s=socket.socket(); s.bind(('127.0.0.1',0)); print(s.getsockname()[1])\""
