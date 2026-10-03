@@ -186,9 +186,9 @@ cp "$SCRIPT_DIR/workspace.py" "$INSTALL_DIR/workspace.py"
 cp "$SCRIPT_DIR/approval_helper.py" "$INSTALL_DIR/approval_helper.py"
 chmod 700 "$INSTALL_DIR/bridge.py" "$INSTALL_DIR/workspace.py" "$INSTALL_DIR/approval_helper.py"
 SOURCE_COMMIT="$(git -C "$SCRIPT_DIR/.." rev-parse HEAD)"
-python3 - "$INSTALL_DIR/install-manifest.json" "$SOURCE_COMMIT" "$INSTALL_DIR/bridge.py" "$INSTALL_DIR/workspace.py" <<'PYMAN'
+python3 - "$INSTALL_DIR/install-manifest.json" "$SOURCE_COMMIT" "$INSTALL_DIR/bridge.py" "$INSTALL_DIR/workspace.py" "$INSTALL_DIR/approval_helper.py" <<'PYMAN'
 import hashlib,json,sys
-manifest_path,source_commit,bridge_path,workspace_path=sys.argv[1:]
+manifest_path,source_commit,bridge_path,workspace_path,approval_helper_path=sys.argv[1:]
 def sha256(path):
     with open(path,'rb') as f:
         return hashlib.sha256(f.read()).hexdigest()
@@ -197,6 +197,7 @@ manifest={
     'source_commit':source_commit,
     'bridge_sha256':sha256(bridge_path),
     'workspace_sha256':sha256(workspace_path),
+    'approval_helper_sha256':sha256(approval_helper_path),
 }
 with open(manifest_path,'w',encoding='utf-8') as f:
     json.dump(manifest,f,indent=2,sort_keys=True)

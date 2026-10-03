@@ -24,6 +24,18 @@ class ShellBridgeInstallerPortabilityTests(unittest.TestCase):
         self.assertIn("set RCLONE_REMOTE for non-interactive installation", text)
         self.assertIn("Choose the rclone remote", text)
 
+
+    def test_stage_only_installs_and_hashes_approval_helper_without_starting_service(self):
+        text = (ROOT / "shell_bridge" / "install.sh").read_text()
+        self.assertIn('cp "$SCRIPT_DIR/approval_helper.py" "$INSTALL_DIR/approval_helper.py"', text)
+        self.assertIn("'approval_helper_sha256':sha256(approval_helper_path)", text)
+        stage = text.index('if [ "$STAGE_ONLY" -eq 1 ]; then')
+        start = text.index('launchctl bootstrap', stage)
+        self.assertLess(stage, start)
+        stage_block = text[stage:start]
+        self.assertIn('exit 0', stage_block)
+        self.assertNotIn('launchctl bootstrap', stage_block)
+
     def test_public_readme_documents_fresh_and_noninteractive_install(self):
         text = README.read_text()
         self.assertIn("## Fresh installation", text)
