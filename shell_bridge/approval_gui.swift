@@ -14,6 +14,18 @@ struct ApprovalRequest: Codable, Equatable {
     let expires_at: Double
 }
 
+func validRequestID(_ value: String) -> Bool {
+    guard !value.isEmpty, value.count <= 128 else { return false }
+    let bytes = Array(value.utf8)
+    guard let first = bytes.first, (48...57).contains(first) || (97...122).contains(first) else { return false }
+    return bytes.allSatisfy { (48...57).contains($0) || (97...122).contains($0) || $0 == 46 || $0 == 95 || $0 == 45 }
+}
+
+func validHex(_ value: String, count: Int) -> Bool {
+    guard value.utf8.count == count else { return false }
+    return value.utf8.allSatisfy { (48...57).contains($0) || (97...102).contains($0) }
+}
+
 struct ApprovalDecision: Codable {
     let `protocol`: Int
     let kind: String
@@ -35,17 +47,22 @@ final class ApprovalStore {
         decisions = root.appendingPathComponent("decisions", isDirectory: true)
         try FileManager.default.createDirectory(at: pending, withIntermediateDirectories: true)
         try FileManager.default.createDirectory(at: decisions, withIntermediateDirectories: true)
+        try FileManager.default.setAttributes([.posixPermissions: 0o700], ofItemAtPath: pending.path)
+        try FileManager.default.setAttributes([.posixPermissions: 0o700], ofItemAtPath: decisions.path)
         encoder.outputFormatting = [.prettyPrinted, .sortedKeys]
     }
 
     func pendingRequests(now: Double = Date().timeIntervalSince1970) -> [ApprovalRequest] {
         guard let urls = try? FileManager.default.contentsOfDirectory(at: pending, includingPropertiesForKeys: nil, options: [.skipsHiddenFiles]) else { return [] }
         return urls.filter { $0.pathExtension == "json" }.compactMap { url in
-            guard let data = try? Data(contentsOf: url),
+            guard let values = try? url.resourceValues(forKeys: [.isRegularFileKey, .isSymbolicLinkKey]),
+                  values.isRegularFile == true, values.isSymbolicLink != true,
+                  let data = try? Data(contentsOf: url),
                   let req = try? decoder.decode(ApprovalRequest.self, from: data),
                   req.protocol == 1, req.kind == "operator_approval_request",
-                  !req.request_id.isEmpty, !req.nonce.isEmpty,
-                  req.payload_sha256.count == 64, req.expires_at > now else { return nil }
+                  validRequestID(req.request_id), url.lastPathComponent == req.request_id + ".json",
+                  validHex(req.nonce, count: 48), validHex(req.payload_sha256, count: 64),
+                  req.expires_at > now else { return nil }
             let decisionURL = decisions.appendingPathComponent(req.request_id + ".json")
             return FileManager.default.fileExists(atPath: decisionURL.path) ? nil : req
         }.sorted { $0.expires_at < $1.expires_at }
@@ -205,6 +222,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
         menu.addItem(.separator())
         let quit = NSMenuItem(title: "Quit Approval UI", action: #selector(quitApp), keyEquivalent: "q")
         quit.target = self
+        quit.isEnabled = requests.isEmpty
+        if !requests.isEmpty { quit.toolTip = "Resolve or reject pending approvals before quitting." }
         menu.addItem(quit)
         statusItem.menu = menu
         if showNew, let id = newIDs.sorted().first, let req = requests.first(where: { $0.request_id == id }) { show(req) }
@@ -246,7 +265,7 @@ func selfTest() -> Int32 {
         let root = URL(fileURLWithPath: base, isDirectory: true).appendingPathComponent("approval-selftest-\(UUID().uuidString)", isDirectory: true)
         defer { try? FileManager.default.removeItem(at: root) }
         let store = try ApprovalStore(root: root)
-        let req = ApprovalRequest(protocol: 1, kind: "operator_approval_request", request_id: "self-test", nonce: "abc", payload_sha256: String(repeating: "a", count: 64), category: "self_test", cwd: "/tmp", command: "true", explanation: "Self-test", expires_at: Date().timeIntervalSince1970 + 60)
+        let req = ApprovalRequest(protocol: 1, kind: "operator_approval_request", request_id: "self-test", nonce: String(repeating: "a", count: 48), payload_sha256: String(repeating: "b", count: 64), category: "self_test", cwd: "/tmp", command: "true", explanation: "Self-test", expires_at: Date().timeIntervalSince1970 + 60)
         try JSONEncoder().encode(req).write(to: store.pending.appendingPathComponent("self-test.json"))
         guard store.pendingRequests().count == 1 else { return 20 }
         try store.decide(req, decision: "allow")

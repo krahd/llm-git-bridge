@@ -80,6 +80,18 @@ class ShellBridgeInstallerPortabilityTests(unittest.TestCase):
         self.assertIn("Reject", swift)
         self.assertIn("payload_sha256", swift)
 
+    def test_native_approval_gui_rejects_unsafe_ids_and_uses_direct_toolchain(self):
+        installer = (ROOT / "shell_bridge" / "install.sh").read_text()
+        swift = (ROOT / "shell_bridge" / "approval_gui.swift").read_text()
+        self.assertIn("validRequestID", swift)
+        self.assertIn("validHex(req.nonce, count: 48)", swift)
+        self.assertIn("url.lastPathComponent == req.request_id", swift)
+        self.assertIn("values.isSymbolicLink != true", swift)
+        self.assertIn("quit.isEnabled = requests.isEmpty", swift)
+        self.assertIn("XcodeDefault.xctoolchain/usr/bin/swiftc", installer)
+        self.assertIn("CLANG_MODULE_CACHE_PATH", installer)
+        self.assertIn("SWIFT_MODULECACHE_PATH", installer)
+
     def test_public_readme_documents_fresh_and_noninteractive_install(self):
         text = README.read_text()
         self.assertIn("## Fresh installation", text)

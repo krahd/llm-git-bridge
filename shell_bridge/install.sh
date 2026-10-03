@@ -239,7 +239,9 @@ PY
 chmod 600 "$CONFIG_DIR/config.json"
 
 RCLONE_BIN="$(command -v rclone)"; PYTHON_BIN="$(command -v python3)"
-SWIFTC_BIN="$(command -v swiftc)" || fail "swiftc is required to build the native approval menu-bar app"
+DEVELOPER_DIR_VALUE="${DEVELOPER_DIR:-$(/usr/bin/xcode-select -p 2>/dev/null || true)}"
+DIRECT_SWIFTC="$DEVELOPER_DIR_VALUE/Toolchains/XcodeDefault.xctoolchain/usr/bin/swiftc"
+if [ -x "$DIRECT_SWIFTC" ]; then SWIFTC_BIN="$DIRECT_SWIFTC"; else SWIFTC_BIN="$(command -v swiftc)" || fail "swiftc is required to build the native approval menu-bar app"; fi
 mkdir -p "$APP_BUNDLE/Contents/MacOS"
 APPROVAL_ROOT="$STATE_DIR/approvals"
 python3 - "$APP_BUNDLE/Contents/Info.plist" "$APPROVAL_ROOT" <<'PYAPPPLIST'
@@ -248,9 +250,15 @@ path,approval_root=sys.argv[1:]
 obj={'CFBundleIdentifier':'net.laurenzo.local-executor-approval','CFBundleName':'Local Executor Approval','CFBundleDisplayName':'Local Executor Approval','CFBundlePackageType':'APPL','CFBundleExecutable':'local-executor-approval','CFBundleVersion':'1','CFBundleShortVersionString':'1.0','LSUIElement':True,'NSHighResolutionCapable':True,'ApprovalRoot':approval_root}
 with open(path,'wb') as f: plistlib.dump(obj,f,fmt=plistlib.FMT_XML,sort_keys=True)
 PYAPPPLIST
-"$SWIFTC_BIN" -O -framework AppKit -framework Foundation "$SCRIPT_DIR/approval_gui.swift" -o "$APP_BUNDLE/Contents/MacOS/local-executor-approval"
+APPROVAL_BUILD_DIR="$INSTALL_DIR/.approval-build"
+mkdir -p "$APPROVAL_BUILD_DIR/home" "$APPROVAL_BUILD_DIR/tmp" "$APPROVAL_BUILD_DIR/modules"
+HOME="$APPROVAL_BUILD_DIR/home" TMPDIR="$APPROVAL_BUILD_DIR/tmp" CLANG_MODULE_CACHE_PATH="$APPROVAL_BUILD_DIR/modules" SWIFT_MODULECACHE_PATH="$APPROVAL_BUILD_DIR/modules" "$SWIFTC_BIN" -O -framework AppKit -framework Foundation "$SCRIPT_DIR/approval_gui.swift" -o "$APP_BUNDLE/Contents/MacOS/local-executor-approval"
 chmod 700 "$APP_BUNDLE/Contents/MacOS/local-executor-approval"
 APPROVAL_SELF_TEST_ROOT="$INSTALL_DIR" "$APP_BUNDLE/Contents/MacOS/local-executor-approval" --self-test
+python3 - "$APPROVAL_BUILD_DIR" <<'PYCLEANBUILD'
+import shutil,sys
+shutil.rmtree(sys.argv[1], ignore_errors=True)
+PYCLEANBUILD
 /usr/bin/codesign --force --sign - "$APP_BUNDLE" >/dev/null 2>&1 || fail "could not ad-hoc sign approval app"
 
 PATH_VALUE="$(dirname "$RCLONE_BIN"):$(dirname "$PYTHON_BIN"):/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin:/usr/sbin:/sbin"
