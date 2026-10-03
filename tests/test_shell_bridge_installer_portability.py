@@ -25,6 +25,14 @@ class ShellBridgeInstallerPortabilityTests(unittest.TestCase):
         self.assertIn("Choose the rclone remote", text)
 
 
+
+    def test_approval_app_config_uses_actual_install_dir_bundle(self):
+        text = (ROOT / "shell_bridge" / "install.sh").read_text()
+        self.assertIn('APP_BUNDLE="$INSTALL_DIR/Local Executor Approval.app"', text)
+        self.assertIn('"$SHELL_BIN" "$APP_BUNDLE"', text)
+        self.assertIn("'operator_approval_app':approval_app", text)
+        self.assertNotIn("Path(state).parent.parent/'share'/'local-executor-bridge'", text)
+
     def test_stage_only_installs_and_hashes_approval_helper_without_starting_service(self):
         text = (ROOT / "shell_bridge" / "install.sh").read_text()
         self.assertIn('cp "$SCRIPT_DIR/approval_helper.py" "$INSTALL_DIR/approval_helper.py"', text)

@@ -186,6 +186,7 @@ cp "$SCRIPT_DIR/workspace.py" "$INSTALL_DIR/workspace.py"
 cp "$SCRIPT_DIR/approval_helper.py" "$INSTALL_DIR/approval_helper.py"
 chmod 700 "$INSTALL_DIR/bridge.py" "$INSTALL_DIR/workspace.py" "$INSTALL_DIR/approval_helper.py"
 SOURCE_COMMIT="$(git -C "$SCRIPT_DIR/.." rev-parse HEAD)"
+APP_BUNDLE="$INSTALL_DIR/Local Executor Approval.app"
 python3 - "$INSTALL_DIR/install-manifest.json" "$SOURCE_COMMIT" "$INSTALL_DIR/bridge.py" "$INSTALL_DIR/workspace.py" "$INSTALL_DIR/approval_helper.py" <<'PYMAN'
 import hashlib,json,sys
 manifest_path,source_commit,bridge_path,workspace_path,approval_helper_path=sys.argv[1:]
@@ -205,10 +206,9 @@ with open(manifest_path,'w',encoding='utf-8') as f:
 PYMAN
 chmod 600 "$INSTALL_DIR/install-manifest.json"
 
-python3 - "$CONFIG_DIR/config.json" "$REMOTE" "$BASE_PATH" "$ROOT_ID" "$REQUESTS_ID" "$RESULTS_ID" "$INSTANCE_ID" "$ALLOWED_ROOT" "$STATE_DIR" "$SHELL_BIN" <<'PY'
+python3 - "$CONFIG_DIR/config.json" "$REMOTE" "$BASE_PATH" "$ROOT_ID" "$REQUESTS_ID" "$RESULTS_ID" "$INSTANCE_ID" "$ALLOWED_ROOT" "$STATE_DIR" "$SHELL_BIN" "$APP_BUNDLE" <<'PY'
 import json,sys
-from pathlib import Path
-path,remote,base,root_id,req_id,res_id,instance,allowed,state,shell=sys.argv[1:]
+path,remote,base,root_id,req_id,res_id,instance,allowed,state,shell,approval_app=sys.argv[1:]
 try:
     old=json.load(open(path,encoding='utf-8'))
 except Exception:
@@ -224,7 +224,7 @@ cfg.update({
  'max_stdin_bytes':1024*1024,'max_output_bytes':16*1024*1024,
  'operator_confirmation_mode':cfg.get('operator_confirmation_mode','auto'),
  'operator_confirmation_timeout_seconds':cfg.get('operator_confirmation_timeout_seconds',300),
- 'operator_approval_app':str(Path(state).parent.parent/'share'/'local-executor-bridge'/'Local Executor Approval.app'),
+ 'operator_approval_app':approval_app,
  'wake_lease_enabled':cfg.get('wake_lease_enabled',True),
  'wake_grace_seconds':cfg.get('wake_grace_seconds',3600.0),
 })
@@ -233,7 +233,6 @@ PY
 chmod 600 "$CONFIG_DIR/config.json"
 
 RCLONE_BIN="$(command -v rclone)"; PYTHON_BIN="$(command -v python3)"
-APP_BUNDLE="$INSTALL_DIR/Local Executor Approval.app"
 mkdir -p "$APP_BUNDLE/Contents/MacOS"
 python3 - "$APP_BUNDLE/Contents/Info.plist" <<'PYAPPPLIST'
 import plistlib,sys
