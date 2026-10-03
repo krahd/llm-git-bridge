@@ -13,6 +13,7 @@ Never treat conversation memory, mailbox files, or a local `HEAD` alone as canon
 ## Request discipline
 
 - Use a new globally unique request ID for every request.
+- Every request must include a concise, non-empty, human-readable `explanation` field describing what the command will do and why. This is mandatory for read-only requests as well as mutations; never omit it or replace it with opaque/internal shorthand.
 - Keep commands non-interactive, bounded, and comfortably below the configured timeout/output limits.
 - Leave `write_scope` as `auto` for ordinary work. In an existing Git repository/worktree this permits only repository/Git-metadata writes; outside Git it is filesystem-and-network read-only. Use `read_only` to force inspection-only execution, `repository` to require repository scope, and `system` only when a write outside repository scope is intentionally required.
 - A `system` request requires the local operator's confirmation before `STARTED`. Never relabel a broader mutation as repository/read-only merely to avoid the dialogue.
