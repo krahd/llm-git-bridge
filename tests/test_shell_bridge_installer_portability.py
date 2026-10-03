@@ -26,6 +26,13 @@ class ShellBridgeInstallerPortabilityTests(unittest.TestCase):
 
 
 
+    def test_stage_only_refuses_dirty_runtime_source_provenance(self):
+        text = (ROOT / "shell_bridge" / "install.sh").read_text()
+        guard = 'status --porcelain --untracked-files=no -- "${SOURCE_PATHS[@]}"'
+        self.assertIn(guard, text)
+        self.assertIn('fail "bridge source files are dirty; commit and audit the exact source before staging"', text)
+        self.assertLess(text.index(guard), text.index('cp "$SCRIPT_DIR/bridge.py"'))
+
     def test_approval_app_config_uses_actual_install_dir_bundle(self):
         text = (ROOT / "shell_bridge" / "install.sh").read_text()
         self.assertIn('APP_BUNDLE="$INSTALL_DIR/Local Executor Approval.app"', text)

@@ -16,6 +16,8 @@ TMP_REQ=""
 TMP_RESULT=""
 TMP_HEALTH=""
 CUTOVER_COMMITTED=0
+STARTED_NEW=0
+OLD_CONSUMERS_STOPPED=0
 
 fail(){ echo "ERROR: $*" >&2; exit 1; }
 need(){ command -v "$1" >/dev/null 2>&1 || fail "missing required command: $1"; }
@@ -23,16 +25,18 @@ need(){ command -v "$1" >/dev/null 2>&1 || fail "missing required command: $1"; 
 rollback() {
   rc=$?
   if [ "$rc" -ne 0 ] && [ "$CUTOVER_COMMITTED" -eq 0 ]; then
-    echo "Cutover failed before commit; restoring previously active bridge service(s)." >&2
-    launchctl bootout "gui/${UID_NOW}/${NEW_LABEL}" >/dev/null 2>&1 || true
-    if [ -n "$ROLLBACK_FILE" ] && [ -f "$ROLLBACK_FILE" ]; then
-      while IFS='|' read -r label plist; do
-        [ -n "$label" ] || continue
-        if [ -f "$plist" ]; then
+    if [ "$STARTED_NEW" -eq 1 ]; then
+      launchctl bootout "gui/${UID_NOW}/${NEW_LABEL}" >/dev/null 2>&1 || true
+    fi
+    if [ "$OLD_CONSUMERS_STOPPED" -eq 1 ]; then
+      echo "Cutover failed after stopping legacy consumers; restoring previously active bridge service(s)." >&2
+      if [ -n "$ROLLBACK_FILE" ] && [ -f "$ROLLBACK_FILE" ]; then
+        while IFS='|' read -r label plist; do
+          [ -n "$label" ] || continue
           launchctl bootstrap "gui/${UID_NOW}" "$plist" >/dev/null 2>&1 || true
           launchctl kickstart -k "gui/${UID_NOW}/${label}" >/dev/null 2>&1 || true
-        fi
-      done < "$ROLLBACK_FILE"
+        done < "$ROLLBACK_FILE"
+      fi
     fi
   fi
   [ -n "$ROLLBACK_FILE" ] && rm -f "$ROLLBACK_FILE" || true
@@ -80,6 +84,10 @@ if [ -n "${CHATGPT_SHELL_BRIDGE_REQUEST_ID:-}" ]; then
   fail "cutover must be run out-of-band (for example from Terminal), not through the live bridge"
 fi
 
+if launchctl print "gui/${UID_NOW}/${NEW_LABEL}" >/dev/null 2>&1; then
+  fail "v6 service is already loaded; reconcile the existing v6 service before cutover"
+fi
+
 IFS=$'\t' read -r REMOTE ROOT_ID ALLOWED_ROOT STATE_DIR < <(python3 - "$NEW_CONFIG" <<'PYCFG'
 import json,sys
 c=json.load(open(sys.argv[1],encoding='utf-8'))
@@ -115,11 +123,22 @@ R=(rclone --drive-root-folder-id "$ROOT_ID")
 TMP_HEALTH="$(mktemp)"
 "${R[@]}" copyto "${REMOTE}health.json" "$TMP_HEALTH" >/dev/null 2>&1 || fail "cannot read current production health.json"
 python3 - "$TMP_HEALTH" <<'PYHEALTH'
-import json,sys
+import datetime,json,sys,time
 h=json.load(open(sys.argv[1],encoding='utf-8'))
 active=h.get('active_requests')
 if not isinstance(active,list): raise SystemExit('health.json has no active_requests list')
 if active: raise SystemExit('production bridge is not quiescent; active requests: '+', '.join(map(str,active)))
+raw=h.get('updated_at')
+if not isinstance(raw,str) or not raw: raise SystemExit('health.json has no updated_at timestamp')
+try: ts=datetime.datetime.fromisoformat(raw.replace('Z','+00:00')).timestamp()
+except Exception: raise SystemExit('health.json updated_at is invalid')
+now=time.time()
+if ts > now + 30: raise SystemExit('health.json timestamp is implausibly in the future')
+stale=h.get('health_stale_after_seconds',120)
+try: stale=float(stale)
+except Exception: stale=120.0
+max_age=max(180.0, stale + 60.0)
+if now-ts > max_age: raise SystemExit(f'production health.json is stale ({now-ts:.1f}s old); refusing cutover without fresh quiescence evidence')
 PYHEALTH
 
 PENDING="$("${R[@]}" lsf "${REMOTE}requests" --files-only 2>/dev/null | sed '/^[[:space:]]*$/d' | head -n 1 || true)"
@@ -129,16 +148,25 @@ ROLLBACK_FILE="$(mktemp)"
 for label in "${OLD_LABELS[@]}"; do
   plist="$HOME/Library/LaunchAgents/$label.plist"
   if launchctl print "gui/${UID_NOW}/${label}" >/dev/null 2>&1; then
+    [ -f "$plist" ] || fail "loaded legacy service has no rollback plist: $label ($plist)"
     printf '%s|%s\n' "$label" "$plist" >> "$ROLLBACK_FILE"
   fi
 done
 
 # Stop old consumers first. Only then may v6 attach to the same production mailbox.
 for label in "${OLD_LABELS[@]}"; do
-  launchctl bootout "gui/${UID_NOW}/${label}" >/dev/null 2>&1 || true
+  if launchctl print "gui/${UID_NOW}/${label}" >/dev/null 2>&1; then
+    launchctl bootout "gui/${UID_NOW}/${label}" || fail "failed to stop legacy service: $label"
+  fi
 done
-launchctl bootout "gui/${UID_NOW}/${NEW_LABEL}" >/dev/null 2>&1 || true
+for label in "${OLD_LABELS[@]}"; do
+  if launchctl print "gui/${UID_NOW}/${label}" >/dev/null 2>&1; then
+    fail "legacy service is still loaded after bootout: $label"
+  fi
+done
+OLD_CONSUMERS_STOPPED=1
 launchctl bootstrap "gui/${UID_NOW}" "$NEW_PLIST"
+STARTED_NEW=1
 launchctl kickstart -k "gui/${UID_NOW}/${NEW_LABEL}"
 launchctl print "gui/${UID_NOW}/${NEW_LABEL}" >/dev/null || fail "v6 LaunchAgent did not start"
 python3 "$NEW_INSTALL_DIR/bridge.py" doctor --config "$NEW_CONFIG" >/dev/null || fail "v6 doctor failed after service switch"

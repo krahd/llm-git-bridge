@@ -20,7 +20,7 @@ class CutoverIdentityTests(unittest.TestCase):
         self.assertIn("active_requests", text)
         self.assertIn("production request mailbox is not empty", text)
         self.assertIn("LOCAL_EXECUTOR_BRIDGE_OK", text)
-        self.assertIn("Cutover failed before commit; restoring", text)
+        self.assertIn("Cutover failed after stopping legacy consumers; restoring", text)
         self.assertIn("ln -sfn", text)
         smoke = text.index("LOCAL_EXECUTOR_BRIDGE_OK")
         compat = text.index("ln -sfn")
@@ -37,6 +37,26 @@ class CutoverIdentityTests(unittest.TestCase):
         self.assertIn('EXPECTED_APPROVAL_APP="$NEW_INSTALL_DIR/Local Executor Approval.app"', text)
         self.assertIn('staged v6 approval app executable missing', text)
         self.assertLess(text.index('staged v6 approval app executable missing'), stop_old)
+
+    def test_cutover_preflight_is_side_effect_free_and_requires_fresh_health(self):
+        text = (pathlib.Path(__file__).parents[1] / "cutover.sh").read_text()
+        self.assertIn('STARTED_NEW=0', text)
+        self.assertIn('OLD_CONSUMERS_STOPPED=0', text)
+        self.assertIn('if [ "$STARTED_NEW" -eq 1 ]', text)
+        self.assertIn('if [ "$OLD_CONSUMERS_STOPPED" -eq 1 ]', text)
+        self.assertIn('v6 service is already loaded; reconcile', text)
+        self.assertIn('production health.json is stale', text)
+
+    def test_cutover_proves_legacy_consumers_stopped_and_rollback_is_recoverable(self):
+        text = (pathlib.Path(__file__).parents[1] / "cutover.sh").read_text()
+        self.assertIn('loaded legacy service has no rollback plist', text)
+        self.assertIn('failed to stop legacy service', text)
+        self.assertIn('legacy service is still loaded after bootout', text)
+        self.assertIn('OLD_CONSUMERS_STOPPED=1', text)
+        stop = text.index('# Stop old consumers first.')
+        start = text.index('launchctl bootstrap "gui/${UID_NOW}" "$NEW_PLIST"')
+        self.assertLess(stop, start)
+        self.assertLess(text.index('OLD_CONSUMERS_STOPPED=1', stop), start)
 
     def test_cutover_preserves_legacy_workspace_state_on_upgrade(self):
         text = (pathlib.Path(__file__).parents[1] / "cutover.sh").read_text()

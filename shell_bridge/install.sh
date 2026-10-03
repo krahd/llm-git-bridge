@@ -181,11 +181,16 @@ echo "Pinned Drive root ID: $ROOT_ID"
 mkdir -p "$INSTALL_DIR" "$CONFIG_DIR" "$STATE_DIR" "$HOME/Library/LaunchAgents"
 chmod 700 "$INSTALL_DIR" "$CONFIG_DIR" "$STATE_DIR"
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
+SOURCE_ROOT="$(cd "$SCRIPT_DIR/.." && pwd)"
+SOURCE_COMMIT="$(git -C "$SOURCE_ROOT" rev-parse HEAD)"
+SOURCE_PATHS=(shell_bridge/bridge.py shell_bridge/workspace.py shell_bridge/approval_helper.py shell_bridge/install.sh shell_bridge/cutover.sh)
+if [ -n "$(git -C "$SOURCE_ROOT" status --porcelain --untracked-files=no -- "${SOURCE_PATHS[@]}")" ]; then
+  fail "bridge source files are dirty; commit and audit the exact source before staging"
+fi
 cp "$SCRIPT_DIR/bridge.py" "$INSTALL_DIR/bridge.py"
 cp "$SCRIPT_DIR/workspace.py" "$INSTALL_DIR/workspace.py"
 cp "$SCRIPT_DIR/approval_helper.py" "$INSTALL_DIR/approval_helper.py"
 chmod 700 "$INSTALL_DIR/bridge.py" "$INSTALL_DIR/workspace.py" "$INSTALL_DIR/approval_helper.py"
-SOURCE_COMMIT="$(git -C "$SCRIPT_DIR/.." rev-parse HEAD)"
 APP_BUNDLE="$INSTALL_DIR/Local Executor Approval.app"
 python3 - "$INSTALL_DIR/install-manifest.json" "$SOURCE_COMMIT" "$INSTALL_DIR/bridge.py" "$INSTALL_DIR/workspace.py" "$INSTALL_DIR/approval_helper.py" <<'PYMAN'
 import hashlib,json,sys
