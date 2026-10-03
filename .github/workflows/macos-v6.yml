@@ -1,0 +1,47 @@
+name: macOS v6 qualification
+
+on:
+  push:
+    branches:
+      - main
+      - ai/installer-approval-integrity-20261003-a1
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  test:
+    name: Python 3.14 / macOS 15
+    runs-on: macos-15
+    timeout-minutes: 30
+    steps:
+      - name: Checkout
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - name: Python 3.14
+        uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97 # v7.0.0
+        with:
+          python-version: '3.14'
+          cache: pip
+      - name: Syntax
+        run: |
+          python3 -m compileall -q shell_bridge tests
+          bash -n shell_bridge/install.sh shell_bridge/cutover.sh
+      - name: Native approval client
+        shell: bash
+        run: |
+          set -euo pipefail
+          DEVELOPER_DIR=$(/usr/bin/xcode-select -p)
+          SDK="$DEVELOPER_DIR/Platforms/MacOSX.platform/Developer/SDKs/MacOSX.sdk"
+          SWIFTC="$DEVELOPER_DIR/Toolchains/XcodeDefault.xctoolchain/usr/bin/swiftc"
+          test -x "$SWIFTC"
+          test -d "$SDK"
+          BUILD="$RUNNER_TEMP/local-executor-approval-ci"
+          mkdir -p "$BUILD/home" "$BUILD/tmp" "$BUILD/modules"
+          HOME="$BUILD/home" TMPDIR="$BUILD/tmp" CLANG_MODULE_CACHE_PATH="$BUILD/modules" SWIFT_MODULECACHE_PATH="$BUILD/modules"             "$SWIFTC" -sdk "$SDK" -O -framework AppKit -framework Foundation -framework LocalAuthentication -framework Security -framework CryptoKit             shell_bridge/approval_gui.swift -o "$BUILD/local-executor-approval"
+          APPROVAL_SELF_TEST_ROOT="$BUILD" "$BUILD/local-executor-approval" --self-test
+      - name: Complete repository suite
+        run: bin/test
