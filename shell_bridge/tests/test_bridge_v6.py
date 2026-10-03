@@ -50,6 +50,24 @@ class BridgeV6SecurityTests(unittest.TestCase):
             cmd = f"python3 {ws} show --job {job}; touch /tmp/escape"
             self.assertFalse(bridge._trusted_workspace_coordinator(cmd, root, state))
 
+    def test_approval_wait_is_nonblocking_pending_state(self):
+        with tempfile.TemporaryDirectory() as td:
+            root=Path(td); app=root/'Approval.app'; app.mkdir()
+            old=bridge._launch_operator_approval_helper
+            bridge._launch_operator_approval_helper=lambda app_path:(True, '')
+            try:
+                cfg={'state_dir':str(root/'state'),'bridge_instance_id':'inst','operator_confirmation_mode':'dialog','operator_confirmation_timeout_seconds':60,'operator_approval_app':str(app)}
+                r=bridge.request_operator_confirmation(request_id='req-1',cwd=root,command='true',category='system_write',cfg=cfg,explanation='test',requested_write_scope='system',effective_write_scope={'write_scope':'system'})
+            finally: bridge._launch_operator_approval_helper=old
+            self.assertEqual(r['state'],'pending'); self.assertFalse(r['approved'])
+            pending=json.loads((root/'state'/'approvals'/'pending'/'req-1.json').read_text())
+            self.assertEqual(pending['bridge_instance_id'],'inst'); self.assertEqual(len(pending['nonce']),64)
+
+    def test_approval_exact_binding_changes_with_command(self):
+        a=bridge._approval_projection(request_id='r',bridge_instance_id='i',nonce='a'*64,cwd=Path('/tmp'),command='one',category='system_write',explanation='x',requested_write_scope='system',effective_write_scope={'write_scope':'system'})
+        b=dict(a); b['command']='two'
+        self.assertNotEqual(bridge._approval_payload_hash(a),bridge._approval_payload_hash(b))
+
     def test_system_scope_still_requires_confirmation(self):
         with tempfile.TemporaryDirectory() as td:
             root = Path(td)

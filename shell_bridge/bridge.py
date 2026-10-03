@@ -12,6 +12,7 @@ import shlex
 import shutil
 import secrets
 import signal
+import stat
 import subprocess
 import sys
 import tempfile
@@ -437,27 +438,80 @@ def _confirmation_command_excerpt(command: str, limit: int = 6000) -> str:
 
 
 
-def _approval_payload_hash(*, request_id: str, cwd: Path, command: str, category: str, explanation: str) -> str:
-    payload = json.dumps({
-        "request_id": request_id, "cwd": str(cwd), "command": command,
-        "category": category, "explanation": explanation,
-    }, sort_keys=True, separators=(",", ":"), ensure_ascii=False).encode("utf-8")
+
+
+def _secure_approval_dir(path: Path) -> None:
+    path.mkdir(parents=True, exist_ok=True, mode=0o700)
+    st = path.lstat()
+    if not stat.S_ISDIR(st.st_mode) or stat.S_ISLNK(st.st_mode):
+        raise ValueError(f"unsafe approval directory: {path}")
+    if st.st_uid != os.getuid():
+        raise ValueError(f"approval directory has unexpected owner: {path}")
+    path.chmod(0o700)
+
+
+def _approval_record_path(root: Path, bucket: str, request_id: str) -> Path:
+    validate_request_name(f"{request_id}.json")
+    bucket_path = root / bucket
+    _secure_approval_dir(root)
+    _secure_approval_dir(bucket_path)
+    target = bucket_path / f"{request_id}.json"
+    try:
+        st = target.lstat()
+    except FileNotFoundError:
+        return target
+    if stat.S_ISLNK(st.st_mode) or not stat.S_ISREG(st.st_mode) or st.st_uid != os.getuid():
+        raise ValueError(f"unsafe approval record: {target}")
+    return target
+
+
+def _approval_projection(*, request_id: str, bridge_instance_id: str, nonce: str, cwd: Path,
+                         command: str, category: str, explanation: str, requested_write_scope: str,
+                         effective_write_scope: dict) -> dict:
+    return {
+        "schema": 1,
+        "request_id": request_id,
+        "bridge_instance_id": bridge_instance_id,
+        "nonce": nonce,
+        "category": category,
+        "explanation": explanation,
+        "cwd": str(cwd),
+        "command": command,
+        "requested_write_scope": requested_write_scope,
+        "effective_write_scope": effective_write_scope,
+    }
+
+
+def _approval_payload_hash(projection: dict) -> str:
+    payload = json.dumps(projection, sort_keys=True, separators=(",", ":"), ensure_ascii=False).encode("utf-8")
     return hashlib.sha256(payload).hexdigest()
 
 
-def _atomic_json(path: Path, obj: dict) -> None:
-    path.parent.mkdir(parents=True, exist_ok=True)
-    try:
-        path.parent.chmod(0o700)
-    except OSError:
-        pass
+def _atomic_json(path: Path, obj: dict, *, replace: bool = True) -> None:
+    _secure_approval_dir(path.parent)
+    if path.exists() or path.is_symlink():
+        st = path.lstat()
+        if stat.S_ISLNK(st.st_mode) or not stat.S_ISREG(st.st_mode) or st.st_uid != os.getuid():
+            raise ValueError(f"unsafe approval record: {path}")
+        if not replace:
+            raise FileExistsError(path)
     tmp = path.with_name(path.name + ".tmp-" + secrets.token_hex(6))
     data = json.dumps(obj, sort_keys=True, separators=(",", ":"), ensure_ascii=False) + "\n"
-    fd = os.open(tmp, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
+    fd = os.open(tmp, os.O_WRONLY | os.O_CREAT | os.O_EXCL | getattr(os, "O_NOFOLLOW", 0), 0o600)
     try:
         with os.fdopen(fd, "w", encoding="utf-8") as f:
-            f.write(data); f.flush(); os.fsync(f.fileno())
+            f.write(data)
+            f.flush()
+            os.fsync(f.fileno())
+        if not replace and (path.exists() or path.is_symlink()):
+            raise FileExistsError(path)
         os.replace(tmp, path)
+        try:
+            dirfd = os.open(path.parent, os.O_RDONLY)
+            try: os.fsync(dirfd)
+            finally: os.close(dirfd)
+        except OSError:
+            pass
     finally:
         try: tmp.unlink()
         except FileNotFoundError: pass
@@ -465,21 +519,76 @@ def _atomic_json(path: Path, obj: dict) -> None:
 
 def _read_json_file(path: Path) -> dict | None:
     try:
-        raw = path.read_text(encoding="utf-8")
+        st = path.lstat()
+        if stat.S_ISLNK(st.st_mode) or not stat.S_ISREG(st.st_mode) or st.st_uid != os.getuid():
+            return None
+        fd = os.open(path, os.O_RDONLY | getattr(os, "O_NOFOLLOW", 0))
+        try:
+            raw = os.read(fd, max(1, st.st_size + 1)).decode("utf-8")
+        finally:
+            os.close(fd)
         obj = json.loads(raw)
-    except (OSError, json.JSONDecodeError):
+    except (OSError, UnicodeDecodeError, json.JSONDecodeError):
         return None
     return obj if isinstance(obj, dict) else None
 
 
-def _launch_operator_approval_helper(app_path: Path, pending_path: Path, decision_path: Path) -> tuple[bool, str]:
+def _approval_signature_message(pending: dict) -> bytes:
+    values = [
+        "local-executor-approval-v1",
+        str(pending.get("bridge_instance_id", "")),
+        str(pending.get("request_id", "")),
+        str(pending.get("nonce", "")),
+        str(pending.get("payload_sha256", "")),
+        str(pending.get("expires_at", "")),
+    ]
+    return ("\n".join(values) + "\n").encode("utf-8")
+
+
+def _verify_approval_signature(decision: dict, pending: dict, cfg: dict) -> tuple[bool, str]:
+    if decision.get("decision") != "allow":
+        return True, ""
+    public_key_path = cfg.get("operator_approval_public_key")
+    pinned = cfg.get("operator_approval_public_key_sha256")
+    if not isinstance(public_key_path, str) or not public_key_path or not isinstance(pinned, str) or not re.fullmatch(r"[0-9a-f]{64}", pinned):
+        return False, "operator approval public key is not pinned; request was not started"
+    key_path = Path(public_key_path).expanduser()
+    try:
+        st = key_path.lstat()
+        if stat.S_ISLNK(st.st_mode) or not stat.S_ISREG(st.st_mode) or st.st_uid != os.getuid():
+            return False, "operator approval public key path is unsafe; request was not started"
+        key_bytes = key_path.read_bytes()
+    except OSError as exc:
+        return False, f"operator approval public key unavailable: {exc}"
+    actual = hashlib.sha256(key_bytes).hexdigest()
+    if not secrets.compare_digest(actual, pinned) or decision.get("signer_public_key_sha256") != pinned:
+        return False, "operator approval signer does not match pinned public key; request was not started"
+    signature_b64 = decision.get("signature_b64")
+    if not isinstance(signature_b64, str) or not signature_b64:
+        return False, "operator approval signature is missing; request was not started"
+    try:
+        signature = base64.b64decode(signature_b64, validate=True)
+    except Exception:
+        return False, "operator approval signature encoding is invalid; request was not started"
+    with tempfile.TemporaryDirectory(prefix="leb-approval-verify-") as td:
+        msg = Path(td) / "message"
+        sig = Path(td) / "signature"
+        msg.write_bytes(_approval_signature_message(pending))
+        sig.write_bytes(signature)
+        cp = subprocess.run(
+            ["/usr/bin/openssl", "dgst", "-sha256", "-verify", str(key_path), "-signature", str(sig), str(msg)],
+            stdout=subprocess.PIPE, stderr=subprocess.PIPE, timeout=10, check=False,
+        )
+    if cp.returncode != 0:
+        return False, "operator approval signature verification failed; request was not started"
+    return True, ""
+
+
+def _launch_operator_approval_helper(app_path: Path) -> tuple[bool, str]:
     if not app_path.is_dir():
         return False, f"operator approval helper is not installed: {app_path}"
     try:
-        cp = subprocess.run(
-            ["/usr/bin/open", str(app_path)],
-            stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True, timeout=10, check=False,
-        )
+        cp = subprocess.run(["/usr/bin/open", str(app_path)], stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True, timeout=10, check=False)
     except (FileNotFoundError, subprocess.TimeoutExpired) as exc:
         return False, f"operator approval helper could not be launched: {exc}"
     if cp.returncode != 0:
@@ -488,79 +597,119 @@ def _launch_operator_approval_helper(app_path: Path, pending_path: Path, decisio
     return True, ""
 
 
-def request_operator_confirmation(*, request_id: str, cwd: Path, command: str, category: str,
-                                  cfg: dict, explanation: str) -> dict:
-    mode = operator_confirmation_mode(cfg)
-    record = {"required": True, "category": category, "mode": mode, "approved": False}
-    if mode == "off":
-        return {**record, "approved": True, "message": "operator confirmation explicitly disabled by local configuration"}
-    if mode == "reject":
-        return {**record, "message": "operator confirmation required; interactive approval is unavailable or disabled"}
+def _archive_approval_record(path: Path, root: Path, bucket: str, request_id: str) -> None:
+    if not path.exists():
+        return
+    archive = root / bucket
+    _secure_approval_dir(archive)
+    target = archive / f"{request_id}-{int(time.time())}-{secrets.token_hex(4)}.json"
+    os.replace(path, target)
 
+
+def request_operator_confirmation(*, request_id: str, cwd: Path, command: str, category: str,
+                                  cfg: dict, explanation: str, requested_write_scope: str,
+                                  effective_write_scope: dict) -> dict:
+    mode = operator_confirmation_mode(cfg)
+    record = {"required": True, "category": category, "mode": mode, "approved": False, "state": "invalid"}
+    if mode == "off":
+        return {**record, "approved": True, "state": "approved", "message": "operator confirmation explicitly disabled by local configuration"}
+    if mode == "reject":
+        return {**record, "state": "rejected", "message": "operator confirmation required; interactive approval is unavailable or disabled"}
     timeout = cfg.get("operator_confirmation_timeout_seconds", DEFAULT_OPERATOR_CONFIRMATION_TIMEOUT)
     if isinstance(timeout, bool) or not isinstance(timeout, int) or timeout < 1:
         return {**record, "message": "operator confirmation timeout configuration is invalid"}
     state_dir = Path(cfg.get("state_dir", "")).expanduser()
     if not str(state_dir):
         return {**record, "message": "operator confirmation state directory is unavailable"}
+    instance = cfg.get("bridge_instance_id")
+    if not isinstance(instance, str) or not instance:
+        return {**record, "message": "bridge instance identity is unavailable"}
     app_path = Path(cfg.get("operator_approval_app", Path(__file__).resolve().parent / "Local Executor Approval.app"))
     approval_root = state_dir / "approvals"
-    pending_path = approval_root / "pending" / f"{request_id}.json"
-    decision_path = approval_root / "decisions" / f"{request_id}.json"
-    payload_hash = _approval_payload_hash(
-        request_id=request_id, cwd=cwd, command=command, category=category, explanation=explanation
-    )
+    try:
+        pending_path = _approval_record_path(approval_root, "pending", request_id)
+        decision_path = _approval_record_path(approval_root, "decisions", request_id)
+    except ValueError as exc:
+        return {**record, "message": str(exc)}
     now = time.time()
     pending = _read_json_file(pending_path)
-    if pending is not None:
-        if pending.get("request_id") != request_id or pending.get("payload_sha256") != payload_hash:
-            return {**record, "message": "operator approval state does not match this request; request was not started"}
-        nonce = pending.get("nonce")
-        expires_at = pending.get("expires_at")
-        if not isinstance(nonce, str) or not nonce or not isinstance(expires_at, (int, float)):
-            return {**record, "message": "operator approval state is invalid; request was not started"}
-        if expires_at <= now:
-            return {**record, "message": "operator confirmation timed out; request was not started"}
-    else:
-        nonce = secrets.token_hex(24)
+    created = False
+    if pending is None:
+        if pending_path.exists() or pending_path.is_symlink():
+            return {**record, "message": "operator approval pending record is unsafe or unreadable; request was not started"}
+        nonce = secrets.token_hex(32)
+        projection = _approval_projection(
+            request_id=request_id, bridge_instance_id=instance, nonce=nonce, cwd=cwd, command=command,
+            category=category, explanation=explanation, requested_write_scope=requested_write_scope,
+            effective_write_scope=effective_write_scope,
+        )
+        payload_hash = _approval_payload_hash(projection)
         expires_at = now + timeout
         pending = {
-            "protocol": 1, "kind": "operator_approval_request", "request_id": request_id,
-            "nonce": nonce, "payload_sha256": payload_hash, "category": category,
-            "cwd": str(cwd), "command": _confirmation_command_excerpt(command),
-            "explanation": explanation, "created_at": now, "expires_at": expires_at,
+            "protocol": 1, "schema": 1, "kind": "operator_approval_request", **projection,
+            "payload_sha256": payload_hash, "created_at": now, "expires_at": expires_at,
         }
-        _atomic_json(pending_path, pending)
+        try:
+            _atomic_json(pending_path, pending, replace=False)
+        except Exception as exc:
+            return {**record, "message": f"operator approval challenge could not be persisted safely: {exc}"}
+        created = True
+    else:
+        if pending.get("protocol") != 1 or pending.get("schema") != 1 or pending.get("kind") != "operator_approval_request":
+            return {**record, "message": "operator approval challenge schema is invalid; request was not started"}
+        projection = _approval_projection(
+            request_id=request_id, bridge_instance_id=instance, nonce=str(pending.get("nonce", "")), cwd=cwd, command=command,
+            category=category, explanation=explanation, requested_write_scope=requested_write_scope,
+            effective_write_scope=effective_write_scope,
+        )
+        expected = _approval_payload_hash(projection)
+        if pending.get("payload_sha256") != expected or any(pending.get(k) != v for k, v in projection.items()):
+            return {**record, "message": "operator approval state does not match this exact request; request was not started"}
+    expires_at = pending.get("expires_at")
+    if not isinstance(expires_at, (int, float)) or expires_at <= now:
+        try: _archive_approval_record(pending_path, approval_root, "expired", request_id)
+        except Exception: pass
+        return {**record, "state": "expired", "message": "operator confirmation expired; request was not started"}
+    decision = _read_json_file(decision_path)
+    if decision is None:
+        if decision_path.exists() or decision_path.is_symlink():
+            return {**record, "message": "operator approval decision record is unsafe or unreadable; request was not started"}
+        if created:
+            launched, message = _launch_operator_approval_helper(app_path)
+            if not launched:
+                return {**record, "message": message}
+        return {**record, "state": "pending", "message": "operator approval is pending", "expires_at": expires_at, "payload_sha256": pending["payload_sha256"]}
+    if (decision.get("protocol") != 1 or decision.get("schema") != 1 or decision.get("kind") != "operator_approval_decision" or
+        decision.get("request_id") != request_id or decision.get("bridge_instance_id") != instance or
+        decision.get("nonce") != pending.get("nonce") or decision.get("payload_sha256") != pending.get("payload_sha256")):
+        return {**record, "message": "operator approval decision failed exact-request binding; request was not started"}
+    decided_at = decision.get("decided_at")
+    if not isinstance(decided_at, (int, float)) or decided_at > expires_at or time.time() > expires_at:
+        return {**record, "state": "expired", "message": "operator approval decision expired; request was not started"}
+    value = decision.get("decision")
+    if value == "allow":
+        ok, message = _verify_approval_signature(decision, pending, cfg)
+        if not ok:
+            return {**record, "message": message}
+        return {**record, "approved": True, "state": "approved", "message": "operator approved exact elevated request",
+                "expires_at": expires_at, "payload_sha256": pending["payload_sha256"], "pending_path": str(pending_path), "decision_path": str(decision_path)}
+    if value == "cancel":
+        return {**record, "state": "rejected", "message": "operator declined elevated request; request was not started",
+                "pending_path": str(pending_path), "decision_path": str(decision_path)}
+    return {**record, "message": "operator approval decision is invalid; request was not started"}
 
-    def consume_decision() -> dict | None:
-        decision = _read_json_file(decision_path)
-        if decision is None:
-            return None
-        if (decision.get("protocol") != 1 or decision.get("kind") != "operator_approval_decision" or
-            decision.get("request_id") != request_id or decision.get("nonce") != nonce or
-            decision.get("payload_sha256") != payload_hash):
-            return {**record, "message": "operator approval decision failed request binding; request was not started"}
-        value = decision.get("decision")
-        if value == "allow":
-            return {**record, "approved": True, "message": "operator approved elevated request"}
-        if value == "cancel":
-            return {**record, "message": "operator declined elevated request; request was not started"}
-        return {**record, "message": "operator approval decision is invalid; request was not started"}
 
-    existing = consume_decision()
-    if existing is not None:
-        return existing
-    launched, message = _launch_operator_approval_helper(app_path, pending_path, decision_path)
-    if not launched:
-        return {**record, "message": message}
-    deadline = min(float(expires_at), time.time() + timeout)
-    while time.time() < deadline:
-        result = consume_decision()
-        if result is not None:
-            return result
-        time.sleep(0.2)
-    return {**record, "message": "operator confirmation timed out; request was not started"}
-
+def _pending_approval_ids(cfg: dict) -> list[str]:
+    root = Path(cfg["state_dir"]).expanduser() / "approvals" / "pending"
+    if not root.is_dir() or root.is_symlink():
+        return []
+    now = time.time()
+    out = []
+    for path in root.glob("*.json"):
+        obj = _read_json_file(path)
+        if obj and obj.get("kind") == "operator_approval_request" and isinstance(obj.get("expires_at"), (int, float)) and obj["expires_at"] > now:
+            out.append(str(obj.get("request_id", path.stem)))
+    return sorted(set(out))
 
 def _terminate_pgid(pgid: int) -> None:
     try:
@@ -1030,19 +1179,32 @@ def process_one(name: str, cfg: dict) -> None:
     if category is not None:
         confirmation = request_operator_confirmation(
             request_id=v["id"], cwd=v["cwd"], command=v["command"], category=category, cfg=cfg,
-            explanation=v.get("explanation"),
+            explanation=v.get("explanation"), requested_write_scope=v.get("write_scope", "auto"),
+            effective_write_scope=public_write_plan(write_plan),
         )
+        if confirmation.get("state") == "pending":
+            atomic_write(request_dir / "state.json", json.dumps({"state":"AWAITING_APPROVAL","request_sha256":request_sha,"updated_at":time.time()}, sort_keys=True).encode("utf-8"))
+            return
         if not confirmation["approved"]:
             result = result_envelope(v["id"], request_sha, "rejected", {
-                "cwd": str(v["cwd"]),
-                "message": confirmation["message"],
-                "write_scope": public_write_plan(write_plan),
-                "operator_confirmation": confirmation,
+                "cwd": str(v["cwd"]), "message": confirmation["message"],
+                "write_scope": public_write_plan(write_plan), "operator_confirmation": confirmation,
             })
             _persist_then_publish(result, local_result, finished_marker, name, cfg)
             return
-        # Approval of a recognised external/control-plane command grants network
-        # authority for this exact request while preserving its filesystem scope.
+        # Re-check expiry immediately before STARTED and consume the one-time decision.
+        if time.time() >= float(confirmation.get("expires_at", 0)):
+            result = result_envelope(v["id"], request_sha, "rejected", {"cwd":str(v["cwd"]),"message":"operator approval expired before execution","operator_confirmation":confirmation})
+            _persist_then_publish(result, local_result, finished_marker, name, cfg); return
+        approval_marker = request_dir / "approval.json"
+        _atomic_json(approval_marker, {"request_sha256":request_sha,"payload_sha256":confirmation.get("payload_sha256"),"expires_at":confirmation.get("expires_at"),"approved_at":time.time()})
+        approval_root = Path(cfg["state_dir"]).expanduser() / "approvals"
+        try:
+            _archive_approval_record(Path(confirmation["decision_path"]), approval_root, "consumed", v["id"])
+            _archive_approval_record(Path(confirmation["pending_path"]), approval_root, "audit", v["id"])
+        except Exception as exc:
+            result = result_envelope(v["id"], request_sha, "rejected", {"cwd":str(v["cwd"]),"message":f"could not consume approval atomically: {exc}","operator_confirmation":confirmation})
+            _persist_then_publish(result, local_result, finished_marker, name, cfg); return
         if high_impact_category is not None:
             write_plan["allow_network"] = True
 
@@ -1346,6 +1508,8 @@ def doctor(cfg: dict, *, probe_transport: bool = True) -> dict:
     }
     with _ACTIVE_LOCK:
         info["active_requests"] = sorted(_ACTIVE)
+    info["pending_approvals"] = _pending_approval_ids(cfg)
+    info["operator_approval_public_key_pinned"] = bool(cfg.get("operator_approval_public_key_sha256"))
     info["wake_lease"] = _WAKE_LEASE.snapshot() if _WAKE_LEASE is not None else {
         "enabled": bool(cfg.get("wake_lease_enabled", True)), "state": "off", "reason": None,
         "grace_seconds": float(cfg.get("wake_grace_seconds", DEFAULT_WAKE_GRACE_SECONDS)),

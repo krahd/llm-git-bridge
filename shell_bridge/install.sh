@@ -231,6 +231,8 @@ cfg.update({
  'operator_confirmation_mode':cfg.get('operator_confirmation_mode','auto'),
  'operator_confirmation_timeout_seconds':cfg.get('operator_confirmation_timeout_seconds',300),
  'operator_approval_app':approval_app,
+ 'operator_approval_public_key':state+'/approvals/approver-public-key.pem',
+ 'operator_approval_public_key_sha256':cfg.get('operator_approval_public_key_sha256',''),
  'wake_lease_enabled':cfg.get('wake_lease_enabled',True),
  'wake_grace_seconds':cfg.get('wake_grace_seconds',3600.0),
 })
@@ -254,7 +256,7 @@ with open(path,'wb') as f: plistlib.dump(obj,f,fmt=plistlib.FMT_XML,sort_keys=Tr
 PYAPPPLIST
 APPROVAL_BUILD_DIR="$INSTALL_DIR/.approval-build"
 mkdir -p "$APPROVAL_BUILD_DIR/home" "$APPROVAL_BUILD_DIR/tmp" "$APPROVAL_BUILD_DIR/modules"
-HOME="$APPROVAL_BUILD_DIR/home" TMPDIR="$APPROVAL_BUILD_DIR/tmp" CLANG_MODULE_CACHE_PATH="$APPROVAL_BUILD_DIR/modules" SWIFT_MODULECACHE_PATH="$APPROVAL_BUILD_DIR/modules" "$SWIFTC_BIN" -sdk "$SWIFT_SDK" -O -framework AppKit -framework Foundation "$SCRIPT_DIR/approval_gui.swift" -o "$APP_BUNDLE/Contents/MacOS/local-executor-approval"
+HOME="$APPROVAL_BUILD_DIR/home" TMPDIR="$APPROVAL_BUILD_DIR/tmp" CLANG_MODULE_CACHE_PATH="$APPROVAL_BUILD_DIR/modules" SWIFT_MODULECACHE_PATH="$APPROVAL_BUILD_DIR/modules" "$SWIFTC_BIN" -sdk "$SWIFT_SDK" -O -framework AppKit -framework Foundation -framework LocalAuthentication -framework Security -framework CryptoKit "$SCRIPT_DIR/approval_gui.swift" -o "$APP_BUNDLE/Contents/MacOS/local-executor-approval"
 chmod 700 "$APP_BUNDLE/Contents/MacOS/local-executor-approval"
 APPROVAL_SELF_TEST_ROOT="$INSTALL_DIR" "$APP_BUNDLE/Contents/MacOS/local-executor-approval" --self-test
 python3 - "$APPROVAL_BUILD_DIR" <<'PYCLEANBUILD'
