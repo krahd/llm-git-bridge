@@ -65,6 +65,21 @@ class ShellBridgeInstallerPortabilityTests(unittest.TestCase):
         self.assertIn('exit 0', stage_block)
         self.assertNotIn('launchctl bootstrap', stage_block)
 
+    def test_native_approval_gui_is_compiled_as_persistent_menu_bar_app(self):
+        installer = (ROOT / "shell_bridge" / "install.sh").read_text()
+        bridge = (ROOT / "shell_bridge" / "bridge.py").read_text()
+        swift = (ROOT / "shell_bridge" / "approval_gui.swift").read_text()
+        self.assertIn("approval_gui.swift", installer)
+        self.assertIn("command -v swiftc", installer)
+        self.assertIn("local-executor-approval", installer)
+        self.assertIn("'LSUIElement':True", installer)
+        self.assertIn("'ApprovalRoot':approval_root", installer)
+        self.assertNotIn('"/usr/bin/open", "-n"', bridge)
+        self.assertIn("NSStatusBar.system.statusItem", swift)
+        self.assertIn("Approve once", swift)
+        self.assertIn("Reject", swift)
+        self.assertIn("payload_sha256", swift)
+
     def test_public_readme_documents_fresh_and_noninteractive_install(self):
         text = README.read_text()
         self.assertIn("## Fresh installation", text)

@@ -46,7 +46,7 @@ fail(){ echo "ERROR: $*" >&2; exit 1; }
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
 SOURCE_ROOT="$(cd "$SCRIPT_DIR/.." && pwd)"
 SOURCE_COMMIT="$(git -C "$SOURCE_ROOT" rev-parse HEAD)"
-SOURCE_PATHS=(shell_bridge/bridge.py shell_bridge/workspace.py shell_bridge/approval_helper.py shell_bridge/install.sh shell_bridge/cutover.sh)
+SOURCE_PATHS=(shell_bridge/bridge.py shell_bridge/workspace.py shell_bridge/approval_helper.py shell_bridge/approval_gui.swift shell_bridge/install.sh shell_bridge/cutover.sh)
 if [ -n "$(git -C "$SOURCE_ROOT" status --porcelain --untracked-files=no -- "${SOURCE_PATHS[@]}")" ]; then
   fail "bridge source files are dirty; commit and audit the exact source before staging"
 fi
@@ -239,18 +239,19 @@ PY
 chmod 600 "$CONFIG_DIR/config.json"
 
 RCLONE_BIN="$(command -v rclone)"; PYTHON_BIN="$(command -v python3)"
+SWIFTC_BIN="$(command -v swiftc)" || fail "swiftc is required to build the native approval menu-bar app"
 mkdir -p "$APP_BUNDLE/Contents/MacOS"
-python3 - "$APP_BUNDLE/Contents/Info.plist" <<'PYAPPPLIST'
+APPROVAL_ROOT="$STATE_DIR/approvals"
+python3 - "$APP_BUNDLE/Contents/Info.plist" "$APPROVAL_ROOT" <<'PYAPPPLIST'
 import plistlib,sys
-obj={'CFBundleIdentifier':'net.laurenzo.local-executor-approval','CFBundleName':'Local Executor Approval','CFBundleDisplayName':'Local Executor Approval','CFBundlePackageType':'APPL','CFBundleExecutable':'approval-helper','CFBundleVersion':'1','CFBundleShortVersionString':'1.0','LSUIElement':False,'NSHighResolutionCapable':True}
-with open(sys.argv[1],'wb') as f: plistlib.dump(obj,f,fmt=plistlib.FMT_XML,sort_keys=True)
+path,approval_root=sys.argv[1:]
+obj={'CFBundleIdentifier':'net.laurenzo.local-executor-approval','CFBundleName':'Local Executor Approval','CFBundleDisplayName':'Local Executor Approval','CFBundlePackageType':'APPL','CFBundleExecutable':'local-executor-approval','CFBundleVersion':'1','CFBundleShortVersionString':'1.0','LSUIElement':True,'NSHighResolutionCapable':True,'ApprovalRoot':approval_root}
+with open(path,'wb') as f: plistlib.dump(obj,f,fmt=plistlib.FMT_XML,sort_keys=True)
 PYAPPPLIST
-cat > "$APP_BUNDLE/Contents/MacOS/approval-helper" <<EOFAPP
-#!/bin/sh
-exec "$PYTHON_BIN" "$INSTALL_DIR/approval_helper.py" "\$@"
-EOFAPP
-chmod 700 "$APP_BUNDLE/Contents/MacOS/approval-helper"
-
+"$SWIFTC_BIN" -O -framework AppKit -framework Foundation "$SCRIPT_DIR/approval_gui.swift" -o "$APP_BUNDLE/Contents/MacOS/local-executor-approval"
+chmod 700 "$APP_BUNDLE/Contents/MacOS/local-executor-approval"
+APPROVAL_SELF_TEST_ROOT="$INSTALL_DIR" "$APP_BUNDLE/Contents/MacOS/local-executor-approval" --self-test
+/usr/bin/codesign --force --sign - "$APP_BUNDLE" >/dev/null 2>&1 || fail "could not ad-hoc sign approval app"
 
 PATH_VALUE="$(dirname "$RCLONE_BIN"):$(dirname "$PYTHON_BIN"):/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin:/usr/sbin:/sbin"
 python3 - "$PLIST" "$LABEL" "$PYTHON_BIN" "$INSTALL_DIR/bridge.py" "$CONFIG_DIR/config.json" "$PATH_VALUE" "$STATE_DIR" "$HOME" <<'PY'
@@ -263,7 +264,7 @@ with open(plist,'wb') as f: plistlib.dump(obj,f,fmt=plistlib.FMT_XML,sort_keys=T
 PY
 chmod 600 "$PLIST"
 
-python3 - "$INSTALL_DIR/install-manifest.json" "$CONFIG_DIR/config.json" "$PLIST" "$APP_BUNDLE/Contents/Info.plist" "$APP_BUNDLE/Contents/MacOS/approval-helper" <<'PYGENERATED'
+python3 - "$INSTALL_DIR/install-manifest.json" "$CONFIG_DIR/config.json" "$PLIST" "$APP_BUNDLE/Contents/Info.plist" "$APP_BUNDLE/Contents/MacOS/local-executor-approval" <<'PYGENERATED'
 import hashlib,json,os,sys,tempfile
 manifest_path,config_path,plist_path,app_info_path,app_exec_path=sys.argv[1:]
 def sha256(path):

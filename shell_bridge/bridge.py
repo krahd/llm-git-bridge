@@ -477,7 +477,7 @@ def _launch_operator_approval_helper(app_path: Path, pending_path: Path, decisio
         return False, f"operator approval helper is not installed: {app_path}"
     try:
         cp = subprocess.run(
-            ["/usr/bin/open", "-n", str(app_path), "--args", str(pending_path), str(decision_path)],
+            ["/usr/bin/open", str(app_path)],
             stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True, timeout=10, check=False,
         )
     except (FileNotFoundError, subprocess.TimeoutExpired) as exc:
