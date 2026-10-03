@@ -14,5 +14,22 @@ class CutoverIdentityTests(unittest.TestCase):
         self.assertNotIn("MAC_EXECUTOR_BRIDGE_CUTOVER=1", text)
 
 
+    def test_cutover_is_transactional_and_out_of_band(self):
+        text = (pathlib.Path(__file__).parents[1] / "cutover.sh").read_text()
+        self.assertIn("cutover must be run out-of-band", text)
+        self.assertIn("active_requests", text)
+        self.assertIn("production request mailbox is not empty", text)
+        self.assertIn("LOCAL_EXECUTOR_BRIDGE_OK", text)
+        self.assertIn("Cutover failed before commit; restoring", text)
+        self.assertIn("ln -sfn", text)
+        smoke = text.index("LOCAL_EXECUTOR_BRIDGE_OK")
+        compat = text.index("ln -sfn")
+        self.assertGreater(compat, smoke)
+
+    def test_cutover_preserves_legacy_workspace_state_on_upgrade(self):
+        text = (pathlib.Path(__file__).parents[1] / "cutover.sh").read_text()
+        self.assertIn("LEGACY_STATE_DIR", text)
+        self.assertIn("stage v6 with STATE_DIR=", text)
+
 if __name__ == "__main__":
     unittest.main()

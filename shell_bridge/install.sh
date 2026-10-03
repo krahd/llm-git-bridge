@@ -251,6 +251,23 @@ if [ "$STAGE_ONLY" -eq 1 ]; then
   exit 0
 fi
 
+# Never start v6 beside an active v5 daemon when both point at the same mailbox.
+# Same-mailbox upgrades must be staged, then switched out-of-band with cutover.sh.
+LEGACY_SHELL_CONFIG="$HOME/.config/chatgpt-shell-bridge/config.json"
+if [ -f "$LEGACY_SHELL_CONFIG" ] && launchctl print "gui/${UID_NOW}/${OLD_LABEL_1}" >/dev/null 2>&1; then
+  LEGACY_ROOT_ID="$(python3 - "$LEGACY_SHELL_CONFIG" <<'PYLEGACY'
+import json,sys
+try: c=json.load(open(sys.argv[1],encoding='utf-8'))
+except Exception: c={}
+v=c.get('drive_root_folder_id','')
+print(v if isinstance(v,str) else '')
+PYLEGACY
+)"
+  if [ -n "$LEGACY_ROOT_ID" ] && [ "$LEGACY_ROOT_ID" = "$ROOT_ID" ]; then
+    fail "active v5 uses this same mailbox; run install.sh --stage-only, then run cutover.sh out-of-band"
+  fi
+fi
+
 # v6 never retires the old service before the new service passes its smoke test.
 launchctl bootout "gui/${UID_NOW}" "$PLIST" >/dev/null 2>&1 || true
 launchctl bootstrap "gui/${UID_NOW}" "$PLIST"

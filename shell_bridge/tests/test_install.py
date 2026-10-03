@@ -43,5 +43,11 @@ class InstallScriptTests(unittest.TestCase):
         self.assertIn("LOCAL_EXECUTOR_BRIDGE_STATE_DIR", self.text)
         self.assertIn("CHATGPT_SHELL_BRIDGE_STATE_DIR", self.text)
 
+    def test_same_mailbox_upgrade_requires_staged_cutover(self):
+        self.assertIn("LEGACY_SHELL_CONFIG", self.text)
+        self.assertIn("active v5 uses this same mailbox", self.text)
+        self.assertIn("install.sh --stage-only", self.text)
+        self.assertIn("cutover.sh out-of-band", self.text)
+
 if __name__ == "__main__":
     unittest.main()

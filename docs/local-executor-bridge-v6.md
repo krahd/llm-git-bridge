@@ -62,3 +62,19 @@ Conversation/provider persistence, WorkThreads, browser handoff, higher-level pl
 ## Production migration invariant
 
 The v6 production cutover must not orphan durable workspace jobs. A fresh install uses the v6 state tree, but an upgrade from v5 stages the v6 LaunchAgent with the existing production state directory (`~/.local/state/chatgpt-shell-bridge`) and propagates that directory through `LOCAL_EXECUTOR_BRIDGE_STATE_DIR`. The v6 daemon trusts only the `workspace.py` shipped beside its own `bridge.py`; after a successful production smoke, a compatibility link at the historical coordinator path may point to that bundled coordinator for older clients. No stale v5 coordinator remains authoritative.
+
+## In-place v5 to v6 production cutover
+
+An upgrade that keeps the existing production mailbox must never start v5 and v6 against that mailbox at the same time. Stage v6 first, preserving the v5 durable workspace state, then perform the bounded service switch out-of-band (for example, from Terminal):
+
+```bash
+RCLONE_REMOTE=chatgpt-git-bridge: \
+BASE_PATH="ChatGPT Shell Bridge" \
+STATE_DIR="$HOME/.local/state/chatgpt-shell-bridge" \
+ALLOWED_ROOT=/Users/tom/tom-repos \
+bash shell_bridge/install.sh --stage-only
+
+bash shell_bridge/cutover.sh
+```
+
+`cutover.sh` refuses to run as a request through the bridge it is replacing. It requires the production mailbox to be quiescent, stops the old consumers before starting v6, runs `doctor` and an end-to-end harmless production request, rolls the old active service(s) back if qualification fails, and only after success archives old LaunchAgents and points the historical coordinator path at the bundled v6 `workspace.py`.
