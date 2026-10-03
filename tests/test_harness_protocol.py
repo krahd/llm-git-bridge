@@ -17,7 +17,8 @@ from llm_git_bridge.harness.sqlite_store import SQLiteHarnessStore
 
 class ProtocolTests(unittest.TestCase):
     def setUp(self):
-        self.tmp = tempfile.TemporaryDirectory()
+        repo_root = Path(__file__).resolve().parents[1]
+        self.tmp = tempfile.TemporaryDirectory(prefix=".harness-test-", dir=repo_root)
         self.root = Path(self.tmp.name)
         self.store = SQLiteHarnessStore(self.root / "harness.sqlite3")
         self.protocol = LocalProtocol(HarnessService(self.store))
@@ -160,20 +161,21 @@ class ProtocolTests(unittest.TestCase):
         self.assertFalse(path.exists())
 
     def test_stale_unix_socket_is_reclaimed(self):
-        path = self.root / "stale" / "harness.sock"
-        path.parent.mkdir(parents=True)
-        stale = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
-        stale.bind(str(path))
-        stale.close()
-        self.assertTrue(path.exists())
-
-        server = HarnessUnixServer(path, self.protocol)
-        try:
+        repo_root = Path(__file__).resolve().parents[1]
+        with tempfile.TemporaryDirectory(prefix=".harness-sock-", dir=repo_root) as tmp:
+            path = Path(tmp) / "harness.sock"
+            stale = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
+            stale.bind(str(path))
+            stale.close()
             self.assertTrue(path.exists())
-            self.assertEqual(stat.S_IMODE(path.stat().st_mode), 0o600)
-        finally:
-            server.server_close()
-        self.assertFalse(path.exists())
+
+            server = HarnessUnixServer(path, self.protocol)
+            try:
+                self.assertTrue(path.exists())
+                self.assertEqual(stat.S_IMODE(path.stat().st_mode), 0o600)
+            finally:
+                server.server_close()
+            self.assertFalse(path.exists())
 
     def test_live_unix_socket_is_preserved(self):
         path = self.root / "live" / "harness.sock"

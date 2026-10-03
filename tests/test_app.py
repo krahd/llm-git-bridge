@@ -4029,18 +4029,22 @@ class TransportTests(unittest.TestCase):
         args = parser.parse_args([
             "configure-concurrency", "--workers", "2", "--max-pending-jobs", "8"
         ])
-        with patch("builtins.print"):
-            self.assertEqual(app.cmd_configure_concurrency(args), 0)
-        cfg = app.load_config()
+        with tempfile.TemporaryDirectory(prefix="llmgb-config-") as tmp:
+            with patch.object(app, "CONFIG_FILE", Path(tmp) / "config.json"):
+                with patch("builtins.print"):
+                    self.assertEqual(app.cmd_configure_concurrency(args), 0)
+                cfg = app.load_config()
         self.assertEqual(cfg["max_workers"], 2)
         self.assertEqual(cfg["max_pending_jobs"], 8)
 
     def test_configure_discovery_cli_persists_validated_interval(self):
         parser = app.build_parser()
         args = parser.parse_args(["configure-discovery", "--interval", "45"])
-        with patch("builtins.print"):
-            self.assertEqual(app.cmd_configure_discovery(args), 0)
-        cfg = app.load_config()
+        with tempfile.TemporaryDirectory(prefix="llmgb-config-") as tmp:
+            with patch.object(app, "CONFIG_FILE", Path(tmp) / "config.json"):
+                with patch("builtins.print"):
+                    self.assertEqual(app.cmd_configure_discovery(args), 0)
+                cfg = app.load_config()
         self.assertEqual(cfg["registry_scan_interval"], 45.0)
 
     def test_registry_scan_interval_is_bounded_and_validated(self):
