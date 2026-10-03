@@ -33,8 +33,10 @@ rollback() {
       if [ -n "$ROLLBACK_FILE" ] && [ -f "$ROLLBACK_FILE" ]; then
         while IFS='|' read -r label plist; do
           [ -n "$label" ] || continue
-          launchctl bootstrap "gui/${UID_NOW}" "$plist" >/dev/null 2>&1 || true
-          launchctl kickstart -k "gui/${UID_NOW}/${label}" >/dev/null 2>&1 || true
+          if ! launchctl print "gui/${UID_NOW}/${label}" >/dev/null 2>&1; then
+            launchctl bootstrap "gui/${UID_NOW}" "$plist" >/dev/null 2>&1 || true
+            launchctl kickstart -k "gui/${UID_NOW}/${label}" >/dev/null 2>&1 || true
+          fi
         done < "$ROLLBACK_FILE"
       fi
     fi
@@ -56,9 +58,9 @@ need python3; need rclone; need launchctl
 [ -f "$NEW_INSTALL_DIR/approval_helper.py" ] || fail "staged v6 approval helper missing: $NEW_INSTALL_DIR/approval_helper.py"
 [ -f "$NEW_INSTALL_DIR/install-manifest.json" ] || fail "staged v6 install manifest missing: $NEW_INSTALL_DIR/install-manifest.json"
 
-python3 - "$NEW_INSTALL_DIR/install-manifest.json" "$NEW_INSTALL_DIR/bridge.py" "$NEW_INSTALL_DIR/workspace.py" "$NEW_INSTALL_DIR/approval_helper.py" <<'PYMANIFEST' || fail "staged v6 install manifest integrity check failed"
+python3 - "$NEW_INSTALL_DIR/install-manifest.json" "$NEW_INSTALL_DIR/bridge.py" "$NEW_INSTALL_DIR/workspace.py" "$NEW_INSTALL_DIR/approval_helper.py" "$NEW_CONFIG" "$NEW_PLIST" "$NEW_INSTALL_DIR/Local Executor Approval.app/Contents/Info.plist" "$NEW_INSTALL_DIR/Local Executor Approval.app/Contents/MacOS/approval-helper" <<'PYMANIFEST' || fail "staged v6 install manifest integrity check failed"
 import hashlib,json,sys
-manifest_path,bridge_path,workspace_path,approval_helper_path=sys.argv[1:]
+manifest_path,bridge_path,workspace_path,approval_helper_path,config_path,plist_path,app_info_path,app_exec_path=sys.argv[1:]
 def sha256(path):
     with open(path,'rb') as f: return hashlib.sha256(f.read()).hexdigest()
 try:
@@ -72,10 +74,24 @@ expected={
     'bridge_sha256':sha256(bridge_path),
     'workspace_sha256':sha256(workspace_path),
     'approval_helper_sha256':sha256(approval_helper_path),
+    'config_sha256':sha256(config_path),
+    'launchagent_plist_sha256':sha256(plist_path),
+    'approval_app_info_sha256':sha256(app_info_path),
+    'approval_app_executable_sha256':sha256(app_exec_path),
 }
 for key,value in expected.items():
     if m.get(key) != value: raise SystemExit(5)
 PYMANIFEST
+
+STAGED_SOURCE_COMMIT="$(python3 - "$NEW_INSTALL_DIR/install-manifest.json" <<'PYSOURCE'
+import json,sys
+m=json.load(open(sys.argv[1],encoding='utf-8'))
+print(m.get('source_commit',''))
+PYSOURCE
+)"
+if [ -n "${EXPECTED_SOURCE_COMMIT:-}" ] && [ "$STAGED_SOURCE_COMMIT" != "$EXPECTED_SOURCE_COMMIT" ]; then
+  fail "staged source commit $STAGED_SOURCE_COMMIT does not match EXPECTED_SOURCE_COMMIT=$EXPECTED_SOURCE_COMMIT"
+fi
 
 # This script is intentionally out-of-band. Running it as a request through the
 # bridge being replaced would make that request itself an active consumer while
@@ -157,6 +173,7 @@ done
 for label in "${OLD_LABELS[@]}"; do
   if launchctl print "gui/${UID_NOW}/${label}" >/dev/null 2>&1; then
     launchctl bootout "gui/${UID_NOW}/${label}" || fail "failed to stop legacy service: $label"
+    OLD_CONSUMERS_STOPPED=1
   fi
 done
 for label in "${OLD_LABELS[@]}"; do
@@ -164,7 +181,13 @@ for label in "${OLD_LABELS[@]}"; do
     fail "legacy service is still loaded after bootout: $label"
   fi
 done
-OLD_CONSUMERS_STOPPED=1
+
+# Close the drain race: after legacy consumers are stopped, refuse to attach v6
+# if a request arrived while the stop sequence was in progress. Rollback will
+# restore any legacy consumers that were actually stopped.
+PENDING_AFTER_STOP="$("${R[@]}" lsf "${REMOTE}requests" --files-only 2>/dev/null | sed '/^[[:space:]]*$/d' | head -n 1 || true)"
+[ -z "$PENDING_AFTER_STOP" ] || fail "a request arrived during cutover drain; restoring legacy consumers before retry"
+
 launchctl bootstrap "gui/${UID_NOW}" "$NEW_PLIST"
 STARTED_NEW=1
 launchctl kickstart -k "gui/${UID_NOW}/${NEW_LABEL}"

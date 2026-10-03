@@ -42,6 +42,14 @@ need python3; need rclone; need git; need launchctl
 [ -x "$SHELL_BIN" ] || { echo "ERROR: shell is not executable: $SHELL_BIN" >&2; exit 1; }
 
 fail(){ echo "ERROR: $*" >&2; exit 1; }
+
+SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
+SOURCE_ROOT="$(cd "$SCRIPT_DIR/.." && pwd)"
+SOURCE_COMMIT="$(git -C "$SOURCE_ROOT" rev-parse HEAD)"
+SOURCE_PATHS=(shell_bridge/bridge.py shell_bridge/workspace.py shell_bridge/approval_helper.py shell_bridge/install.sh shell_bridge/cutover.sh)
+if [ -n "$(git -C "$SOURCE_ROOT" status --porcelain --untracked-files=no -- "${SOURCE_PATHS[@]}")" ]; then
+  fail "bridge source files are dirty; commit and audit the exact source before staging"
+fi
 normalize_remote(){ case "$1" in *:) printf '%s\n' "$1";; *) printf '%s:\n' "$1";; esac; }
 marker_for(){ rclone cat "$1$2/bridge-instance.json" 2>/dev/null || true; }
 valid_marker(){ python3 - "$1" <<'PY'
@@ -180,13 +188,6 @@ echo "Using verified Drive remote: $REMOTE"
 echo "Pinned Drive root ID: $ROOT_ID"
 mkdir -p "$INSTALL_DIR" "$CONFIG_DIR" "$STATE_DIR" "$HOME/Library/LaunchAgents"
 chmod 700 "$INSTALL_DIR" "$CONFIG_DIR" "$STATE_DIR"
-SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
-SOURCE_ROOT="$(cd "$SCRIPT_DIR/.." && pwd)"
-SOURCE_COMMIT="$(git -C "$SOURCE_ROOT" rev-parse HEAD)"
-SOURCE_PATHS=(shell_bridge/bridge.py shell_bridge/workspace.py shell_bridge/approval_helper.py shell_bridge/install.sh shell_bridge/cutover.sh)
-if [ -n "$(git -C "$SOURCE_ROOT" status --porcelain --untracked-files=no -- "${SOURCE_PATHS[@]}")" ]; then
-  fail "bridge source files are dirty; commit and audit the exact source before staging"
-fi
 cp "$SCRIPT_DIR/bridge.py" "$INSTALL_DIR/bridge.py"
 cp "$SCRIPT_DIR/workspace.py" "$INSTALL_DIR/workspace.py"
 cp "$SCRIPT_DIR/approval_helper.py" "$INSTALL_DIR/approval_helper.py"
@@ -261,6 +262,29 @@ obj={'Label':label,'ProgramArguments':[python,bridge,'daemon','--config',config]
 with open(plist,'wb') as f: plistlib.dump(obj,f,fmt=plistlib.FMT_XML,sort_keys=True)
 PY
 chmod 600 "$PLIST"
+
+python3 - "$INSTALL_DIR/install-manifest.json" "$CONFIG_DIR/config.json" "$PLIST" "$APP_BUNDLE/Contents/Info.plist" "$APP_BUNDLE/Contents/MacOS/approval-helper" <<'PYGENERATED'
+import hashlib,json,os,sys,tempfile
+manifest_path,config_path,plist_path,app_info_path,app_exec_path=sys.argv[1:]
+def sha256(path):
+    with open(path,'rb') as f: return hashlib.sha256(f.read()).hexdigest()
+with open(manifest_path,encoding='utf-8') as f: manifest=json.load(f)
+manifest.update({
+    'config_sha256':sha256(config_path),
+    'launchagent_plist_sha256':sha256(plist_path),
+    'approval_app_info_sha256':sha256(app_info_path),
+    'approval_app_executable_sha256':sha256(app_exec_path),
+})
+parent=os.path.dirname(manifest_path)
+fd,tmp=tempfile.mkstemp(prefix='.install-manifest.',dir=parent)
+try:
+    with os.fdopen(fd,'w',encoding='utf-8') as f:
+        json.dump(manifest,f,indent=2,sort_keys=True); f.write('\n'); f.flush(); os.fsync(f.fileno())
+    os.chmod(tmp,0o600)
+    os.replace(tmp,manifest_path)
+finally:
+    if os.path.exists(tmp): os.unlink(tmp)
+PYGENERATED
 
 if [ "$STAGE_ONLY" -eq 1 ]; then
   echo "SHELL_BRIDGE_STAGED=1"

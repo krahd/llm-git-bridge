@@ -38,6 +38,24 @@ class CutoverIdentityTests(unittest.TestCase):
         self.assertIn('staged v6 approval app executable missing', text)
         self.assertLess(text.index('staged v6 approval app executable missing'), stop_old)
 
+    def test_cutover_binds_generated_artifacts_and_supports_source_commit_pin(self):
+        text = (pathlib.Path(__file__).parents[1] / "cutover.sh").read_text()
+        for key in ('config_sha256','launchagent_plist_sha256','approval_app_info_sha256','approval_app_executable_sha256'):
+            self.assertIn(key, text)
+        self.assertIn('EXPECTED_SOURCE_COMMIT', text)
+        self.assertIn('does not match EXPECTED_SOURCE_COMMIT', text)
+
+    def test_partial_legacy_stop_is_rollback_safe_and_drain_is_rechecked(self):
+        text = (pathlib.Path(__file__).parents[1] / "cutover.sh").read_text()
+        bootout = text.index('launchctl bootout "gui/${UID_NOW}/${label}" || fail')
+        stopped = text.index('OLD_CONSUMERS_STOPPED=1', bootout)
+        second_check = text.index('PENDING_AFTER_STOP=', stopped)
+        new_start = text.index('launchctl bootstrap "gui/${UID_NOW}" "$NEW_PLIST"', second_check)
+        self.assertLess(bootout, stopped)
+        self.assertLess(stopped, second_check)
+        self.assertLess(second_check, new_start)
+        self.assertIn('if ! launchctl print "gui/${UID_NOW}/${label}"', text)
+
     def test_cutover_preflight_is_side_effect_free_and_requires_fresh_health(self):
         text = (pathlib.Path(__file__).parents[1] / "cutover.sh").read_text()
         self.assertIn('STARTED_NEW=0', text)

@@ -26,6 +26,20 @@ class ShellBridgeInstallerPortabilityTests(unittest.TestCase):
 
 
 
+    def test_source_provenance_guard_precedes_mailbox_and_local_staging_side_effects(self):
+        text = (ROOT / "shell_bridge" / "install.sh").read_text()
+        guard = text.index('bridge source files are dirty; commit and audit the exact source before staging')
+        self.assertLess(guard, text.index('choose_allowed_root'))
+        self.assertLess(guard, text.index('choose_remote'))
+        self.assertLess(guard, text.index('ensure_mailbox'))
+        self.assertLess(guard, text.index('mkdir -p "$INSTALL_DIR"'))
+
+    def test_generated_security_artifacts_are_bound_into_manifest(self):
+        text = (ROOT / "shell_bridge" / "install.sh").read_text()
+        for key in ('config_sha256','launchagent_plist_sha256','approval_app_info_sha256','approval_app_executable_sha256'):
+            self.assertIn(key, text)
+        self.assertLess(text.index('approval_app_executable_sha256'), text.index('if [ "$STAGE_ONLY" -eq 1 ]; then'))
+
     def test_stage_only_refuses_dirty_runtime_source_provenance(self):
         text = (ROOT / "shell_bridge" / "install.sh").read_text()
         guard = 'status --porcelain --untracked-files=no -- "${SOURCE_PATHS[@]}"'
