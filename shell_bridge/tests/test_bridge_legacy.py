@@ -203,7 +203,11 @@ class ConfirmationTests(unittest.TestCase):
         self.assertEqual(argv[0:3], ["/usr/bin/osascript", "-l", "JavaScript"])
         self.assertIn("setActivationPolicy($.NSApplicationActivationPolicyRegular)", argv[4])
         self.assertIn("NSScrollView", argv[4])
-        self.assertIn("1080, 320", argv[4])
+        self.assertIn("840, 200", argv[4])
+        self.assertIn("ChatGPT is asking to cross a safety boundary", argv[4])
+        self.assertIn("Cancel is the safe default", argv[4])
+        self.assertIn("Technical details (exact request)", argv[4])
+        self.assertLess(argv[4].index('addButtonWithTitle("Cancel")'), argv[4].index('addButtonWithTitle("Allow")'))
         self.assertEqual(argv[-1], "Create the requested GitHub repository.")
 
     def test_binary_stdout_stderr_and_nonzero_exit(self):

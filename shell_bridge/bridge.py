@@ -462,27 +462,45 @@ function run(argv) {
     const app = $.NSApplication.sharedApplication;
     app.setActivationPolicy($.NSApplicationActivationPolicyRegular);
     const alert = $.NSAlert.alloc.init;
-    alert.setMessageText("Allow ChatGPT to perform this action?");
+    const riskDescriptions = {
+        system_write: "This request can write outside the current Git repository or change system-level state.",
+        non_repository_filesystem_mutation: "This request can modify files outside an existing Git repository.",
+        github_repository_control_plane_mutation: "This request can change GitHub repository settings or other control-plane state.",
+        github_content_mutation: "This request can change content or metadata on GitHub.",
+        mutating_network_request: "This request can send a network operation that changes remote state.",
+        remote_shell_or_copy: "This request can connect to another machine or copy files over the network.",
+        git_force_or_delete_push: "This request can rewrite or delete remote Git history.",
+        destructive_git_reset: "This request can discard local Git changes or commits.",
+        destructive_git_clean: "This request can delete untracked files.",
+        recursive_forced_delete: "This request can recursively delete files."
+    };
+    const riskDescription = riskDescriptions[categoryName] ||
+        ("Bridge-detected risk: " + categoryName.replace(/_/g, " ") + ".");
+
+    alert.setMessageText("ChatGPT is asking to cross a safety boundary");
     alert.setInformativeText(
-        "What ChatGPT is trying to do:\n" + explanationValue +
-        "\n\nWhy approval is required:\n" + categoryName.replace(/_/g, " ")
+        "Requested action:\n" + explanationValue +
+        "\n\nSafety reason:\n" + riskDescription +
+        "\n\nWorking directory:\n" + cwdValue +
+        "\n\nCancel is the safe default. Choose Allow only if this matches what you intended."
     );
     alert.setAlertStyle($.NSAlertStyleWarning);
     alert.addButtonWithTitle("Cancel");
     alert.addButtonWithTitle("Allow");
 
     const detailText =
+        "Technical details (exact request)\n\n" +
         "Request: " + requestId +
-        "\nWorking directory: " + cwdValue +
-        "\n\nCommand:\n" + commandValue;
+        "\nRisk category: " + categoryName +
+        "\n\nExact command:\n" + commandValue;
 
-    const textView = $.NSTextView.alloc.initWithFrame($.NSMakeRect(0, 0, 1060, 300));
+    const textView = $.NSTextView.alloc.initWithFrame($.NSMakeRect(0, 0, 820, 180));
     textView.setString(detailText);
     textView.setEditable(false);
     textView.setSelectable(true);
     textView.setFont($.NSFont.monospacedSystemFontOfSizeWeight(12, $.NSFontWeightRegular));
 
-    const scrollView = $.NSScrollView.alloc.initWithFrame($.NSMakeRect(0, 0, 1080, 320));
+    const scrollView = $.NSScrollView.alloc.initWithFrame($.NSMakeRect(0, 0, 840, 200));
     scrollView.setDocumentView(textView);
     scrollView.setHasVerticalScroller(true);
     scrollView.setHasHorizontalScroller(true);
