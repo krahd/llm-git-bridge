@@ -754,10 +754,20 @@ def _terminate_process_group(p: subprocess.Popen) -> None:
     _terminate_pgid(p.pid)
 
 
-def child_environment(request_id: str | None = None, *, sandboxed: bool = False) -> dict:
+def child_environment(request_id: str | None = None, *, sandboxed: bool = False,
+                      caller_bridge_instance_id: str | None = None,
+                      caller_drive_root_folder_id: str | None = None,
+                      caller_state_dir: str | None = None) -> dict:
     env = os.environ.copy()
     if request_id:
         env["CHATGPT_SHELL_BRIDGE_REQUEST_ID"] = request_id
+    for key, value in [
+        ("LOCAL_EXECUTOR_CALLER_BRIDGE_INSTANCE_ID", caller_bridge_instance_id),
+        ("LOCAL_EXECUTOR_CALLER_DRIVE_ROOT_FOLDER_ID", caller_drive_root_folder_id),
+        ("LOCAL_EXECUTOR_CALLER_STATE_DIR", caller_state_dir),
+    ]:
+        if isinstance(value, str) and value:
+            env[key] = value
     if sandboxed:
         env["GIT_OPTIONAL_LOCKS"] = "0"
         env["PYTHONDONTWRITEBYTECODE"] = "1"
@@ -779,6 +789,9 @@ def child_environment(request_id: str | None = None, *, sandboxed: bool = False)
 def run_shell(cwd: Path, command: str, stdin: bytes, timeout: int, shell: str = DEFAULT_SHELL,
               max_output_bytes: int = DEFAULT_MAX_OUTPUT_BYTES,
               request_id: str | None = None,
+              caller_bridge_instance_id: str | None = None,
+              caller_drive_root_folder_id: str | None = None,
+              caller_state_dir: str | None = None,
               on_spawn=None,
               sandbox_write_roots: list[Path] | None = None,
               sandbox_allow_network: bool = True,
@@ -793,7 +806,12 @@ def run_shell(cwd: Path, command: str, stdin: bytes, timeout: int, shell: str = 
     sandboxed = sandbox_write_roots is not None
     sandbox_temp: Path | None = None
     argv = [str(shell_path), "-lc", command]
-    env = child_environment(request_id, sandboxed=sandboxed)
+    env = child_environment(
+        request_id, sandboxed=sandboxed,
+        caller_bridge_instance_id=caller_bridge_instance_id,
+        caller_drive_root_folder_id=caller_drive_root_folder_id,
+        caller_state_dir=caller_state_dir,
+    )
     if sandboxed:
         if sys.platform != "darwin" or not SANDBOX_EXEC.is_file() or not os.access(SANDBOX_EXEC, os.X_OK):
             raise ValueError("execution sandbox is unavailable; refusing non-system shell execution")
@@ -1242,7 +1260,11 @@ def process_one(name: str, cfg: dict) -> None:
         exec_result = run_shell(
             v["cwd"], v["command"], v["stdin"], v["timeout"],
             cfg.get("shell", DEFAULT_SHELL), max_output_bytes,
-            request_id=v["id"], on_spawn=on_spawn,
+            request_id=v["id"],
+            caller_bridge_instance_id=cfg.get("bridge_instance_id"),
+            caller_drive_root_folder_id=cfg.get("drive_root_folder_id"),
+            caller_state_dir=cfg.get("state_dir"),
+            on_spawn=on_spawn,
             sandbox_write_roots=write_plan["write_roots"],
             sandbox_allow_network=write_plan.get("allow_network", True),
             sandbox_read_roots=write_plan.get("read_roots"),

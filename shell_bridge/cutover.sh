@@ -89,29 +89,32 @@ m=json.load(open(sys.argv[1],encoding='utf-8'))
 print(m.get('source_commit',''))
 PYSOURCE
 )"
-if [ -n "${EXPECTED_SOURCE_COMMIT:-}" ] && [ "$STAGED_SOURCE_COMMIT" != "$EXPECTED_SOURCE_COMMIT" ]; then
-  fail "staged source commit $STAGED_SOURCE_COMMIT does not match EXPECTED_SOURCE_COMMIT=$EXPECTED_SOURCE_COMMIT"
-fi
+[ -n "${EXPECTED_SOURCE_COMMIT:-}" ] || fail "EXPECTED_SOURCE_COMMIT is required for production cutover"
+[ "$STAGED_SOURCE_COMMIT" = "$EXPECTED_SOURCE_COMMIT" ] || fail "staged source commit $STAGED_SOURCE_COMMIT does not match EXPECTED_SOURCE_COMMIT=$EXPECTED_SOURCE_COMMIT"
 
-# This script is intentionally out-of-band. Running it as a request through the
-# bridge being replaced would make that request itself an active consumer while
-# launchctl tears down its parent daemon.
+IFS=$'\t' read -r REMOTE ROOT_ID ALLOWED_ROOT STATE_DIR TARGET_INSTANCE < <(python3 - "$NEW_CONFIG" <<'PYCFG'
+import json,sys
+c=json.load(open(sys.argv[1],encoding='utf-8'))
+vals=[c.get('remote',''),c.get('drive_root_folder_id',''),c.get('allowed_root',''),c.get('state_dir',''),c.get('bridge_instance_id','')]
+if not all(isinstance(x,str) and x for x in vals): raise SystemExit(2)
+print('\t'.join(vals))
+PYCFG
+ ) || fail "staged v6 config is incomplete"
+
+# A bridge request may control cutover only when it comes from a proven different
+# mailbox/instance/state directory. A true out-of-band process has no request ID.
 if [ -n "${CHATGPT_SHELL_BRIDGE_REQUEST_ID:-}" ]; then
-  fail "cutover must be run out-of-band (for example from Terminal), not through the live bridge"
+  [ -n "${LOCAL_EXECUTOR_CALLER_BRIDGE_INSTANCE_ID:-}" ] || fail "bridge-controlled cutover is missing caller bridge instance identity"
+  [ -n "${LOCAL_EXECUTOR_CALLER_DRIVE_ROOT_FOLDER_ID:-}" ] || fail "bridge-controlled cutover is missing caller Drive root identity"
+  [ -n "${LOCAL_EXECUTOR_CALLER_STATE_DIR:-}" ] || fail "bridge-controlled cutover is missing caller state directory identity"
+  [ "$LOCAL_EXECUTOR_CALLER_DRIVE_ROOT_FOLDER_ID" != "$ROOT_ID" ] || fail "cutover controller is attached to the target production mailbox"
+  [ "$LOCAL_EXECUTOR_CALLER_BRIDGE_INSTANCE_ID" != "$TARGET_INSTANCE" ] || fail "cutover controller is the target production bridge instance"
+  [ "$LOCAL_EXECUTOR_CALLER_STATE_DIR" != "$STATE_DIR" ] || fail "cutover controller shares the target production state directory"
 fi
 
 if launchctl print "gui/${UID_NOW}/${NEW_LABEL}" >/dev/null 2>&1; then
   fail "v6 service is already loaded; reconcile the existing v6 service before cutover"
 fi
-
-IFS=$'\t' read -r REMOTE ROOT_ID ALLOWED_ROOT STATE_DIR < <(python3 - "$NEW_CONFIG" <<'PYCFG'
-import json,sys
-c=json.load(open(sys.argv[1],encoding='utf-8'))
-vals=[c.get('remote',''),c.get('drive_root_folder_id',''),c.get('allowed_root',''),c.get('state_dir','')]
-if not all(isinstance(x,str) and x for x in vals): raise SystemExit(2)
-print('\t'.join(vals))
-PYCFG
- ) || fail "staged v6 config is incomplete"
 
 EXPECTED_APPROVAL_APP="$NEW_INSTALL_DIR/Local Executor Approval.app"
 CONFIG_APPROVAL_APP="$(python3 - "$NEW_CONFIG" <<'PYAPP'
@@ -144,6 +147,12 @@ h=json.load(open(sys.argv[1],encoding='utf-8'))
 active=h.get('active_requests')
 if not isinstance(active,list): raise SystemExit('health.json has no active_requests list')
 if active: raise SystemExit('production bridge is not quiescent; active requests: '+', '.join(map(str,active)))
+pending=h.get('pending_approvals', [])
+if not isinstance(pending,list): raise SystemExit('health.json pending_approvals is invalid')
+if pending: raise SystemExit('production bridge has pending approvals: '+', '.join(map(str,pending)))
+state=h.get('state')
+if not isinstance(state,dict) or state.get('started_without_finished') != 0:
+    raise SystemExit('production bridge has STARTED-without-FINISHED work; refusing cutover')
 raw=h.get('updated_at')
 if not isinstance(raw,str) or not raw: raise SystemExit('health.json has no updated_at timestamp')
 try: ts=datetime.datetime.fromisoformat(raw.replace('Z','+00:00')).timestamp()
@@ -156,6 +165,13 @@ except Exception: stale=120.0
 max_age=max(180.0, stale + 60.0)
 if now-ts > max_age: raise SystemExit(f'production health.json is stale ({now-ts:.1f}s old); refusing cutover without fresh quiescence evidence')
 PYHEALTH
+
+if [ -d "$LEGACY_STATE_DIR/approvals/pending" ]; then
+  shopt -s nullglob
+  LEGACY_PENDING_APPROVALS=("$LEGACY_STATE_DIR/approvals/pending/"*.json)
+  shopt -u nullglob
+  [ "${#LEGACY_PENDING_APPROVALS[@]}" -eq 0 ] || fail "legacy production state has pending approval records; reconcile them before cutover"
+fi
 
 PENDING="$("${R[@]}" lsf "${REMOTE}requests" --files-only 2>/dev/null | sed '/^[[:space:]]*$/d' | head -n 1 || true)"
 [ -z "$PENDING" ] || fail "production request mailbox is not empty; finish or reconcile pending requests first"
@@ -222,9 +238,10 @@ r=json.load(open(sys.argv[1],encoding='utf-8'))
 if r.get('status')!='completed' or r.get('exit_code')!=0 or 'LOCAL_EXECUTOR_BRIDGE_OK' not in r.get('stdout_text',''):
     print(json.dumps(r,indent=2),file=sys.stderr); raise SystemExit('v6 production smoke failed')
 PYRESULT
+CUTOVER_COMMITTED=1
 "${R[@]}" deletefile "${REMOTE}results/${RID}.json" >/dev/null 2>&1 || true
 
-# Success boundary. Preserve compatibility for clients that still invoke the
+# Post-commit housekeeping. Preserve compatibility for clients that still invoke the
 # historical coordinator path, but make it resolve to the bundled v6 coordinator.
 archive_dir="$STATE_DIR/retired-v5-runtime"
 mkdir -p "$archive_dir" "$LEGACY_INSTALL_DIR"
@@ -244,7 +261,6 @@ for label in "${OLD_LABELS[@]}"; do
   fi
 done
 
-CUTOVER_COMMITTED=1
 trap - EXIT
 rm -f "$ROLLBACK_FILE" "$TMP_REQ" "$TMP_RESULT" "$TMP_HEALTH"
 printf 'LOCAL_EXECUTOR_BRIDGE_CUTOVER=1\n'
