@@ -144,6 +144,25 @@ final class ApprovalSigner {
     let b64 = der.base64EncodedString(options: [.lineLength64Characters, .endLineWithLineFeed])
     return Data(("-----BEGIN PUBLIC KEY-----\n" + b64 + "\n-----END PUBLIC KEY-----\n").utf8)
   }
+  func provision(context: LAContext) throws -> String {
+    let privateKey = try key(context: context)
+    let pemData = try pem(for: privateKey)
+    if FileManager.default.fileExists(atPath: publicKeyURL.path) {
+      let current = try Data(contentsOf: publicKeyURL)
+      guard current == pemData else {
+        throw NSError(
+          domain: "ApprovalGUI", code: 31,
+          userInfo: [NSLocalizedDescriptionKey: "Secure Enclave public key changed unexpectedly."])
+      }
+    } else {
+      let tmp = publicKeyURL.deletingLastPathComponent().appendingPathComponent(
+        ".approver-public-key.\(UUID().uuidString).tmp")
+      try pemData.write(to: tmp, options: .withoutOverwriting)
+      try FileManager.default.setAttributes([.posixPermissions: 0o600], ofItemAtPath: tmp.path)
+      try FileManager.default.moveItem(at: tmp, to: publicKeyURL)
+    }
+    return sha256Hex(pemData)
+  }
   func sign(_ req: ApprovalRequest, context: LAContext) throws -> (String, String) {
     let privateKey = try key(context: context)
     let pemData = try pem(for: privateKey)
@@ -471,6 +490,25 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
   @objc func quitApp() { NSApp.terminate(nil) }
 }
 
+func provisionKey() -> Int32 {
+  do {
+    guard let rawRoot = ProcessInfo.processInfo.environment["APPROVAL_PROVISION_ROOT"], !rawRoot.isEmpty else {
+      fputs("APPROVAL_PROVISION_ROOT is required\n", stderr)
+      return 23
+    }
+    let root = URL(fileURLWithPath: rawRoot, isDirectory: true)
+    try FileManager.default.createDirectory(at: root, withIntermediateDirectories: true)
+    let signer = ApprovalSigner(root: root)
+    let keyID = try signer.provision(context: LAContext())
+    guard validHex(keyID, count: 64) else { return 24 }
+    print(keyID)
+    return 0
+  } catch {
+    fputs("key provisioning failed: \(error)\n", stderr)
+    return 25
+  }
+}
+
 func selfTest() -> Int32 {
   do {
     let golden =
@@ -507,6 +545,7 @@ func selfTest() -> Int32 {
     return 22
   }
 }
+if CommandLine.arguments.contains("--provision-key") { exit(provisionKey()) }
 if CommandLine.arguments.contains("--self-test") { exit(selfTest()) }
 let app = NSApplication.shared
 let delegate = AppDelegate()

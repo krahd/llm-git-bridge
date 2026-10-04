@@ -259,6 +259,24 @@ mkdir -p "$APPROVAL_BUILD_DIR/home" "$APPROVAL_BUILD_DIR/tmp" "$APPROVAL_BUILD_D
 HOME="$APPROVAL_BUILD_DIR/home" TMPDIR="$APPROVAL_BUILD_DIR/tmp" CLANG_MODULE_CACHE_PATH="$APPROVAL_BUILD_DIR/modules" SWIFT_MODULECACHE_PATH="$APPROVAL_BUILD_DIR/modules" "$SWIFTC_BIN" -sdk "$SWIFT_SDK" -O -framework AppKit -framework Foundation -framework LocalAuthentication -framework Security -framework CryptoKit "$SCRIPT_DIR/approval_gui.swift" -o "$APP_BUNDLE/Contents/MacOS/local-executor-approval"
 chmod 700 "$APP_BUNDLE/Contents/MacOS/local-executor-approval"
 APPROVAL_SELF_TEST_ROOT="$INSTALL_DIR" "$APP_BUNDLE/Contents/MacOS/local-executor-approval" --self-test
+APPROVAL_KEY_SHA256="$(APPROVAL_PROVISION_ROOT="$APPROVAL_ROOT" "$APP_BUNDLE/Contents/MacOS/local-executor-approval" --provision-key)" || fail "could not provision approval signing key"
+[ "${#APPROVAL_KEY_SHA256}" -eq 64 ] || fail "approval signing key id is not a sha256 digest"
+case "$APPROVAL_KEY_SHA256" in *[!0-9a-f]*) fail "approval signing key id is not lowercase hex" ;; esac
+python3 - "$CONFIG_DIR/config.json" "$APPROVAL_KEY_SHA256" <<'PYKEYPIN'
+import json,os,sys,tempfile
+path,pin=sys.argv[1:]
+with open(path,encoding='utf-8') as f: cfg=json.load(f)
+cfg['operator_approval_public_key_sha256']=pin
+parent=os.path.dirname(path)
+fd,tmp=tempfile.mkstemp(prefix='.config.',dir=parent)
+try:
+    with os.fdopen(fd,'w',encoding='utf-8') as f:
+        json.dump(cfg,f,indent=2,sort_keys=True); f.write('\n'); f.flush(); os.fsync(f.fileno())
+    os.chmod(tmp,0o600)
+    os.replace(tmp,path)
+finally:
+    if os.path.exists(tmp): os.unlink(tmp)
+PYKEYPIN
 python3 - "$APPROVAL_BUILD_DIR" <<'PYCLEANBUILD'
 import shutil,sys
 shutil.rmtree(sys.argv[1], ignore_errors=True)
