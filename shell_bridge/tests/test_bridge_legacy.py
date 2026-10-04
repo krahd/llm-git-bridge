@@ -201,9 +201,20 @@ class ConfirmationTests(unittest.TestCase):
         self.assertTrue(result["approved"])
         argv = run.call_args.args[0]
         self.assertEqual(argv[0:3], ["/usr/bin/osascript", "-l", "JavaScript"])
-        self.assertIn("setActivationPolicy($.NSApplicationActivationPolicyRegular)", argv[4])
-        self.assertIn("NSScrollView", argv[4])
-        self.assertIn("1080, 320", argv[4])
+        script = argv[4]
+        self.assertIn("setActivationPolicy($.NSApplicationActivationPolicyRegular)", script)
+        self.assertIn("setLevel($.NSModalPanelWindowLevel)", script)
+        self.assertIn("setHidesOnDeactivate(false)", script)
+        self.assertIn("NSWindowCollectionBehaviorCanJoinAllSpaces", script)
+        self.assertIn("NSWindowCollectionBehaviorFullScreenAuxiliary", script)
+        self.assertIn("makeFirstResponder(textView)", script)
+        self.assertIn(r'cancelButton.setKeyEquivalent("\u001b")', script)
+        self.assertIn(r'allowButton.setKeyEquivalent("\r")', script)
+        self.assertIn("NSEventModifierFlagCommand", script)
+        self.assertNotIn(r'cancelButton.setKeyEquivalent("\r")', script)
+        self.assertIn("Technical details (exact request)", script)
+        self.assertIn("720, 170", script)
+        self.assertNotIn("1080, 320", script)
         self.assertEqual(argv[-1], "Create the requested GitHub repository.")
 
     def test_binary_stdout_stderr_and_nonzero_exit(self):

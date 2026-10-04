@@ -367,30 +367,53 @@ function run(argv) {
     const commandValue = argv[3];
     const explanationValue = argv[4];
 
+    const riskDescriptions = {
+        system_write: "This request can write outside the current Git repository or change system-level state.",
+        non_repository_filesystem_mutation: "This request can modify files outside an existing Git repository.",
+        github_repository_control_plane: "This request can change GitHub repository settings or other control-plane state.",
+        github_content_mutation: "This request can change content or metadata on GitHub.",
+        mutating_network_request: "This request can send a network operation that changes remote state.",
+        remote_shell_or_copy: "This request can connect to another machine or copy files over the network.",
+        git_force_or_delete_push: "This request can rewrite or delete remote Git history.",
+        destructive_git_reset: "This request can discard local Git changes or commits.",
+        destructive_git_clean: "This request can delete untracked files.",
+        recursive_forced_delete: "This request can recursively delete files."
+    };
+    const riskDescription = riskDescriptions[categoryName] ||
+        ("Bridge-detected risk: " + categoryName.replace(/_/g, " ") + ".");
+
     const app = $.NSApplication.sharedApplication;
     app.setActivationPolicy($.NSApplicationActivationPolicyRegular);
+
     const alert = $.NSAlert.alloc.init;
-    alert.setMessageText("Allow ChatGPT to perform this action?");
+    alert.setMessageText("ChatGPT is asking to cross a safety boundary");
     alert.setInformativeText(
-        "What ChatGPT is trying to do:\n" + explanationValue +
-        "\n\nWhy approval is required:\n" + categoryName.replace(/_/g, " ")
+        "Requested action:\n" + explanationValue +
+        "\n\nSafety reason:\n" + riskDescription +
+        "\n\nWorking directory:\n" + cwdValue +
+        "\n\nNo action is taken until you make a deliberate choice. Escape cancels; Command-Return allows."
     );
     alert.setAlertStyle($.NSAlertStyleWarning);
-    alert.addButtonWithTitle("Cancel");
-    alert.addButtonWithTitle("Allow");
+
+    const cancelButton = alert.addButtonWithTitle("Cancel");
+    const allowButton = alert.addButtonWithTitle("Allow");
+    cancelButton.setKeyEquivalent("\u001b");
+    allowButton.setKeyEquivalent("\r");
+    allowButton.setKeyEquivalentModifierMask($.NSEventModifierFlagCommand);
 
     const detailText =
+        "Technical details (exact request)\n\n" +
         "Request: " + requestId +
         "\nWorking directory: " + cwdValue +
         "\n\nCommand:\n" + commandValue;
 
-    const textView = $.NSTextView.alloc.initWithFrame($.NSMakeRect(0, 0, 1060, 300));
+    const textView = $.NSTextView.alloc.initWithFrame($.NSMakeRect(0, 0, 700, 150));
     textView.setString(detailText);
     textView.setEditable(false);
     textView.setSelectable(true);
-    textView.setFont($.NSFont.monospacedSystemFontOfSizeWeight(12, $.NSFontWeightRegular));
+    textView.setFont($.NSFont.monospacedSystemFontOfSizeWeight(11, $.NSFontWeightRegular));
 
-    const scrollView = $.NSScrollView.alloc.initWithFrame($.NSMakeRect(0, 0, 1080, 320));
+    const scrollView = $.NSScrollView.alloc.initWithFrame($.NSMakeRect(0, 0, 720, 170));
     scrollView.setDocumentView(textView);
     scrollView.setHasVerticalScroller(true);
     scrollView.setHasHorizontalScroller(true);
@@ -398,7 +421,19 @@ function run(argv) {
     scrollView.setBorderType($.NSBezelBorder);
     alert.setAccessoryView(scrollView);
 
+    const window = alert.window;
+    window.setLevel($.NSModalPanelWindowLevel);
+    window.setHidesOnDeactivate(false);
+    window.setCollectionBehavior(
+        $.NSWindowCollectionBehaviorCanJoinAllSpaces |
+        $.NSWindowCollectionBehaviorFullScreenAuxiliary
+    );
+    window.makeFirstResponder(textView);
+
     app.activateIgnoringOtherApps(true);
+    window.makeKeyAndOrderFront(null);
+    window.orderFrontRegardless;
+
     const response = alert.runModal;
     return response === $.NSAlertSecondButtonReturn ? "allow" : "cancel";
 }'''
@@ -420,7 +455,6 @@ function run(argv) {
         "approved": approved,
         "message": "operator approved elevated request" if approved else "operator declined elevated request; request was not started",
     }
-
 
 def _terminate_pgid(pgid: int) -> None:
     try:
