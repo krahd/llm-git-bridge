@@ -79,6 +79,13 @@ class ShellBridgeInstallerPortabilityTests(unittest.TestCase):
         self.assertIn("Approve once", swift)
         self.assertIn("Reject", swift)
         self.assertIn("payload_sha256", swift)
+        self.assertIn("NSApp.setActivationPolicy(.regular)", swift)
+        self.assertIn("restoreAccessoryPolicyIfIdle()", swift)
+        regular = swift.index("NSApp.setActivationPolicy(.regular)")
+        front = swift.index("c.window?.makeKeyAndOrderFront(nil)", regular)
+        activate = swift.index("NSApp.activate(ignoringOtherApps: true)", regular)
+        self.assertLess(regular, front)
+        self.assertLess(front, activate)
 
     def test_native_approval_gui_rejects_unsafe_ids_and_uses_direct_toolchain(self):
         installer = (ROOT / "shell_bridge" / "install.sh").read_text()

@@ -474,18 +474,25 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
       ?? ApprovalWindowController(store: store, request: r) { [weak self] in
         self?.windows.removeValue(forKey: r.request_id)
         self?.refresh(showNew: false)
+        self?.restoreAccessoryPolicyIfIdle()
       }
     c.window?.delegate = self
     windows[r.request_id] = c
+    NSApp.setActivationPolicy(.regular)
     c.showWindow(nil)
     c.window?.makeKeyAndOrderFront(nil)
     NSApp.activate(ignoringOtherApps: true)
+  }
+  func restoreAccessoryPolicyIfIdle() {
+    guard windows.isEmpty else { return }
+    NSApp.setActivationPolicy(.accessory)
   }
   func windowWillClose(_ notification: Notification) {
     guard let w = notification.object as? NSWindow,
       let p = windows.first(where: { $0.value.window === w })
     else { return }
     windows.removeValue(forKey: p.key)
+    restoreAccessoryPolicyIfIdle()
   }
   @objc func quitApp() { NSApp.terminate(nil) }
 }
