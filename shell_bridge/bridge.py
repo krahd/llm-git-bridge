@@ -482,11 +482,14 @@ function run(argv) {
         "Requested action:\n" + explanationValue +
         "\n\nSafety reason:\n" + riskDescription +
         "\n\nWorking directory:\n" + cwdValue +
-        "\n\nCancel is the safe default. Choose Allow only if this matches what you intended."
+        "\n\nNo action is taken until you make a deliberate choice. Escape cancels; Command-Return allows."
     );
     alert.setAlertStyle($.NSAlertStyleWarning);
-    alert.addButtonWithTitle("Cancel");
-    alert.addButtonWithTitle("Allow");
+    const cancelButton = alert.addButtonWithTitle("Cancel");
+    const allowButton = alert.addButtonWithTitle("Allow");
+    cancelButton.setKeyEquivalent("\u001b");
+    allowButton.setKeyEquivalent("\r");
+    allowButton.setKeyEquivalentModifierMask($.NSEventModifierFlagCommand);
 
     const detailText =
         "Technical details (exact request)\n\n" +
@@ -509,6 +512,7 @@ function run(argv) {
     alert.setAccessoryView(scrollView);
 
     app.activateIgnoringOtherApps(true);
+    alert.window.makeFirstResponder(textView);
     const response = alert.runModal;
     return response === $.NSAlertSecondButtonReturn ? "allow" : "cancel";
 }'''
