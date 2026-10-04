@@ -468,6 +468,13 @@ def _approval_record_path(root: Path, bucket: str, request_id: str) -> Path:
 def _approval_projection(*, request_id: str, bridge_instance_id: str, nonce: str, cwd: Path,
                          command: str, category: str, explanation: str, requested_write_scope: str,
                          effective_write_scope: dict) -> dict:
+    network_authority = bool(effective_write_scope.get("allow_network", False))
+    authority_summary = {
+        "requested_write_scope": requested_write_scope,
+        "effective_write_scope": effective_write_scope,
+        "network_authority": network_authority,
+    }
+    effect_summary = {"category": category, "cwd": str(cwd)}
     return {
         "schema": 1,
         "request_id": request_id,
@@ -479,6 +486,9 @@ def _approval_projection(*, request_id: str, bridge_instance_id: str, nonce: str
         "command": command,
         "requested_write_scope": requested_write_scope,
         "effective_write_scope": effective_write_scope,
+        "network_authority": network_authority,
+        "authority_summary": authority_summary,
+        "effect_summary": effect_summary,
     }
 
 
@@ -546,8 +556,12 @@ def _approval_signature_message(pending: dict) -> bytes:
 
 
 def _verify_approval_signature(decision: dict, pending: dict, cfg: dict) -> tuple[bool, str]:
+    if decision.get("client") != "mac_gui":
+        return False, "operator approval client is invalid; request was not started"
     if decision.get("decision") != "allow":
         return True, ""
+    if decision.get("signature_algorithm") != "ecdsa-p256-sha256":
+        return False, "operator approval signature algorithm is invalid; request was not started"
     public_key_path = cfg.get("operator_approval_public_key")
     pinned = cfg.get("operator_approval_public_key_sha256")
     if not isinstance(public_key_path, str) or not public_key_path or not isinstance(pinned, str) or not re.fullmatch(r"[0-9a-f]{64}", pinned):
@@ -561,7 +575,7 @@ def _verify_approval_signature(decision: dict, pending: dict, cfg: dict) -> tupl
     except OSError as exc:
         return False, f"operator approval public key unavailable: {exc}"
     actual = hashlib.sha256(key_bytes).hexdigest()
-    if not secrets.compare_digest(actual, pinned) or decision.get("signer_public_key_sha256") != pinned:
+    if not secrets.compare_digest(actual, pinned) or decision.get("signer_key_id") != pinned:
         return False, "operator approval signer does not match pinned public key; request was not started"
     signature_b64 = decision.get("signature_b64")
     if not isinstance(signature_b64, str) or not signature_b64:
@@ -681,7 +695,8 @@ def request_operator_confirmation(*, request_id: str, cwd: Path, command: str, c
         return {**record, "state": "pending", "message": "operator approval is pending", "expires_at": expires_at, "payload_sha256": pending["payload_sha256"]}
     if (decision.get("protocol") != 1 or decision.get("schema") != 1 or decision.get("kind") != "operator_approval_decision" or
         decision.get("request_id") != request_id or decision.get("bridge_instance_id") != instance or
-        decision.get("nonce") != pending.get("nonce") or decision.get("payload_sha256") != pending.get("payload_sha256")):
+        decision.get("nonce") != pending.get("nonce") or decision.get("payload_sha256") != pending.get("payload_sha256") or
+        decision.get("client") != "mac_gui" or not isinstance(decision.get("step_up"), dict)):
         return {**record, "message": "operator approval decision failed exact-request binding; request was not started"}
     decided_at = decision.get("decided_at")
     if not isinstance(decided_at, (int, float)) or decided_at > expires_at or time.time() > expires_at:

@@ -68,6 +68,28 @@ class BridgeV6SecurityTests(unittest.TestCase):
         b=dict(a); b['command']='two'
         self.assertNotEqual(bridge._approval_payload_hash(a),bridge._approval_payload_hash(b))
 
+    def test_approval_projection_golden_vector_and_authority_summary(self):
+        projection=bridge._approval_projection(
+            request_id='golden-req', bridge_instance_id='golden-instance', nonce='ab'*32,
+            cwd=Path('/tmp/repo'), command='printf ok', category='system_write',
+            explanation='Golden approval vector', requested_write_scope='system',
+            effective_write_scope={'allow_network':True,'effective':'system','requested':'system'},
+        )
+        self.assertTrue(projection['network_authority'])
+        self.assertEqual(projection['authority_summary']['requested_write_scope'],'system')
+        self.assertEqual(projection['effect_summary'],{'category':'system_write','cwd':'/tmp/repo'})
+        self.assertEqual(bridge._approval_payload_hash(projection),'9765cc265f2b6723127625d664f7f8849454a4f223a471e786d55ce2fd432506')
+
+    def test_allow_rejects_non_mac_gui_client_before_key_lookup(self):
+        ok,message=bridge._verify_approval_signature({'decision':'allow','client':'other','signature_algorithm':'ecdsa-p256-sha256'}, {}, {})
+        self.assertFalse(ok)
+        self.assertIn('client',message)
+
+    def test_allow_rejects_unapproved_signature_algorithm_before_key_lookup(self):
+        ok,message=bridge._verify_approval_signature({'decision':'allow','client':'mac_gui','signature_algorithm':'wrong'}, {}, {})
+        self.assertFalse(ok)
+        self.assertIn('signature algorithm',message)
+
     def test_system_scope_still_requires_confirmation(self):
         with tempfile.TemporaryDirectory() as td:
             root = Path(td)
