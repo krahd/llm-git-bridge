@@ -194,22 +194,29 @@ class ConfirmationTests(unittest.TestCase):
             state = Path(td) / "state"
             app_path = Path(td) / "Local Executor Approval.app"; app_path.mkdir()
             cfg = {"operator_confirmation_mode": "dialog", "operator_confirmation_timeout_seconds": 10,
-                   "state_dir": str(state), "operator_approval_app": str(app_path)}
-            def launch(app, pending, decision):
-                req = json.loads(pending.read_text())
-                b._atomic_json(decision, {"protocol":1,"kind":"operator_approval_decision",
-                    "request_id":req["request_id"],"nonce":req["nonce"],
-                    "payload_sha256":req["payload_sha256"],"decision":"allow","decided_at":time.time()})
-                return True, ""
-            with patch.object(b, "_launch_operator_approval_helper", side_effect=launch):
-                result = b.request_operator_confirmation(
-                    request_id="job", cwd=Path("/tmp"), command="gh repo create x/y",
-                    category="github_repository_control_plane", cfg=cfg,
-                    explanation="Create the requested GitHub repository.",
-                )
+                   "state_dir": str(state), "operator_approval_app": str(app_path),
+                   "bridge_instance_id": "test-instance"}
+            kwargs = dict(request_id="job", cwd=Path("/tmp"), command="gh repo create x/y",
+                          category="github_repository_control_plane", cfg=cfg,
+                          explanation="Create the requested GitHub repository.",
+                          requested_write_scope="system",
+                          effective_write_scope={"requested":"system","effective":"system","allow_network":True})
+            with patch.object(b, "_launch_operator_approval_helper", return_value=(True, "")):
+                first = b.request_operator_confirmation(**kwargs)
+            self.assertEqual(first["state"], "pending")
+            pending_path = state / "approvals/pending/job.json"
+            decision_path = state / "approvals/decisions/job.json"
+            req = json.loads(pending_path.read_text())
+            b._atomic_json(decision_path, {"protocol":1,"schema":1,"kind":"operator_approval_decision",
+                "request_id":req["request_id"],"bridge_instance_id":req["bridge_instance_id"],
+                "nonce":req["nonce"],"payload_sha256":req["payload_sha256"],"decision":"allow",
+                "decided_at":time.time(),"client":"mac_gui","signer_key_id":"test",
+                "signature_algorithm":"ecdsa-p256-sha256","signature_b64":"dGVzdA==","step_up":{}})
+            with patch.object(b, "_launch_operator_approval_helper", side_effect=AssertionError("must not relaunch")),                  patch.object(b, "_verify_approval_signature", return_value=(True, "")):
+                result = b.request_operator_confirmation(**kwargs)
             self.assertTrue(result["approved"])
-            pending=json.loads((state/"approvals/pending/job.json").read_text())
-            decision=json.loads((state/"approvals/decisions/job.json").read_text())
+            pending=json.loads(pending_path.read_text())
+            decision=json.loads(decision_path.read_text())
             self.assertEqual(pending["payload_sha256"], decision["payload_sha256"])
             self.assertEqual(pending["nonce"], decision["nonce"])
 
@@ -217,32 +224,45 @@ class ConfirmationTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as td:
             state=Path(td)/"state"; app_path=Path(td)/"Local Executor Approval.app"; app_path.mkdir()
             cfg={"operator_confirmation_mode":"dialog","operator_confirmation_timeout_seconds":10,
-                 "state_dir":str(state),"operator_approval_app":str(app_path)}
+                 "state_dir":str(state),"operator_approval_app":str(app_path),"bridge_instance_id":"test-instance"}
+            kwargs=dict(request_id="job",cwd=Path("/tmp"),command="ssh host true",category="remote_shell",
+                        cfg=cfg,explanation="Run a remote check.",requested_write_scope="system",
+                        effective_write_scope={"requested":"system","effective":"system","allow_network":True})
             calls=[]
-            def launch(app,pending,decision):
-                calls.append(1); req=json.loads(pending.read_text())
-                b._atomic_json(decision,{"protocol":1,"kind":"operator_approval_decision","request_id":"job",
-                  "nonce":req["nonce"],"payload_sha256":req["payload_sha256"],"decision":"allow","decided_at":time.time()})
-                return True,""
+            def launch(app):
+                calls.append(1); return True,""
             with patch.object(b,"_launch_operator_approval_helper",side_effect=launch):
-                first=b.request_operator_confirmation(request_id="job",cwd=Path("/tmp"),command="ssh host true",category="remote_shell",cfg=cfg,explanation="Run a remote check.")
-            with patch.object(b,"_launch_operator_approval_helper",side_effect=AssertionError("must not relaunch")):
-                second=b.request_operator_confirmation(request_id="job",cwd=Path("/tmp"),command="ssh host true",category="remote_shell",cfg=cfg,explanation="Run a remote check.")
-            self.assertTrue(first["approved"]); self.assertTrue(second["approved"]); self.assertEqual(len(calls),1)
+                first=b.request_operator_confirmation(**kwargs)
+            self.assertEqual(first["state"],"pending")
+            req=json.loads((state/"approvals/pending/job.json").read_text())
+            b._atomic_json(state/"approvals/decisions/job.json",{"protocol":1,"schema":1,"kind":"operator_approval_decision",
+                "request_id":"job","bridge_instance_id":req["bridge_instance_id"],"nonce":req["nonce"],
+                "payload_sha256":req["payload_sha256"],"decision":"allow","decided_at":time.time(),
+                "client":"mac_gui","signer_key_id":"test","signature_algorithm":"ecdsa-p256-sha256",
+                "signature_b64":"dGVzdA==","step_up":{}})
+            with patch.object(b,"_launch_operator_approval_helper",side_effect=AssertionError("must not relaunch")),                  patch.object(b,"_verify_approval_signature",return_value=(True,"")):
+                second=b.request_operator_confirmation(**kwargs)
+            self.assertTrue(second["approved"]); self.assertEqual(len(calls),1)
 
     def test_dialog_rejects_decision_bound_to_other_payload(self):
         with tempfile.TemporaryDirectory() as td:
             state=Path(td)/"state"; app_path=Path(td)/"Local Executor Approval.app"; app_path.mkdir()
             cfg={"operator_confirmation_mode":"dialog","operator_confirmation_timeout_seconds":10,
-                 "state_dir":str(state),"operator_approval_app":str(app_path)}
-            def launch(app,pending,decision):
-                req=json.loads(pending.read_text())
-                b._atomic_json(decision,{"protocol":1,"kind":"operator_approval_decision","request_id":"job",
-                  "nonce":req["nonce"],"payload_sha256":"0"*64,"decision":"allow","decided_at":time.time()})
-                return True,""
-            with patch.object(b,"_launch_operator_approval_helper",side_effect=launch):
-                result=b.request_operator_confirmation(request_id="job",cwd=Path("/tmp"),command="ssh host true",category="remote_shell",cfg=cfg,explanation="Run a remote check.")
-            self.assertFalse(result["approved"]); self.assertIn("failed request binding",result["message"])
+                 "state_dir":str(state),"operator_approval_app":str(app_path),"bridge_instance_id":"test-instance"}
+            kwargs=dict(request_id="job",cwd=Path("/tmp"),command="ssh host true",category="remote_shell",
+                        cfg=cfg,explanation="Run a remote check.",requested_write_scope="system",
+                        effective_write_scope={"requested":"system","effective":"system","allow_network":True})
+            with patch.object(b,"_launch_operator_approval_helper",return_value=(True,"")):
+                first=b.request_operator_confirmation(**kwargs)
+            self.assertEqual(first["state"],"pending")
+            req=json.loads((state/"approvals/pending/job.json").read_text())
+            b._atomic_json(state/"approvals/decisions/job.json",{"protocol":1,"schema":1,"kind":"operator_approval_decision",
+                "request_id":"job","bridge_instance_id":req["bridge_instance_id"],"nonce":req["nonce"],
+                "payload_sha256":"0"*64,"decision":"allow","decided_at":time.time(),"client":"mac_gui",
+                "signer_key_id":"test","signature_algorithm":"ecdsa-p256-sha256","signature_b64":"dGVzdA==","step_up":{}})
+            with patch.object(b,"_launch_operator_approval_helper",side_effect=AssertionError("must not relaunch")):
+                result=b.request_operator_confirmation(**kwargs)
+            self.assertFalse(result["approved"]); self.assertIn("failed exact-request binding",result["message"])
 
     def test_binary_stdout_stderr_and_nonzero_exit(self):
         with tempfile.TemporaryDirectory() as td:
