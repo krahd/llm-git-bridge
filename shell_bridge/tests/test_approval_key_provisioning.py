@@ -10,6 +10,10 @@ class ApprovalKeyProvisioningTests(unittest.TestCase):
         self.assertIn("APPROVAL_PROVISION_ROOT", src)
         self.assertIn('CommandLine.arguments.contains("--provision-key")', src)
         self.assertIn("return sha256Hex(pemData)", src)
+        self.assertIn("SecureEnclave.P256.Signing.PrivateKey", src)
+        self.assertIn("approver-private-key.sealed", src)
+        self.assertIn("dataRepresentation", src)
+        self.assertNotIn("SecKeyCreateRandomKey", src)
 
     def test_installer_provisions_and_pins_key_before_manifest(self):
         src = (ROOT / "shell_bridge" / "install.sh").read_text()

@@ -97,56 +97,59 @@ func sha256Hex(_ data: Data) -> String {
 }
 
 final class ApprovalSigner {
-  private let tag = "net.laurenzo.local-executor-approval.signing.v1".data(using: .utf8)!
+  private let privateKeyURL: URL
   let publicKeyURL: URL
-  init(root: URL) { publicKeyURL = root.appendingPathComponent("approver-public-key.pem") }
-  private func key(context: LAContext) throws -> SecKey {
-    let query: [String: Any] = [
-      kSecClass as String: kSecClassKey, kSecAttrApplicationTag as String: tag,
-      kSecAttrKeyType as String: kSecAttrKeyTypeECSECPrimeRandom, kSecReturnRef as String: true,
-      kSecUseAuthenticationContext as String: context,
-    ]
-    var item: CFTypeRef?
-    let status = SecItemCopyMatching(query as CFDictionary, &item)
-    if status == errSecSuccess, let key = item as! SecKey? { return key }
-    if status != errSecItemNotFound {
-      throw NSError(domain: NSOSStatusErrorDomain, code: Int(status))
-    }
-    var err: Unmanaged<CFError>?
-    guard
-      let ac = SecAccessControlCreateWithFlags(
-        nil, kSecAttrAccessibleWhenUnlockedThisDeviceOnly, [.privateKeyUsage, .userPresence], &err)
-    else { throw err!.takeRetainedValue() }
-    let attrs: [String: Any] = [
-      kSecAttrKeyType as String: kSecAttrKeyTypeECSECPrimeRandom,
-      kSecAttrKeySizeInBits as String: 256, kSecAttrTokenID as String: kSecAttrTokenIDSecureEnclave,
-      kSecPrivateKeyAttrs as String: [
-        kSecAttrIsPermanent as String: true, kSecAttrApplicationTag as String: tag,
-        kSecAttrAccessControl as String: ac,
-      ],
-    ]
-    guard let key = SecKeyCreateRandomKey(attrs as CFDictionary, &err) else {
-      throw err!.takeRetainedValue()
-    }
-    return key
+
+  init(root: URL) {
+    privateKeyURL = root.appendingPathComponent("approver-private-key.sealed")
+    publicKeyURL = root.appendingPathComponent("approver-public-key.pem")
   }
-  private func pem(for key: SecKey) throws -> Data {
-    guard let pub = SecKeyCopyPublicKey(key) else { throw NSError(domain: "ApprovalGUI", code: 30) }
-    var err: Unmanaged<CFError>?
-    guard let raw = SecKeyCopyExternalRepresentation(pub, &err) as Data? else {
-      throw err!.takeRetainedValue()
+
+  private func key(context: LAContext) throws -> SecureEnclave.P256.Signing.PrivateKey {
+    if FileManager.default.fileExists(atPath: privateKeyURL.path) {
+      let sealed = try Data(contentsOf: privateKeyURL)
+      return try SecureEnclave.P256.Signing.PrivateKey(
+        dataRepresentation: sealed,
+        authenticationContext: context)
     }
+
+    guard SecureEnclave.isAvailable else {
+      throw NSError(
+        domain: "ApprovalGUI", code: 32,
+        userInfo: [NSLocalizedDescriptionKey: "Secure Enclave is unavailable on this Mac."])
+    }
+
+    var err: Unmanaged<CFError>?
+    guard let ac = SecAccessControlCreateWithFlags(
+      nil, kSecAttrAccessibleWhenUnlockedThisDeviceOnly, [.privateKeyUsage, .userPresence], &err)
+    else { throw err!.takeRetainedValue() }
+
+    let privateKey = try SecureEnclave.P256.Signing.PrivateKey(
+      accessControl: ac,
+      authenticationContext: context)
+    let sealed = privateKey.dataRepresentation
+    let tmp = privateKeyURL.deletingLastPathComponent().appendingPathComponent(
+      ".approver-private-key.\(UUID().uuidString).tmp")
+    try sealed.write(to: tmp, options: .withoutOverwriting)
+    try FileManager.default.setAttributes([.posixPermissions: 0o600], ofItemAtPath: tmp.path)
+    try FileManager.default.moveItem(at: tmp, to: privateKeyURL)
+    return privateKey
+  }
+
+  private func pem(for key: SecureEnclave.P256.Signing.PrivateKey) -> Data {
+    let raw = key.publicKey.x963Representation
     let prefix = Data([
       0x30, 0x59, 0x30, 0x13, 0x06, 0x07, 0x2a, 0x86, 0x48, 0xce, 0x3d, 0x02, 0x01, 0x06, 0x08,
       0x2a, 0x86, 0x48, 0xce, 0x3d, 0x03, 0x01, 0x07, 0x03, 0x42, 0x00,
     ])
     let der = prefix + raw
     let b64 = der.base64EncodedString(options: [.lineLength64Characters, .endLineWithLineFeed])
-    return Data(("-----BEGIN PUBLIC KEY-----\n" + b64 + "\n-----END PUBLIC KEY-----\n").utf8)
+    return Data(("-" + "----BEGIN PUBLIC KEY-----\n" + b64 + "\n-----END PUBLIC KEY-----\n").utf8)
   }
+
   func provision(context: LAContext) throws -> String {
     let privateKey = try key(context: context)
-    let pemData = try pem(for: privateKey)
+    let pemData = pem(for: privateKey)
     if FileManager.default.fileExists(atPath: publicKeyURL.path) {
       let current = try Data(contentsOf: publicKeyURL)
       guard current == pemData else {
@@ -163,9 +166,10 @@ final class ApprovalSigner {
     }
     return sha256Hex(pemData)
   }
+
   func sign(_ req: ApprovalRequest, context: LAContext) throws -> (String, String) {
     let privateKey = try key(context: context)
-    let pemData = try pem(for: privateKey)
+    let pemData = pem(for: privateKey)
     if FileManager.default.fileExists(atPath: publicKeyURL.path) {
       let current = try Data(contentsOf: publicKeyURL)
       guard current == pemData else {
@@ -182,11 +186,7 @@ final class ApprovalSigner {
     }
     let message =
       "local-executor-approval-v1\n\(req.bridge_instance_id)\n\(req.request_id)\n\(req.nonce)\n\(req.payload_sha256)\n\(req.expires_at)\n"
-    var err: Unmanaged<CFError>?
-    guard
-      let sig = SecKeyCreateSignature(
-        privateKey, .ecdsaSignatureMessageX962SHA256, Data(message.utf8) as CFData, &err) as Data?
-    else { throw err!.takeRetainedValue() }
+    let sig = try privateKey.signature(for: Data(message.utf8)).derRepresentation
     return (sha256Hex(pemData), sig.base64EncodedString())
   }
 }
