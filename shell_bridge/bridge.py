@@ -360,10 +360,28 @@ def resolve_write_plan(request: dict, cfg: dict) -> dict:
         raise ValueError("write_scope must be auto, read_only, repository, or system")
 
     if requested == "system":
+        # Requested authority is not itself a reason to prompt or grant broad authority.
+        # Resolve the concrete effect first, then retain system scope only for operations
+        # that are actually dangerous or escape the reversible repository workflow.
+        impact = high_impact_command_category(request["command"])
+        outside_write = non_repository_write_category(request["command"])
+        if impact is not None or outside_write is not None:
+            return {
+                "requested": requested, "effective": "system", "write_roots": None,
+                "read_roots": None, "deny_home_reads": False, "allow_network": True,
+                "confirmation_category": impact or f"non_repository_{outside_write}",
+            }
+        repo_roots = _git_repository_write_roots(request["cwd"], allowed_root)
+        if repo_roots is not None:
+            return {
+                "requested": requested, "effective": "repository", "write_roots": repo_roots,
+                "read_roots": [allowed_root], "deny_home_reads": True, "allow_network": False,
+                "authority_downgraded": True,
+            }
         return {
-            "requested": requested, "effective": "system", "write_roots": None,
-            "read_roots": None, "deny_home_reads": False, "allow_network": True,
-            "confirmation_category": "system_write",
+            "requested": requested, "effective": "read_only", "write_roots": [],
+            "read_roots": [allowed_root], "deny_home_reads": True, "allow_network": False,
+            "authority_downgraded": True,
         }
     if requested == "read_only":
         return {
@@ -501,7 +519,7 @@ def _launch_operator_approval_helper(app_path: Path, pending_path: Path, decisio
         return False, f"operator approval helper is not installed: {app_path}"
     try:
         cp = subprocess.run(
-            ["/usr/bin/open", "-n", str(app_path), "--args", str(pending_path), str(decision_path)],
+            ["/usr/bin/open", str(app_path)],
             stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True, timeout=10, check=False,
         )
     except (FileNotFoundError, subprocess.TimeoutExpired) as exc:

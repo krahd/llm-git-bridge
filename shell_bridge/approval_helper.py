@@ -2,52 +2,122 @@
 import json, os, subprocess, sys, time
 from pathlib import Path
 
-SCRIPT = r'''ObjC.import("AppKit");
-function run(argv) {
-  const requestId=argv[0], categoryName=argv[1], cwdValue=argv[2], commandValue=argv[3], explanationValue=argv[4];
-  const app=$.NSApplication.sharedApplication;
-  app.setActivationPolicy($.NSApplicationActivationPolicyRegular);
-  app.finishLaunching();
-  const alert=$.NSAlert.alloc.init;
-  const riskDescriptions = {
-    system_write: "This request can write outside the current Git repository or change system-level state.",
-    non_repository_filesystem_mutation: "This request can modify files outside an existing Git repository.",
-    github_repository_control_plane_mutation: "This request can change GitHub repository settings or other control-plane state.",
-    github_content_mutation: "This request can change content or metadata on GitHub.",
-    mutating_network_request: "This request can send a network operation that changes remote state.",
-    remote_shell_or_copy: "This request can connect to another machine or copy files over the network.",
-    git_force_or_delete_push: "This request can rewrite or delete remote Git history.",
-    destructive_git_reset: "This request can discard local Git changes or commits.",
-    destructive_git_clean: "This request can delete untracked files.",
-    recursive_forced_delete: "This request can recursively delete files."
-  };
-  const riskDescription = riskDescriptions[categoryName] || ("Bridge-detected risk: " + categoryName.replace(/_/g, " ") + ".");
-  alert.setMessageText("ChatGPT is asking to cross a safety boundary");
-  alert.setInformativeText("Requested action:\n"+explanationValue+"\n\nSafety reason:\n"+riskDescription+"\n\nWorking directory:\n"+cwdValue+"\n\nNo action is taken until you make a deliberate choice. Escape cancels; Command-Return allows.");
-  alert.setAlertStyle($.NSAlertStyleWarning);
-  const cancelButton=alert.addButtonWithTitle("Cancel");
-  const allowButton=alert.addButtonWithTitle("Allow");
-  cancelButton.setKeyEquivalent("\u001b");
-  allowButton.setKeyEquivalent("\r");
-  allowButton.setKeyEquivalentModifierMask($.NSEventModifierFlagCommand);
-  const detailText="Technical details (exact request)\n\nRequest: "+requestId+"\nRisk category: "+categoryName+"\n\nExact command:\n"+commandValue;
-  const textView=$.NSTextView.alloc.initWithFrame($.NSMakeRect(0,0,820,180));
-  textView.setString(detailText); textView.setEditable(false); textView.setSelectable(true);
-  textView.setFont($.NSFont.monospacedSystemFontOfSizeWeight(12,$.NSFontWeightRegular));
-  const scrollView=$.NSScrollView.alloc.initWithFrame($.NSMakeRect(0,0,840,200));
-  scrollView.setDocumentView(textView); scrollView.setHasVerticalScroller(true); scrollView.setHasHorizontalScroller(true);
-  scrollView.setAutohidesScrollers(true); scrollView.setBorderType($.NSBezelBorder); alert.setAccessoryView(scrollView);
-  const window=alert.window;
-  window.setLevel($.NSModalPanelWindowLevel);
-  window.setHidesOnDeactivate(false);
-  window.setCollectionBehavior($.NSWindowCollectionBehaviorCanJoinAllSpaces | $.NSWindowCollectionBehaviorFullScreenAuxiliary);
-  app.activateIgnoringOtherApps(true);
-  window.makeKeyAndOrderFront(null);
-  window.orderFrontRegardless();
-  window.makeFirstResponder(textView);
-  const response=alert.runModal;
-  return response === $.NSAlertSecondButtonReturn ? "allow" : "cancel";
+JXA = r'''ObjC.import("AppKit");
+ObjC.import("Foundation");
+const approvalRoot = ObjC.unwrap($.NSProcessInfo.processInfo.arguments.objectAtIndex(4));
+const helperPath = ObjC.unwrap($.NSProcessInfo.processInfo.arguments.objectAtIndex(5));
+let statusItem = null;
+let menu = null;
+let known = {};
+let firstRefresh = true;
+
+function unwrap(v) { try { return ObjC.unwrap(v); } catch (e) { return v; } }
+function readJSON(path) {
+  try {
+    const s = $.NSString.stringWithContentsOfFileEncodingError(path, $.NSUTF8StringEncoding, null);
+    if (!s) return null;
+    return JSON.parse(unwrap(s));
+  } catch (e) { return null; }
 }
+function pendingRecords() {
+  const fm = $.NSFileManager.defaultManager;
+  const dir = approvalRoot + "/pending";
+  const namesObj = fm.contentsOfDirectoryAtPathError(dir, null);
+  const names = namesObj ? unwrap(namesObj) : [];
+  const now = Date.now()/1000;
+  const out = [];
+  for (const name of names) {
+    if (!String(name).endsWith(".json")) continue;
+    const path = dir + "/" + String(name);
+    const req = readJSON(path);
+    if (!req || req.kind !== "operator_approval_request" || Number(req.expires_at||0) <= now) continue;
+    req.__pendingPath = path;
+    req.__decisionPath = approvalRoot + "/decisions/" + req.request_id + ".json";
+    out.push(req);
+  }
+  out.sort((a,b) => Number(a.created_at||0) - Number(b.created_at||0));
+  return out;
+}
+function decide(req, decision) {
+  try {
+    const task = $.NSTask.alloc.init;
+    task.launchPath = "/usr/bin/python3";
+    task.arguments = [helperPath, "--decide", req.__pendingPath, req.__decisionPath, decision];
+    task.launch;
+    task.waitUntilExit;
+  } catch (e) {}
+}
+function review(req) {
+  const app = $.NSApplication.sharedApplication;
+  const alert = $.NSAlert.alloc.init;
+  alert.messageText = "Allow ChatGPT to perform this action?";
+  alert.informativeText = "What ChatGPT is trying to do:\n" + String(req.explanation||"") + "\n\nWhy approval is required:\n" + String(req.category||"").replace(/_/g," ");
+  alert.alertStyle = $.NSAlertStyleWarning;
+  alert.addButtonWithTitle("Reject");
+  alert.addButtonWithTitle("Allow");
+  const details = "Request: " + req.request_id + "\nWorking directory: " + req.cwd + "\n\nCommand:\n" + req.command;
+  const tv = $.NSTextView.alloc.initWithFrame($.NSMakeRect(0,0,820,240));
+  tv.string = details; tv.editable = false; tv.selectable = true;
+  tv.font = $.NSFont.monospacedSystemFontOfSizeWeight(11,$.NSFontWeightRegular);
+  const sv = $.NSScrollView.alloc.initWithFrame($.NSMakeRect(0,0,840,260));
+  sv.documentView = tv; sv.hasVerticalScroller = true; sv.hasHorizontalScroller = true; sv.autohidesScrollers = true; sv.borderType = $.NSBezelBorder;
+  alert.accessoryView = sv;
+  app.activateIgnoringOtherApps(true);
+  const response = alert.runModal;
+  decide(req, response === $.NSAlertSecondButtonReturn ? "allow" : "cancel");
+}
+function shortText(s,n) { s=String(s||"").replace(/\s+/g," ").trim(); return s.length>n ? s.slice(0,n-1)+"…" : s; }
+
+const Delegate = ObjC.registerSubclass({
+  name: "LEBApprovalQueueDelegate",
+  methods: {
+    "refresh:": { types:["void",["id"]], implementation:function(sender) {
+      const records = pendingRecords();
+      menu.removeAllItems;
+      const heading = $.NSMenuItem.alloc.initWithTitleActionKeyEquivalent("Local Executor Bridge approvals", null, "");
+      heading.enabled = false; menu.addItem(heading);
+      menu.addItem($.NSMenuItem.separatorItem);
+      if (records.length === 0) {
+        const empty = $.NSMenuItem.alloc.initWithTitleActionKeyEquivalent("No approvals pending", null, ""); empty.enabled=false; menu.addItem(empty);
+        statusItem.button.title = "LEB";
+      } else {
+        statusItem.button.title = "LEB " + records.length;
+        for (const req of records) {
+          const item = $.NSMenuItem.alloc.initWithTitleActionKeyEquivalent(shortText(req.explanation || req.request_id, 72), "review:", "");
+          item.target = this; item.representedObject = $(req.request_id); menu.addItem(item);
+        }
+      }
+      menu.addItem($.NSMenuItem.separatorItem);
+      const quit = $.NSMenuItem.alloc.initWithTitleActionKeyEquivalent("Quit approval queue", "quit:", ""); quit.target=this; menu.addItem(quit);
+      const current = {};
+      for (const req of records) current[req.request_id]=true;
+      let firstNew = null;
+      for (const req of records) if (!known[req.request_id] && !firstNew) firstNew=req;
+      known = current;
+      if (firstNew) review(firstNew);
+      firstRefresh = false;
+    }},
+    "review:": { types:["void",["id"]], implementation:function(sender) {
+      const rid = unwrap(sender.representedObject);
+      for (const req of pendingRecords()) if (req.request_id === rid) { review(req); break; }
+      this['refresh:'](sender);
+    }},
+    "quit:": { types:["void",["id"]], implementation:function(sender) { $.NSApplication.sharedApplication.terminate(null); }}
+  }
+});
+
+const app = $.NSApplication.sharedApplication;
+app.setActivationPolicy($.NSApplicationActivationPolicyAccessory);
+const delegate = Delegate.alloc.init;
+app.delegate = delegate;
+statusItem = $.NSStatusBar.systemStatusBar.statusItemWithLength($.NSVariableStatusItemLength);
+statusItem.button.title = "LEB";
+statusItem.button.toolTip = "Local Executor Bridge approvals";
+menu = $.NSMenu.alloc.initWithTitle("Approvals");
+statusItem.menu = menu;
+delegate['refresh:'](null);
+$.NSTimer.scheduledTimerWithTimeIntervalTargetSelectorUserInfoRepeats(1.0, delegate, "refresh:", null, true);
+app.run;
 '''
 
 def atomic_json(path: Path, obj: dict) -> None:
@@ -62,21 +132,30 @@ def atomic_json(path: Path, obj: dict) -> None:
         try: tmp.unlink()
         except FileNotFoundError: pass
 
-def main() -> int:
-    if len(sys.argv) != 3: return 2
-    pending_path, decision_path = map(Path, sys.argv[1:])
-    try: req = json.loads(pending_path.read_text(encoding="utf-8"))
-    except Exception: return 3
+def load_pending(path: Path) -> dict | None:
+    try: req = json.loads(path.read_text(encoding="utf-8"))
+    except Exception: return None
     required=("request_id","nonce","payload_sha256","category","cwd","command","explanation","expires_at")
-    if req.get("protocol") != 1 or req.get("kind") != "operator_approval_request" or any(k not in req for k in required): return 4
-    remaining = float(req["expires_at"]) - time.time()
-    if remaining <= 0: return 5
-    try:
-        cp=subprocess.run(["/usr/bin/osascript","-l","JavaScript","-e",SCRIPT,"--",req["request_id"],req["category"],req["cwd"],req["command"],req["explanation"]],stdout=subprocess.PIPE,stderr=subprocess.PIPE,text=True,timeout=max(1,min(remaining,300)),check=False)
-        decision="allow" if cp.returncode==0 and cp.stdout.strip()=="allow" else "cancel"
-    except Exception:
-        decision="cancel"
+    if req.get("protocol") != 1 or req.get("kind") != "operator_approval_request" or any(k not in req for k in required): return None
+    if float(req["expires_at"]) <= time.time(): return None
+    return req
+
+def decide(pending_path: Path, decision_path: Path, decision: str) -> int:
+    req = load_pending(pending_path)
+    if req is None or decision not in {"allow","cancel"}: return 4
     atomic_json(decision_path,{"protocol":1,"kind":"operator_approval_decision","request_id":req["request_id"],"nonce":req["nonce"],"payload_sha256":req["payload_sha256"],"decision":decision,"decided_at":time.time()})
     return 0
+
+def queue(root: Path) -> int:
+    root.mkdir(parents=True, exist_ok=True); (root/"pending").mkdir(exist_ok=True); (root/"decisions").mkdir(exist_ok=True)
+    cp = subprocess.run(["/usr/bin/osascript","-l","JavaScript","-e",JXA,"--",str(root),str(Path(__file__).resolve())], check=False)
+    return cp.returncode
+
+def main() -> int:
+    if len(sys.argv) >= 2 and sys.argv[1] == "--decide" and len(sys.argv) == 5:
+        return decide(Path(sys.argv[2]), Path(sys.argv[3]), sys.argv[4])
+    if len(sys.argv) == 3 and sys.argv[1] == "--queue":
+        return queue(Path(sys.argv[2]))
+    return 2
 
 if __name__ == "__main__": raise SystemExit(main())

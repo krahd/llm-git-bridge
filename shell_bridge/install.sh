@@ -236,12 +236,12 @@ APP_BUNDLE="$INSTALL_DIR/Local Executor Approval.app"
 mkdir -p "$APP_BUNDLE/Contents/MacOS"
 python3 - "$APP_BUNDLE/Contents/Info.plist" <<'PYAPPPLIST'
 import plistlib,sys
-obj={'CFBundleIdentifier':'net.laurenzo.local-executor-approval','CFBundleName':'Local Executor Approval','CFBundleDisplayName':'Local Executor Approval','CFBundlePackageType':'APPL','CFBundleExecutable':'approval-helper','CFBundleVersion':'1','CFBundleShortVersionString':'1.0','LSUIElement':False,'NSHighResolutionCapable':True}
+obj={'CFBundleIdentifier':'net.laurenzo.local-executor-approval','CFBundleName':'Local Executor Approval','CFBundleDisplayName':'Local Executor Approval','CFBundlePackageType':'APPL','CFBundleExecutable':'approval-helper','CFBundleVersion':'1','CFBundleShortVersionString':'1.0','LSUIElement':True,'NSHighResolutionCapable':True}
 with open(sys.argv[1],'wb') as f: plistlib.dump(obj,f,fmt=plistlib.FMT_XML,sort_keys=True)
 PYAPPPLIST
 cat > "$APP_BUNDLE/Contents/MacOS/approval-helper" <<EOFAPP
 #!/bin/sh
-exec "$PYTHON_BIN" "$INSTALL_DIR/approval_helper.py" "\$@"
+exec "$PYTHON_BIN" "$INSTALL_DIR/approval_helper.py" --queue "$STATE_DIR/approvals"
 EOFAPP
 chmod 700 "$APP_BUNDLE/Contents/MacOS/approval-helper"
 

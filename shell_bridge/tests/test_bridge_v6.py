@@ -50,14 +50,61 @@ class BridgeV6SecurityTests(unittest.TestCase):
             cmd = f"python3 {ws} show --job {job}; touch /tmp/escape"
             self.assertFalse(bridge._trusted_workspace_coordinator(cmd, root, state))
 
-    def test_system_scope_still_requires_confirmation(self):
+    def test_safe_system_request_inside_repo_is_downgraded_without_confirmation(self):
+        with tempfile.TemporaryDirectory() as td:
+            root = Path(td); repo = root / "repo"; repo.mkdir(); (repo / ".git").mkdir()
+            old_roots = bridge._git_repository_write_roots
+            bridge._git_repository_write_roots = lambda cwd, allowed: [repo]
+            try:
+                plan = bridge.resolve_write_plan(
+                    {"cwd": repo, "command": "printf ok", "write_scope": "system"},
+                    {"allowed_root": str(root), "state_dir": str(root / "state")},
+                )
+            finally:
+                bridge._git_repository_write_roots = old_roots
+            self.assertEqual(plan["effective"], "repository")
+            self.assertTrue(plan["authority_downgraded"])
+            self.assertNotIn("confirmation_category", plan)
+
+    def test_safe_system_request_outside_repo_is_read_only_without_confirmation(self):
         with tempfile.TemporaryDirectory() as td:
             root = Path(td)
             plan = bridge.resolve_write_plan(
-                {"cwd": root, "command": "true", "write_scope": "system"},
+                {"cwd": root, "command": "printf ok", "write_scope": "system"},
                 {"allowed_root": str(root), "state_dir": str(root / "state")},
             )
-            self.assertEqual(plan["confirmation_category"], "system_write")
+            self.assertEqual(plan["effective"], "read_only")
+            self.assertTrue(plan["authority_downgraded"])
+            self.assertNotIn("confirmation_category", plan)
+
+    def test_outside_repo_mutation_still_requires_confirmation(self):
+        with tempfile.TemporaryDirectory() as td:
+            root = Path(td)
+            plan = bridge.resolve_write_plan(
+                {"cwd": root, "command": "touch /tmp/outside-v6-test", "write_scope": "system"},
+                {"allowed_root": str(root), "state_dir": str(root / "state")},
+            )
+            self.assertEqual(plan["effective"], "system")
+            self.assertIn("confirmation_category", plan)
+
+    def test_operator_approval_path_has_no_authentication_primitives(self):
+        approval_sources = [ROOT / "approval_helper.py", ROOT / "bridge.py"]
+        forbidden = (
+            "LocalAuthentication", "LAContext", "evaluatePolicy",
+            "deviceOwnerAuthentication", "userPresence", "biometryType",
+            "SecAccessControlCreateWithFlags", "kSecAccessControlUserPresence",
+            "Touch ID",
+        )
+        combined = "\n".join(path.read_text(encoding="utf-8") for path in approval_sources)
+        for primitive in forbidden:
+            self.assertNotIn(primitive, combined, f"approval path must not authenticate via {primitive}")
+
+    def test_approval_helper_exposes_persistent_menu_bar_queue(self):
+        source = (ROOT / "approval_helper.py").read_text(encoding="utf-8")
+        self.assertIn("NSStatusBar", source)
+        self.assertIn("pendingRecords", source)
+        self.assertIn("--queue", source)
+        self.assertIn("--decide", source)
 
 
 class WakeLeaseTests(unittest.TestCase):

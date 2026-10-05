@@ -100,3 +100,8 @@ The separate Conversation Harness/Buork work-continuity system owns WorkThreads,
 The bridge is least-privilege infrastructure, not a VM. Sandboxed shell/workspace payloads deny unrelated home reads, ambient credentials, network where not required, and writes outside declared roots. Explicitly approved `system` execution intentionally restores the logged-in user's authority. The mailbox is privileged infrastructure; never place secrets directly in command bytes because request/result/journal data may persist.
 
 See [`docs/local-executor-bridge-v6.md`](docs/local-executor-bridge-v6.md), [`docs/shell-bridge-v5-architecture.md`](docs/shell-bridge-v5-architecture.md), and [`shell_bridge/README.md`](shell_bridge/README.md) for implementation and migration detail.
+
+### v6 approval UX and policy
+
+v6 uses **effect-before-command approval**, not scope-before-command approval. Merely requesting broad `system` authority does not grant it and does not by itself create an approval prompt: safe requests are downgraded to repository or read-only authority. Approval is reserved for operations whose concrete effect is destructive/high-impact, escapes the repository boundary, or is not reasonably recoverable inside the normal Git workflow. The approval helper is a persistent menu-bar queue: popups are an attention mechanism, while pending approvals remain accessible from the menu bar until allowed, rejected, or expired. Approval is click-only; it must never require Touch ID, a password, LocalAuthentication, Secure Enclave user-presence, or equivalent identity authentication.
+
