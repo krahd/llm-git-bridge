@@ -1,11 +1,10 @@
-"""Deterministic helpers for authoring low-complexity bridge requests.
+"""Deterministic helpers for authoring transport-safe production-v5 requests.
 
-This module does not submit requests and does not change bridge authority. It
-exists to make the preferred request shape explicit and testable: use direct
-argv for one executable plus literal arguments, and reserve shell commands for
-operations that genuinely require shell semantics.
+Production v5 accepts the legacy ``command`` field. This module lets clients
+supply literal argv locally, validates it, renders it with ``shlex.join``, and
+emits that existing command schema. It does not change bridge authority or
+submission transport.
 """
-
 from __future__ import annotations
 
 import argparse
@@ -32,10 +31,34 @@ _SHELL_FEATURES: tuple[tuple[str, re.Pattern[str]], ...] = (
     ("redirection", re.compile(r"[<>]")),
     ("command_substitution", re.compile(r"`|\$\(")),
 )
+_SHELLS = {"sh", "bash", "zsh", "dash", "ksh", "mksh", "fish"}
+_CODE_INTERPRETERS = {"python", "python3", "ruby", "perl", "node"}
+
+
+def _basename(value: str) -> str:
+    return value.rsplit("/", 1)[-1]
+
+
+def _reject_inline_code_wrapper(values: list[str]) -> None:
+    """Reject argv forms that hide a program inside an interpreter argument."""
+    exe = _basename(values[0])
+    if exe == "env":
+        raise ValueError("argv beginning with env obscures the executable; invoke it directly")
+    if exe in _SHELLS:
+        for arg in values[1:]:
+            if arg == "--":
+                break
+            if not arg.startswith("-"):
+                break
+            if "c" in arg[1:]:
+                raise ValueError("shell -c/-lc belongs in an explicit shell command or reviewed helper")
+    if exe in _CODE_INTERPRETERS:
+        inline_flags = {"-c"} if exe.startswith("python") else {"-e"}
+        if any(arg in inline_flags for arg in values[1:]):
+            raise ValueError("inline interpreter code belongs in a reviewed repository helper")
 
 
 def validate_argv(argv: Iterable[str]) -> list[str]:
-    """Return a defensive argv copy or raise ValueError."""
     if isinstance(argv, (str, bytes)):
         raise ValueError("argv must be an iterable of strings, not a string")
     values = list(argv)
@@ -49,42 +72,35 @@ def validate_argv(argv: Iterable[str]) -> list[str]:
         raise ValueError("argv[0] must be non-empty")
     if any("\0" in arg for arg in values):
         raise ValueError("argv may not contain NUL bytes")
+    _reject_inline_code_wrapper(values)
     rendered = shlex.join(values)
     if len(rendered.encode("utf-8")) > MAX_COMMAND_BYTES:
         raise ValueError("rendered argv is too large")
     return values
 
 
+def render_argv(argv: Iterable[str]) -> str:
+    return shlex.join(validate_argv(argv))
+
+
 def shell_complexity_reasons(command: str) -> list[str]:
-    """Describe shell syntax that should usually move into a reviewed helper."""
     if not isinstance(command, str) or not command:
         raise ValueError("command must be a non-empty string")
-    reasons: list[str] = []
-    for name, pattern in _SHELL_FEATURES:
-        if pattern.search(command):
-            reasons.append(name)
-    return reasons
+    return [name for name, pattern in _SHELL_FEATURES if pattern.search(command)]
 
 
 def request_policy(req: dict[str, Any]) -> str:
-    """Return the preferred transport-shape policy for a request."""
-    has_argv = req.get("argv") is not None
-    has_command = req.get("command") is not None
-    if has_argv and not has_command:
-        return "preferred_argv"
-    if has_command and not has_argv:
-        command = req.get("command")
-        if not isinstance(command, str) or not command:
-            return "invalid"
-        return "move_to_reviewed_helper" if shell_complexity_reasons(command) else "rewrite_as_argv"
-    return "invalid"
+    if req.get("argv") is not None:
+        return "invalid_for_production_v5"
+    command = req.get("command")
+    if not isinstance(command, str) or not command:
+        return "invalid"
+    return "move_to_reviewed_helper" if shell_complexity_reasons(command) else "legacy_command_ok"
 
 
 def lint_request(req: dict[str, Any]) -> dict[str, Any]:
-    """Lint request shape without claiming to reproduce path/runtime validation."""
     errors: list[str] = []
     warnings: list[str] = []
-
     rid = req.get("id")
     if not isinstance(rid, str) or rid in {"", ".", ".."} or not _ID_RE.fullmatch(rid):
         errors.append("id must be lowercase safe ASCII and at most 128 characters")
@@ -102,7 +118,6 @@ def lint_request(req: dict[str, Any]) -> dict[str, Any]:
     timeout = req.get("timeout_seconds", 60)
     if isinstance(timeout, bool) or not isinstance(timeout, int) or not 1 <= timeout <= MAX_TIMEOUT_SECONDS:
         errors.append(f"timeout_seconds must be an integer in 1..{MAX_TIMEOUT_SECONDS}")
-
     stdin_b64 = req.get("stdin_b64")
     if stdin_b64 is not None:
         if not isinstance(stdin_b64, str):
@@ -115,32 +130,20 @@ def lint_request(req: dict[str, Any]) -> dict[str, Any]:
             else:
                 if len(stdin) > MAX_STDIN_BYTES:
                     errors.append("stdin is too large")
-
-    has_argv = req.get("argv") is not None
-    has_command = req.get("command") is not None
-    if has_argv == has_command:
-        errors.append("exactly one of argv or command is required")
-    elif has_argv:
-        try:
-            validate_argv(req["argv"])
-        except ValueError as exc:
-            errors.append(str(exc))
+    if req.get("argv") is not None:
+        errors.append("production v5 requests must use command; use build_request(argv=...) to render it")
+    command = req.get("command")
+    if not isinstance(command, str) or not command:
+        errors.append("command must be a non-empty string")
+    elif len(command.encode("utf-8")) > MAX_COMMAND_BYTES:
+        errors.append("command is too large")
     else:
-        command = req.get("command")
-        if not isinstance(command, str) or not command:
-            errors.append("command must be a non-empty string")
-        elif len(command.encode("utf-8")) > MAX_COMMAND_BYTES:
-            errors.append("command is too large")
-        else:
-            reasons = shell_complexity_reasons(command)
-            if reasons:
-                warnings.append(
-                    "compound shell semantics detected (" + ", ".join(reasons)
-                    + "); prefer a reviewed repository helper invoked via argv"
-                )
-            else:
-                warnings.append("shell semantics are not apparent; prefer argv")
-
+        reasons = shell_complexity_reasons(command)
+        if reasons:
+            warnings.append(
+                "compound shell semantics detected (" + ", ".join(reasons)
+                + "); prefer a reviewed repository helper"
+            )
     return {
         "errors": errors,
         "warnings": warnings,
@@ -160,7 +163,6 @@ def build_request(
     timeout_seconds: int = 60,
     stdin: bytes | None = None,
 ) -> dict[str, Any]:
-    """Build a canonical request while making shell use an explicit choice."""
     if (argv is None) == (command is None):
         raise ValueError("exactly one of argv or command is required")
     if not isinstance(request_id, str) or request_id in {"", ".", ".."} or not _ID_RE.fullmatch(request_id):
@@ -174,23 +176,10 @@ def build_request(
         raise ValueError("explanation is too large")
     if write_scope not in WRITE_SCOPES:
         raise ValueError("invalid write_scope")
-    if (
-        isinstance(timeout_seconds, bool)
-        or not isinstance(timeout_seconds, int)
-        or not 1 <= timeout_seconds <= MAX_TIMEOUT_SECONDS
-    ):
+    if isinstance(timeout_seconds, bool) or not isinstance(timeout_seconds, int) or not 1 <= timeout_seconds <= MAX_TIMEOUT_SECONDS:
         raise ValueError(f"timeout_seconds must be an integer in 1..{MAX_TIMEOUT_SECONDS}")
-
-    req: dict[str, Any] = {
-        "protocol": 1,
-        "id": request_id,
-        "cwd": cwd,
-        "explanation": explanation,
-        "write_scope": write_scope,
-        "timeout_seconds": timeout_seconds,
-    }
     if argv is not None:
-        req["argv"] = validate_argv(argv)
+        rendered = render_argv(argv)
     else:
         if not allow_shell:
             raise ValueError("shell command requires allow_shell=True")
@@ -198,7 +187,16 @@ def build_request(
             raise ValueError("command must be a non-empty string")
         if len(command.encode("utf-8")) > MAX_COMMAND_BYTES:
             raise ValueError("command is too large")
-        req["command"] = command
+        rendered = command
+    req: dict[str, Any] = {
+        "protocol": 1,
+        "id": request_id,
+        "cwd": cwd,
+        "command": rendered,
+        "explanation": explanation,
+        "write_scope": write_scope,
+        "timeout_seconds": timeout_seconds,
+    }
     if stdin is not None:
         if not isinstance(stdin, bytes):
             raise ValueError("stdin must be bytes")
@@ -211,11 +209,9 @@ def build_request(
 def _parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(description=__doc__)
     sub = parser.add_subparsers(dest="mode", required=True)
-
-    lint = sub.add_parser("lint", help="lint an existing request JSON file")
+    lint = sub.add_parser("lint", help="lint an existing production-v5 request JSON file")
     lint.add_argument("path", type=Path)
-
-    build = sub.add_parser("build", help="build a canonical argv request")
+    build = sub.add_parser("build", help="build a production-v5 request from literal argv")
     build.add_argument("--id", required=True)
     build.add_argument("--cwd", required=True)
     build.add_argument("--explanation", required=True)
@@ -232,7 +228,6 @@ def main(argv: list[str] | None = None) -> int:
         report = lint_request(req)
         print(json.dumps(report, indent=2, sort_keys=True))
         return 0 if not report["errors"] else 2
-
     if not args.argv:
         raise SystemExit("build requires argv after --")
     values = args.argv[1:] if args.argv and args.argv[0] == "--" else args.argv

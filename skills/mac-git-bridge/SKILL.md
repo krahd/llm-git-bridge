@@ -66,6 +66,33 @@ Optional exact binary stdin may be supplied as `stdin_b64`. `explanation` is req
 
 Recognised high-impact operations—such as GitHub repository/content control-plane changes, mutating `gh api` or obvious mutating HTTP calls, direct remote-shell/copy commands, force/delete pushes, destructive local Git, and recursive forced deletion—also require the local confirmation dialogue even from repository scope. **Never relabel, wrap, or disguise a mutation to evade the gate.** If an unrecognised write fails under the read-only sandbox, re-evaluate the intended effect and, when genuinely required, submit a new uniquely identified request with the appropriate broader scope; never replay the failed mutation ambiguously.
 
+## Transport-safe request construction
+
+The ChatGPT/Drive upload layer is an external safety and reliability boundary. Do not try to bypass or disguise it. Production v5 still accepts the legacy `command` request field; do not send an `argv` field to the daemon.
+
+- Always include a concise non-empty `explanation`. A missing explanation is a bridge-schema error, not a transport incident.
+- For one executable plus literal arguments, use `shell_bridge/request_authoring.py` to validate argv locally and render it with `shlex.join` into the existing v5 `command` field. This reduces quoting mistakes without changing daemon semantics.
+- The authoring helper rejects interpreter-inline-code wrappers such as `zsh -c`, `bash -lc`, `python -c`, `node -e`, and `env ...`; move that logic into a reviewed repository-side helper instead.
+- Use raw `command` construction only when shell composition is genuinely required. Pipelines, redirection, conditionals, globbing, substitutions, heredocs, or multiline scripts are strong signals to move logic into a reviewed helper.
+- Keep one semantic purpose per request. Split unrelated diagnostics instead of building long semicolon/pipeline chains.
+- Use the narrowest truthful `write_scope`; never relabel or wrap an operation to evade either the platform layer or the local approval gate.
+- If upload is blocked before a request reaches Drive, do not retry identical bytes in a loop and do not encode/obfuscate the same action. Simplify the request, move complex logic into reviewed repository code, or treat a persistently blocked semantic action as an external safety boundary/user-only action.
+- A transparent repository-edit fallback is to upload a reviewed patch/replacement file as a named Drive artifact, then use a small repository-scoped request to copy it into an isolated worktree for validation. Do not hide the patch inside request JSON.
+- Request-folder presence is not authoritative pending state. A matching durable result is authoritative even if Drive request deletion/listing lags.
+
+Example authoring command (run in the repository/tooling context, not in the target project):
+
+```bash
+python3 shell_bridge/request_authoring.py build \
+  --id interaction-commons-status-002 \
+  --cwd /Users/tom/tom-repos/projects/interaction-commons \
+  --explanation 'Check the repository status before making changes.' \
+  --write-scope read_only \
+  --timeout 30 -- git status --short --branch
+```
+
+The emitted JSON contains `command`, not `argv`, and is compatible with production v5.
+
 ## Result and crash semantics
 
 Treat results as authoritative local execution evidence, not canonical repository state.
