@@ -68,6 +68,10 @@ Optional exact binary stdin may be supplied as `stdin_b64`. `explanation` is req
 
 Recognised high-impact operations—such as GitHub repository/content control-plane changes, mutating `gh api` or obvious mutating HTTP calls, direct remote-shell/copy commands, force/delete pushes, destructive local Git, and recursive forced deletion—also require the local confirmation dialogue even from repository scope. **Never relabel, wrap, or disguise a mutation to evade the gate.** If an unrecognised write fails under the read-only sandbox, re-evaluate the intended effect and, when genuinely required, submit a new uniquely identified request with the appropriate broader scope; never replay the failed mutation ambiguously.
 
+## Confirmation policy
+
+For v5, use write_scope auto for normal repository work and reserve system scope for actions that genuinely leave repository recovery boundaries. Ordinary repository edits, commits, tests, builds, worktrees, and non-force pushes should not be escalated merely because they use a shell or network.
+
 ## Result and crash semantics
 
 Treat results as authoritative local execution evidence, not canonical repository state.
