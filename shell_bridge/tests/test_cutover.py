@@ -50,7 +50,7 @@ class CutoverIdentityTests(unittest.TestCase):
 
     def test_cutover_binds_generated_artifacts_and_supports_source_commit_pin(self):
         text = (pathlib.Path(__file__).parents[1] / "cutover.sh").read_text()
-        for key in ('config_sha256','launchagent_plist_sha256','approval_app_info_sha256','approval_app_executable_sha256'):
+        for key in ('config_sha256','launchagent_plist_sha256','approval_launchagent_plist_sha256','approval_app_info_sha256','approval_app_executable_sha256'):
             self.assertIn(key, text)
         self.assertIn('EXPECTED_SOURCE_COMMIT is required for production cutover', text)
         self.assertIn('does not match EXPECTED_SOURCE_COMMIT', text)
@@ -90,6 +90,20 @@ class CutoverIdentityTests(unittest.TestCase):
         text = (pathlib.Path(__file__).parents[1] / "cutover.sh").read_text()
         self.assertIn("LEGACY_STATE_DIR", text)
         self.assertIn("stage v6 with STATE_DIR=", text)
+
+    def test_cutover_requires_and_transactionally_starts_approval_ui_service(self):
+        text = (pathlib.Path(__file__).parents[1] / "cutover.sh").read_text()
+        self.assertIn('NEW_APPROVAL_LABEL="${LOCAL_EXECUTOR_APPROVAL_LABEL:-${NEW_LABEL}.approval-ui}"', text)
+        self.assertIn('staged v6 approval UI plist missing', text)
+        self.assertIn('v6 approval UI service is already loaded', text)
+        self.assertIn('launchctl bootstrap "gui/${UID_NOW}" "$NEW_APPROVAL_PLIST"', text)
+        self.assertIn('STARTED_APPROVAL=1', text)
+        self.assertIn('v6 approval UI LaunchAgent did not start', text)
+        rollback = text.index('if [ "$STARTED_APPROVAL" -eq 1 ]; then')
+        start = text.index('launchctl bootstrap "gui/${UID_NOW}" "$NEW_APPROVAL_PLIST"')
+        commit = text.index('CUTOVER_COMMITTED=1')
+        self.assertLess(rollback, start)
+        self.assertLess(start, commit)
 
 if __name__ == "__main__":
     unittest.main()

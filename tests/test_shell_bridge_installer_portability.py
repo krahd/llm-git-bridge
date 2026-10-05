@@ -36,7 +36,7 @@ class ShellBridgeInstallerPortabilityTests(unittest.TestCase):
 
     def test_generated_security_artifacts_are_bound_into_manifest(self):
         text = (ROOT / "shell_bridge" / "install.sh").read_text()
-        for key in ('config_sha256','launchagent_plist_sha256','approval_app_info_sha256','approval_app_executable_sha256'):
+        for key in ('config_sha256','launchagent_plist_sha256','approval_launchagent_plist_sha256','approval_app_info_sha256','approval_app_executable_sha256'):
             self.assertIn(key, text)
         self.assertLess(text.index('approval_app_executable_sha256'), text.index('if [ "$STAGE_ONLY" -eq 1 ]; then'))
 
@@ -64,6 +64,21 @@ class ShellBridgeInstallerPortabilityTests(unittest.TestCase):
         stage_block = text[stage:start]
         self.assertIn('exit 0', stage_block)
         self.assertNotIn('launchctl bootstrap', stage_block)
+
+
+    def test_approval_menu_bar_has_dedicated_persistent_launchagent(self):
+        text = INSTALLER.read_text()
+        self.assertIn('APPROVAL_LABEL="${LOCAL_EXECUTOR_APPROVAL_LABEL:-${LABEL}.approval-ui}"', text)
+        self.assertIn('APPROVAL_PLIST="${APPROVAL_PLIST:-$HOME/Library/LaunchAgents/$APPROVAL_LABEL.plist}"', text)
+        self.assertIn("'KeepAlive':{'SuccessfulExit':False}", text)
+        self.assertIn("'LimitLoadToSessionType':'Aqua'", text)
+        self.assertIn("'ProcessType':'Interactive'", text)
+        self.assertIn("'approval_launchagent_plist_sha256':sha256(approval_plist_path)", text)
+        stage = text.index('if [ "$STAGE_ONLY" -eq 1 ]; then')
+        start = text.index('launchctl bootstrap "gui/${UID_NOW}" "$APPROVAL_PLIST"')
+        self.assertLess(stage, start)
+        self.assertIn('STARTED_APPROVAL_AGENT=1', text)
+        self.assertIn('approval UI LaunchAgent did not start', text)
 
     def test_native_approval_gui_is_compiled_as_persistent_menu_bar_app(self):
         installer = (ROOT / "shell_bridge" / "install.sh").read_text()

@@ -9,6 +9,8 @@ INSTALL_DIR="${INSTALL_DIR:-$HOME/.local/share/$APP_NAME}"
 CONFIG_DIR="${CONFIG_DIR:-$HOME/.config/$APP_NAME}"
 STATE_DIR="${STATE_DIR:-$HOME/.local/state/$APP_NAME}"
 PLIST="${PLIST:-$HOME/Library/LaunchAgents/$LABEL.plist}"
+APPROVAL_LABEL="${LOCAL_EXECUTOR_APPROVAL_LABEL:-${LABEL}.approval-ui}"
+APPROVAL_PLIST="${APPROVAL_PLIST:-$HOME/Library/LaunchAgents/$APPROVAL_LABEL.plist}"
 ALLOWED_ROOT="${ALLOWED_ROOT:-}"
 BASE_PATH="${BASE_PATH:-Local Executor Bridge}"
 SHELL_BIN="${SHELL_BIN:-/bin/zsh}"
@@ -16,6 +18,7 @@ SMOKE_ATTEMPTS="${SMOKE_ATTEMPTS:-30}"
 SMOKE_SLEEP="${SMOKE_SLEEP:-2}"
 UID_NOW="$(id -u)"
 STARTED_AGENT=0
+STARTED_APPROVAL_AGENT=0
 STAGE_ONLY=0
 RETIRE_OLD_AFTER_SMOKE=0
 TMP_REQ=""
@@ -34,7 +37,7 @@ while [ "$#" -gt 0 ]; do
 done
 
 need(){ command -v "$1" >/dev/null 2>&1 || { echo "ERROR: missing required command: $1" >&2; exit 1; }; }
-cleanup(){ rc=$?; [ -n "$TMP_REQ" ] && rm -f "$TMP_REQ" || true; [ -n "$RESULT_TMP" ] && rm -f "$RESULT_TMP" || true; [ -n "$TMP_MARKER" ] && rm -f "$TMP_MARKER" || true; if [ "$rc" -ne 0 ] && [ "$STARTED_AGENT" -eq 1 ]; then launchctl bootout "gui/${UID_NOW}" "$PLIST" >/dev/null 2>&1 || true; fi; }
+cleanup(){ rc=$?; [ -n "$TMP_REQ" ] && rm -f "$TMP_REQ" || true; [ -n "$RESULT_TMP" ] && rm -f "$RESULT_TMP" || true; [ -n "$TMP_MARKER" ] && rm -f "$TMP_MARKER" || true; if [ "$rc" -ne 0 ] && [ "$STARTED_APPROVAL_AGENT" -eq 1 ]; then launchctl bootout "gui/${UID_NOW}/${APPROVAL_LABEL}" >/dev/null 2>&1 || launchctl bootout "gui/${UID_NOW}" "$APPROVAL_PLIST" >/dev/null 2>&1 || true; fi; if [ "$rc" -ne 0 ] && [ "$STARTED_AGENT" -eq 1 ]; then launchctl bootout "gui/${UID_NOW}" "$PLIST" >/dev/null 2>&1 || true; fi; }
 trap cleanup EXIT
 
 [ "$(uname -s)" = Darwin ] || { echo "ERROR: this installer is for macOS" >&2; exit 1; }
@@ -294,15 +297,36 @@ with open(plist,'wb') as f: plistlib.dump(obj,f,fmt=plistlib.FMT_XML,sort_keys=T
 PY
 chmod 600 "$PLIST"
 
-python3 - "$INSTALL_DIR/install-manifest.json" "$CONFIG_DIR/config.json" "$PLIST" "$APP_BUNDLE/Contents/Info.plist" "$APP_BUNDLE/Contents/MacOS/local-executor-approval" <<'PYGENERATED'
+APPROVAL_EXEC="$APP_BUNDLE/Contents/MacOS/local-executor-approval"
+python3 - "$APPROVAL_PLIST" "$APPROVAL_LABEL" "$APPROVAL_EXEC" "$PATH_VALUE" "$STATE_DIR" "$HOME" <<'PYAPPROVALPLIST'
+import plistlib,sys
+plist,label,executable,path_value,state,home=sys.argv[1:]
+obj={
+ 'Label':label,
+ 'ProgramArguments':[executable],
+ 'EnvironmentVariables':{'PATH':path_value,'HOME':home},
+ 'RunAtLoad':True,
+ 'KeepAlive':{'SuccessfulExit':False},
+ 'LimitLoadToSessionType':'Aqua',
+ 'ProcessType':'Interactive',
+ 'Umask':0o077,
+ 'StandardOutPath':state+'/approval-ui.stdout.log',
+ 'StandardErrorPath':state+'/approval-ui.stderr.log',
+}
+with open(plist,'wb') as f: plistlib.dump(obj,f,fmt=plistlib.FMT_XML,sort_keys=True)
+PYAPPROVALPLIST
+chmod 600 "$APPROVAL_PLIST"
+
+python3 - "$INSTALL_DIR/install-manifest.json" "$CONFIG_DIR/config.json" "$PLIST" "$APPROVAL_PLIST" "$APP_BUNDLE/Contents/Info.plist" "$APP_BUNDLE/Contents/MacOS/local-executor-approval" <<'PYGENERATED'
 import hashlib,json,os,sys,tempfile
-manifest_path,config_path,plist_path,app_info_path,app_exec_path=sys.argv[1:]
+manifest_path,config_path,plist_path,approval_plist_path,app_info_path,app_exec_path=sys.argv[1:]
 def sha256(path):
     with open(path,'rb') as f: return hashlib.sha256(f.read()).hexdigest()
 with open(manifest_path,encoding='utf-8') as f: manifest=json.load(f)
 manifest.update({
     'config_sha256':sha256(config_path),
     'launchagent_plist_sha256':sha256(plist_path),
+    'approval_launchagent_plist_sha256':sha256(approval_plist_path),
     'approval_app_info_sha256':sha256(app_info_path),
     'approval_app_executable_sha256':sha256(app_exec_path),
 })
@@ -325,6 +349,7 @@ if [ "$STAGE_ONLY" -eq 1 ]; then
   echo "CONFIG:    $CONFIG_DIR/config.json"
   echo "WORKSPACE: $INSTALL_DIR/workspace.py"
   echo "LABEL:     $LABEL"
+  echo "APPROVAL_LABEL: $APPROVAL_LABEL"
   exit 0
 fi
 
@@ -353,6 +378,13 @@ launchctl kickstart -k "gui/${UID_NOW}/${LABEL}"
 sleep 1
 launchctl print "gui/${UID_NOW}/${LABEL}" >/dev/null 2>&1 || { echo "ERROR: LaunchAgent did not start" >&2; exit 1; }
 
+launchctl bootout "gui/${UID_NOW}/${APPROVAL_LABEL}" >/dev/null 2>&1 || launchctl bootout "gui/${UID_NOW}" "$APPROVAL_PLIST" >/dev/null 2>&1 || true
+launchctl bootstrap "gui/${UID_NOW}" "$APPROVAL_PLIST"
+STARTED_APPROVAL_AGENT=1
+launchctl kickstart -k "gui/${UID_NOW}/${APPROVAL_LABEL}"
+sleep 1
+launchctl print "gui/${UID_NOW}/${APPROVAL_LABEL}" >/dev/null 2>&1 || { echo "ERROR: approval UI LaunchAgent did not start" >&2; exit 1; }
+
 python3 "$INSTALL_DIR/bridge.py" doctor --config "$CONFIG_DIR/config.json" >/dev/null || { echo "ERROR: doctor failed" >&2; exit 1; }
 RID="install-smoke-$(date +%Y%m%d%H%M%S)-$$"
 TMP_REQ="$(mktemp)"; RESULT_TMP="$(mktemp)"
@@ -377,6 +409,7 @@ print('SHELL_BRIDGE_INSTALLED=1')
 PY
 "${R[@]}" deletefile "${REMOTE}results/${RID}.json" >/dev/null 2>&1 || true
 STARTED_AGENT=0
+STARTED_APPROVAL_AGENT=0
 
 if [ "$RETIRE_OLD_AFTER_SMOKE" -eq 1 ]; then
   for old_label in "$OLD_LABEL_1" "$OLD_LABEL_2"; do

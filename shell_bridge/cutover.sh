@@ -3,6 +3,8 @@ set -euo pipefail
 
 NEW_LABEL="${LOCAL_EXECUTOR_LABEL:-net.laurenzo.local-executor-bridge}"
 NEW_PLIST="${NEW_PLIST:-$HOME/Library/LaunchAgents/$NEW_LABEL.plist}"
+NEW_APPROVAL_LABEL="${LOCAL_EXECUTOR_APPROVAL_LABEL:-${NEW_LABEL}.approval-ui}"
+NEW_APPROVAL_PLIST="${NEW_APPROVAL_PLIST:-$HOME/Library/LaunchAgents/$NEW_APPROVAL_LABEL.plist}"
 NEW_INSTALL_DIR="${INSTALL_DIR:-$HOME/.local/share/local-executor-bridge}"
 NEW_CONFIG="${CONFIG_FILE:-$HOME/.config/local-executor-bridge/config.json}"
 LEGACY_INSTALL_DIR="${LEGACY_INSTALL_DIR:-$HOME/.local/share/chatgpt-shell-bridge}"
@@ -17,6 +19,7 @@ TMP_RESULT=""
 TMP_HEALTH=""
 CUTOVER_COMMITTED=0
 STARTED_NEW=0
+STARTED_APPROVAL=0
 OLD_CONSUMERS_STOPPED=0
 
 fail(){ echo "ERROR: $*" >&2; exit 1; }
@@ -25,6 +28,9 @@ need(){ command -v "$1" >/dev/null 2>&1 || fail "missing required command: $1"; 
 rollback() {
   rc=$?
   if [ "$rc" -ne 0 ] && [ "$CUTOVER_COMMITTED" -eq 0 ]; then
+    if [ "$STARTED_APPROVAL" -eq 1 ]; then
+      launchctl bootout "gui/${UID_NOW}/${NEW_APPROVAL_LABEL}" >/dev/null 2>&1 || launchctl bootout "gui/${UID_NOW}" "$NEW_APPROVAL_PLIST" >/dev/null 2>&1 || true
+    fi
     if [ "$STARTED_NEW" -eq 1 ]; then
       launchctl bootout "gui/${UID_NOW}/${NEW_LABEL}" >/dev/null 2>&1 || true
     fi
@@ -52,15 +58,16 @@ trap rollback EXIT
 [ "$(uname -s)" = Darwin ] || fail "macOS required"
 need python3; need rclone; need launchctl
 [ -f "$NEW_PLIST" ] || fail "staged v6 plist missing: $NEW_PLIST"
+[ -f "$NEW_APPROVAL_PLIST" ] || fail "staged v6 approval UI plist missing: $NEW_APPROVAL_PLIST"
 [ -f "$NEW_CONFIG" ] || fail "staged v6 config missing: $NEW_CONFIG"
 [ -f "$NEW_INSTALL_DIR/bridge.py" ] || fail "staged v6 bridge missing: $NEW_INSTALL_DIR/bridge.py"
 [ -f "$NEW_INSTALL_DIR/workspace.py" ] || fail "staged v6 coordinator missing: $NEW_INSTALL_DIR/workspace.py"
 [ -f "$NEW_INSTALL_DIR/approval_helper.py" ] || fail "staged v6 approval helper missing: $NEW_INSTALL_DIR/approval_helper.py"
 [ -f "$NEW_INSTALL_DIR/install-manifest.json" ] || fail "staged v6 install manifest missing: $NEW_INSTALL_DIR/install-manifest.json"
 
-python3 - "$NEW_INSTALL_DIR/install-manifest.json" "$NEW_INSTALL_DIR/bridge.py" "$NEW_INSTALL_DIR/workspace.py" "$NEW_INSTALL_DIR/approval_helper.py" "$NEW_CONFIG" "$NEW_PLIST" "$NEW_INSTALL_DIR/Local Executor Approval.app/Contents/Info.plist" "$NEW_INSTALL_DIR/Local Executor Approval.app/Contents/MacOS/local-executor-approval" <<'PYMANIFEST' || fail "staged v6 install manifest integrity check failed"
+python3 - "$NEW_INSTALL_DIR/install-manifest.json" "$NEW_INSTALL_DIR/bridge.py" "$NEW_INSTALL_DIR/workspace.py" "$NEW_INSTALL_DIR/approval_helper.py" "$NEW_CONFIG" "$NEW_PLIST" "$NEW_APPROVAL_PLIST" "$NEW_INSTALL_DIR/Local Executor Approval.app/Contents/Info.plist" "$NEW_INSTALL_DIR/Local Executor Approval.app/Contents/MacOS/local-executor-approval" <<'PYMANIFEST' || fail "staged v6 install manifest integrity check failed"
 import hashlib,json,sys
-manifest_path,bridge_path,workspace_path,approval_helper_path,config_path,plist_path,app_info_path,app_exec_path=sys.argv[1:]
+manifest_path,bridge_path,workspace_path,approval_helper_path,config_path,plist_path,approval_plist_path,app_info_path,app_exec_path=sys.argv[1:]
 def sha256(path):
     with open(path,'rb') as f: return hashlib.sha256(f.read()).hexdigest()
 try:
@@ -76,6 +83,7 @@ expected={
     'approval_helper_sha256':sha256(approval_helper_path),
     'config_sha256':sha256(config_path),
     'launchagent_plist_sha256':sha256(plist_path),
+    'approval_launchagent_plist_sha256':sha256(approval_plist_path),
     'approval_app_info_sha256':sha256(app_info_path),
     'approval_app_executable_sha256':sha256(app_exec_path),
 }
@@ -114,6 +122,9 @@ fi
 
 if launchctl print "gui/${UID_NOW}/${NEW_LABEL}" >/dev/null 2>&1; then
   fail "v6 service is already loaded; reconcile the existing v6 service before cutover"
+fi
+if launchctl print "gui/${UID_NOW}/${NEW_APPROVAL_LABEL}" >/dev/null 2>&1; then
+  fail "v6 approval UI service is already loaded; reconcile it before cutover"
 fi
 
 EXPECTED_APPROVAL_APP="$NEW_INSTALL_DIR/Local Executor Approval.app"
@@ -209,6 +220,10 @@ STARTED_NEW=1
 launchctl kickstart -k "gui/${UID_NOW}/${NEW_LABEL}"
 launchctl print "gui/${UID_NOW}/${NEW_LABEL}" >/dev/null || fail "v6 LaunchAgent did not start"
 python3 "$NEW_INSTALL_DIR/bridge.py" doctor --config "$NEW_CONFIG" >/dev/null || fail "v6 doctor failed after service switch"
+launchctl bootstrap "gui/${UID_NOW}" "$NEW_APPROVAL_PLIST"
+STARTED_APPROVAL=1
+launchctl kickstart -k "gui/${UID_NOW}/${NEW_APPROVAL_LABEL}"
+launchctl print "gui/${UID_NOW}/${NEW_APPROVAL_LABEL}" >/dev/null || fail "v6 approval UI LaunchAgent did not start"
 
 # End-to-end production smoke: at this point v6 is the sole mailbox consumer.
 RID="cutover-smoke-$(date +%Y%m%d%H%M%S)-$$"
