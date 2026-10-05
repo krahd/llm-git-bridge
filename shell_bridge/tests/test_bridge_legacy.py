@@ -135,7 +135,7 @@ class ConfirmationTests(unittest.TestCase):
             self.assertTrue(plan["allow_network"])
             request["write_scope"] = "system"
             plan = b.resolve_write_plan(request, cfg)
-            self.assertEqual(plan["confirmation_category"], "system_write")
+            self.assertEqual(plan["confirmation_category"], "non_repository_filesystem_mutation")
 
     def test_validate_request_preserves_required_explanation(self):
         with tempfile.TemporaryDirectory() as td:
