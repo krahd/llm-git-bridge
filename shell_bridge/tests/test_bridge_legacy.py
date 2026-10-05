@@ -93,6 +93,8 @@ class ConfirmationTests(unittest.TestCase):
         self.assertIsNone(b.high_impact_command_category("git push origin feature"))
         self.assertIsNone(b.high_impact_command_category("printf safe"))
         self.assertIsNone(b.high_impact_command_category("curl -fsS https://example.invalid"))
+        for command in ["touch notes.txt", "git add notes.txt", "git commit -m update", "git push origin feature", "git switch feature", "git merge feature", "git rebase origin/main", "make build"]:
+            self.assertIsNone(b.high_impact_command_category(command), command)
 
     def test_non_repository_mutation_classifier_covers_common_writes(self):
         self.assertEqual(b.non_repository_write_category("touch marker"), "filesystem_mutation")

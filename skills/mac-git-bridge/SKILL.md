@@ -93,6 +93,10 @@ python3 shell_bridge/request_authoring.py build \
 
 The emitted JSON contains `command`, not `argv`, and is compatible with production v5.
 
+## Confirmation policy
+
+For v5, use write_scope auto for normal repository work and reserve system scope for actions that genuinely leave repository recovery boundaries. Ordinary repository edits, commits, tests, builds, worktrees, and non-force pushes should not be escalated merely because they use a shell or network.
+
 ## Result and crash semantics
 
 Treat results as authoritative local execution evidence, not canonical repository state.
