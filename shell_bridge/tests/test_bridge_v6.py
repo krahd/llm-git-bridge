@@ -59,6 +59,18 @@ class BridgeV6SecurityTests(unittest.TestCase):
             )
             self.assertEqual(plan["confirmation_category"], "system_write")
 
+    def test_operator_approval_path_has_no_authentication_primitives(self):
+        approval_sources = [ROOT / "approval_helper.py", ROOT / "bridge.py"]
+        forbidden = (
+            "LocalAuthentication", "LAContext", "evaluatePolicy",
+            "deviceOwnerAuthentication", "userPresence", "biometryType",
+            "SecAccessControlCreateWithFlags", "kSecAccessControlUserPresence",
+            "Touch ID",
+        )
+        combined = "\n".join(path.read_text(encoding="utf-8") for path in approval_sources)
+        for primitive in forbidden:
+            self.assertNotIn(primitive, combined, f"approval path must not authenticate via {primitive}")
+
 
 class WakeLeaseTests(unittest.TestCase):
     def test_disabled_lease_is_inert(self):

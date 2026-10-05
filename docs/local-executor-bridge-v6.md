@@ -33,7 +33,7 @@ Future root/capability policy may add richer local declarations, but it must com
 
 Every request requires a bounded non-empty `explanation`. If local approval is required, the operator sees the caller's intended action and authority/effect first, followed by request ID, working directory, and exact command in selectable details.
 
-Approval is local and pre-STARTED. Decline/timeout is terminal `rejected`; no child process exists and replay cannot create a side effect. The dialog is foreground-visible and neither button may be default/focused.
+Approval is local and pre-STARTED. Decline/timeout is terminal `rejected`; no child process exists and replay cannot create a side effect. The dialog is foreground-visible and neither button may be default/focused. Approval is deliberately non-authenticating: the explicit **Allow** click itself authorizes the bounded action. The bridge must never add Touch ID, password entry, biometrics, LocalAuthentication/`LAContext`, Secure Enclave `userPresence`, or any equivalent identity-verification requirement to this path.
 
 ## Wake lease
 
