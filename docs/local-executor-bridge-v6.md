@@ -79,3 +79,8 @@ bash shell_bridge/cutover.sh
 ```
 
 `cutover.sh` refuses to run as a request through the bridge it is replacing. It requires the production mailbox to be quiescent, stops the old consumers before starting v6, runs `doctor` and an end-to-end harmless production request, rolls the old active service(s) back if qualification fails, and only after success archives old LaunchAgents and points the historical coordinator path at the bundled v6 `workspace.py`.
+
+### v6 approval UX and policy
+
+v6 uses **effect-before-command approval**, not scope-before-command approval. Merely requesting broad `system` authority does not grant it and does not by itself create an approval prompt: safe requests are downgraded to repository or read-only authority. Approval is reserved for operations whose concrete effect is destructive/high-impact, escapes the repository boundary, or is not reasonably recoverable inside the normal Git workflow. The approval helper is a persistent menu-bar queue: popups are an attention mechanism, while pending approvals remain accessible from the menu bar until allowed, rejected, or expired. Approval is click-only; it must never require Touch ID, a password, LocalAuthentication, Secure Enclave user-presence, or equivalent identity authentication.
+

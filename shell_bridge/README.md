@@ -152,3 +152,8 @@ See [`../docs/shell-bridge-v5-architecture.md`](../docs/shell-bridge-v5-architec
 ## Upgrade compatibility
 
 Fresh v6 installs use `~/.local/share/local-executor-bridge` and `~/.local/state/local-executor-bridge`. During an in-place v5 production cutover, stage v6 with the existing production state directory so durable workspace jobs survive the service switch. After the v6 smoke succeeds, the cutover installs a compatibility link at the legacy coordinator path so older clients continue to reach the bundled v6 coordinator; the legacy path is not a second daemon.
+
+### v6 approval UX and policy
+
+v6 uses **effect-before-command approval**, not scope-before-command approval. Merely requesting broad `system` authority does not grant it and does not by itself create an approval prompt: safe requests are downgraded to repository or read-only authority. Approval is reserved for operations whose concrete effect is destructive/high-impact, escapes the repository boundary, or is not reasonably recoverable inside the normal Git workflow. The approval helper is a persistent menu-bar queue: popups are an attention mechanism, while pending approvals remain accessible from the menu bar until allowed, rejected, or expired. Approval is click-only; it must never require Touch ID, a password, LocalAuthentication, Secure Enclave user-presence, or equivalent identity authentication.
+
