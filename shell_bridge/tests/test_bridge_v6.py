@@ -103,8 +103,16 @@ class BridgeV6SecurityTests(unittest.TestCase):
         source = (ROOT / "approval_helper.py").read_text(encoding="utf-8")
         self.assertIn("NSStatusBar", source)
         self.assertIn("pendingRecords", source)
+        self.assertIn("objectAtIndex(i)", source)
         self.assertIn("--queue", source)
         self.assertIn("--decide", source)
+        self.assertIn('imageWithSystemSymbolNameAccessibilityDescription("bridge"', source)
+        self.assertIn("🌉", source)
+        self.assertIn("About Local Executor Bridge", source)
+        self.assertIn('"Version: " + versionLabel', source)
+        self.assertIn('"Build: " + buildId', source)
+        self.assertIn("install-manifest.json", source)
+        self.assertNotIn('button.title = "LEB"', source)
 
 
 class WakeLeaseTests(unittest.TestCase):
