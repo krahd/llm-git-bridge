@@ -139,7 +139,7 @@ const delegate = Delegate.alloc.init;
 app.delegate = delegate;
 statusItem = $.NSStatusBar.systemStatusBar.statusItemWithLength($.NSVariableStatusItemLength);
 const bridgeImage = $.NSImage.imageWithSystemSymbolNameAccessibilityDescription("bridge", "Local Executor Bridge");
-if (bridgeImage) { bridgeImage.template = true; statusItem.button.image = bridgeImage; statusItem.button.imagePosition = $.NSImageLeft; hasBridgeImage = true; }
+if (bridgeImage) { bridgeImage.template = true; statusItem.button.image = null; button.title = "🌉"; statusItem.button.imagePosition = $.NSImageLeft; hasBridgeImage = true; }
 setStatusCount(0);
 statusItem.button.toolTip = "Local Executor Bridge " + versionLabel + " (" + buildId + ")";
 menu = $.NSMenu.alloc.initWithTitle("Approvals");
