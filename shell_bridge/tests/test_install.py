@@ -51,6 +51,8 @@ class InstallScriptTests(unittest.TestCase):
 
 
     def test_candidate_config_uses_its_own_approval_app_and_purges_legacy_keys(self):
+        self.assertIn('"$STATE_DIR" "$SHELL_BIN" "$INSTALL_DIR"', self.text)
+        self.assertIn("state,shell,install_dir=sys.argv[1:]", self.text)
         self.assertIn("Path(install_dir)/'Local Executor Approval.app'", self.text)
         self.assertIn("cfg.pop('operator_approval_public_key', None)", self.text)
         self.assertIn("cfg.pop('operator_approval_public_key_sha256', None)", self.text)

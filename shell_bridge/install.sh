@@ -204,10 +204,10 @@ with open(manifest_path,'w',encoding='utf-8') as f:
 PYMAN
 chmod 600 "$INSTALL_DIR/install-manifest.json"
 
-python3 - "$CONFIG_DIR/config.json" "$REMOTE" "$BASE_PATH" "$ROOT_ID" "$REQUESTS_ID" "$RESULTS_ID" "$INSTANCE_ID" "$ALLOWED_ROOT" "$STATE_DIR" "$SHELL_BIN" <<'PY'
+python3 - "$CONFIG_DIR/config.json" "$REMOTE" "$BASE_PATH" "$ROOT_ID" "$REQUESTS_ID" "$RESULTS_ID" "$INSTANCE_ID" "$ALLOWED_ROOT" "$STATE_DIR" "$SHELL_BIN" "$INSTALL_DIR" <<'PY'
 import json,sys
 from pathlib import Path
-path,remote,base,root_id,req_id,res_id,instance,allowed,state,shell=sys.argv[1:]
+path,remote,base,root_id,req_id,res_id,instance,allowed,state,shell,install_dir=sys.argv[1:]
 try:
     old=json.load(open(path,encoding='utf-8'))
 except Exception:
