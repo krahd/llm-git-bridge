@@ -115,6 +115,16 @@ class BridgeV6SecurityTests(unittest.TestCase):
         self.assertNotIn('button.title = "LEB"', source)
 
 
+    def test_approval_helper_is_menu_only_and_never_auto_opens_pending_requests(self):
+        source = (ROOT / "approval_helper.py").read_text(encoding="utf-8")
+        self.assertNotIn("review(firstNew)", source)
+        self.assertNotIn("function review(req)", source)
+        self.assertNotIn('\"review:\"', source)
+        self.assertIn('\"allow:\"', source)
+        self.assertIn('\"reject:\"', source)
+        self.assertIn("Allow once", source)
+        self.assertIn("Reject", source)
+
 class WakeLeaseTests(unittest.TestCase):
     def test_disabled_lease_is_inert(self):
         lease = bridge.WakeLease({"wake_lease_enabled": False, "wake_grace_seconds": 0})

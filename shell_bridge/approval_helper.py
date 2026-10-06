@@ -54,24 +54,14 @@ function decide(req, decision) {
     task.waitUntilExit;
   } catch (e) {}
 }
-function review(req) {
-  const app = $.NSApplication.sharedApplication;
-  const alert = $.NSAlert.alloc.init;
-  alert.messageText = "Allow ChatGPT to perform this action?";
-  alert.informativeText = "What ChatGPT is trying to do:\n" + String(req.explanation||"") + "\n\nWhy approval is required:\n" + String(req.category||"").replace(/_/g," ");
-  alert.alertStyle = $.NSAlertStyleWarning;
-  alert.addButtonWithTitle("Reject");
-  alert.addButtonWithTitle("Allow");
-  const details = "Request: " + req.request_id + "\nWorking directory: " + req.cwd + "\n\nCommand:\n" + req.command;
-  const tv = $.NSTextView.alloc.initWithFrame($.NSMakeRect(0,0,820,240));
-  tv.string = details; tv.editable = false; tv.selectable = true;
-  tv.font = $.NSFont.monospacedSystemFontOfSizeWeight(11,$.NSFontWeightRegular);
-  const sv = $.NSScrollView.alloc.initWithFrame($.NSMakeRect(0,0,840,260));
-  sv.documentView = tv; sv.hasVerticalScroller = true; sv.hasHorizontalScroller = true; sv.autohidesScrollers = true; sv.borderType = $.NSBezelBorder;
-  alert.accessoryView = sv;
-  app.activateIgnoringOtherApps(true);
-  const response = alert.runModal;
-  decide(req, response === $.NSAlertSecondButtonReturn ? "allow" : "cancel");
+function requestById(rid) {
+  for (const req of pendingRecords()) if (req.request_id === rid) return req;
+  return null;
+}
+function decideFromMenu(sender, decision) {
+  const rid = unwrap(sender.representedObject);
+  const req = requestById(rid);
+  if (req) decide(req, decision);
 }
 function shortText(s,n) { s=String(s||"").replace(/\s+/g," ").trim(); return s.length>n ? s.slice(0,n-1)+"…" : s; }
 function setStatusCount(count) {
@@ -106,8 +96,15 @@ ObjC.registerSubclass({
       } else {
         setStatusCount(records.length);
         for (const req of records) {
-          const item = $.NSMenuItem.alloc.initWithTitleActionKeyEquivalent(shortText(req.explanation || req.request_id, 72), "review:", "");
-          item.target = this; item.representedObject = $(req.request_id); menu.addItem(item);
+          const item = $.NSMenuItem.alloc.initWithTitleActionKeyEquivalent(shortText(req.explanation || req.request_id, 72), null, "");
+          const sub = $.NSMenu.alloc.initWithTitle("Approval");
+          const what = $.NSMenuItem.alloc.initWithTitleActionKeyEquivalent("What: " + shortText(req.explanation || req.request_id, 110), null, ""); what.enabled=false; sub.addItem(what);
+          const why = $.NSMenuItem.alloc.initWithTitleActionKeyEquivalent("Why: " + shortText(String(req.category||"approval required").replace(/_/g," "), 110), null, ""); why.enabled=false; sub.addItem(why);
+          const where = $.NSMenuItem.alloc.initWithTitleActionKeyEquivalent("Where: " + shortText(req.cwd || "", 110), null, ""); where.enabled=false; sub.addItem(where);
+          sub.addItem($.NSMenuItem.separatorItem);
+          const allow = $.NSMenuItem.alloc.initWithTitleActionKeyEquivalent("Allow once", "allow:", ""); allow.target=this; allow.representedObject=$(req.request_id); sub.addItem(allow);
+          const reject = $.NSMenuItem.alloc.initWithTitleActionKeyEquivalent("Reject", "reject:", ""); reject.target=this; reject.representedObject=$(req.request_id); sub.addItem(reject);
+          item.submenu = sub; menu.addItem(item);
         }
       }
       menu.addItem($.NSMenuItem.separatorItem);
@@ -116,17 +113,11 @@ ObjC.registerSubclass({
       const quit = $.NSMenuItem.alloc.initWithTitleActionKeyEquivalent("Quit approval queue", "quit:", ""); quit.target=this; menu.addItem(quit);
       const current = {};
       for (const req of records) current[req.request_id]=true;
-      let firstNew = null;
-      for (const req of records) if (!known[req.request_id] && !firstNew) firstNew=req;
       known = current;
-      if (firstNew) review(firstNew);
       firstRefresh = false;
     }},
-    "review:": { types:["void",["id"]], implementation:function(sender) {
-      const rid = unwrap(sender.representedObject);
-      for (const req of pendingRecords()) if (req.request_id === rid) { review(req); break; }
-      this['refresh:'](sender);
-    }},
+    "allow:": { types:["void",["id"]], implementation:function(sender) { decideFromMenu(sender, "allow"); this['refresh:'](sender); }},
+    "reject:": { types:["void",["id"]], implementation:function(sender) { decideFromMenu(sender, "cancel"); this['refresh:'](sender); }},
     "about:": { types:["void",["id"]], implementation:function(sender) { showAbout(); }},
     "quit:": { types:["void",["id"]], implementation:function(sender) { $.NSApplication.sharedApplication.terminate(null); }}
   }
