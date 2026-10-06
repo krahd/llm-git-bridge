@@ -134,4 +134,13 @@ class RepositoryVisibilityPolicyTests(unittest.TestCase):
     def test_normal_operations_on_existing_public_repo_are_not_prohibited(self):
         self.assertIsNone(bridge.prohibited_command_reason("git push origin main"))
 
+
+
+class V6ApprovalHelperSourceTests(unittest.TestCase):
+    def test_jxa_registered_delegate_is_resolved_from_objc_namespace(self):
+        source = (Path(__file__).resolve().parents[1] / "approval_helper.py").read_text(encoding="utf-8")
+        self.assertIn('ObjC.registerSubclass({', source)
+        self.assertIn('const Delegate = $.LEBApprovalQueueDelegate;', source)
+        self.assertNotIn('const Delegate = ObjC.registerSubclass({', source)
+
 if __name__ == "__main__": unittest.main()

@@ -68,7 +68,7 @@ function review(req) {
 }
 function shortText(s,n) { s=String(s||"").replace(/\s+/g," ").trim(); return s.length>n ? s.slice(0,n-1)+"…" : s; }
 
-const Delegate = ObjC.registerSubclass({
+ObjC.registerSubclass({
   name: "LEBApprovalQueueDelegate",
   methods: {
     "refresh:": { types:["void",["id"]], implementation:function(sender) {
@@ -105,6 +105,7 @@ const Delegate = ObjC.registerSubclass({
     "quit:": { types:["void",["id"]], implementation:function(sender) { $.NSApplication.sharedApplication.terminate(null); }}
   }
 });
+const Delegate = $.LEBApprovalQueueDelegate;
 
 const app = $.NSApplication.sharedApplication;
 app.setActivationPolicy($.NSApplicationActivationPolicyAccessory);
