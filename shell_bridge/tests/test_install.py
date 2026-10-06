@@ -49,5 +49,11 @@ class InstallScriptTests(unittest.TestCase):
         self.assertIn("install.sh --stage-only", self.text)
         self.assertIn("cutover.sh out-of-band", self.text)
 
+
+    def test_candidate_config_uses_its_own_approval_app_and_purges_legacy_keys(self):
+        self.assertIn("Path(install_dir)/'Local Executor Approval.app'", self.text)
+        self.assertIn("cfg.pop('operator_approval_public_key', None)", self.text)
+        self.assertIn("cfg.pop('operator_approval_public_key_sha256', None)", self.text)
+
 if __name__ == "__main__":
     unittest.main()

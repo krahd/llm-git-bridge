@@ -213,6 +213,8 @@ try:
 except Exception:
     old={}
 cfg=dict(old)
+cfg.pop('operator_approval_public_key', None)
+cfg.pop('operator_approval_public_key_sha256', None)
 cfg.update({
  'remote':remote,'base_path':base,'drive_root_folder_id':root_id,
  'requests_folder_id':req_id,'results_folder_id':res_id,'bridge_instance_id':instance,
@@ -223,7 +225,7 @@ cfg.update({
  'max_stdin_bytes':1024*1024,'max_output_bytes':16*1024*1024,
  'operator_confirmation_mode':cfg.get('operator_confirmation_mode','auto'),
  'operator_confirmation_timeout_seconds':cfg.get('operator_confirmation_timeout_seconds',300),
- 'operator_approval_app':str(Path(state).parent.parent/'share'/'local-executor-bridge'/'Local Executor Approval.app'),
+ 'operator_approval_app': str(Path(install_dir)/'Local Executor Approval.app'),
  'wake_lease_enabled':cfg.get('wake_lease_enabled',True),
  'wake_grace_seconds':cfg.get('wake_grace_seconds',3600.0),
 })
