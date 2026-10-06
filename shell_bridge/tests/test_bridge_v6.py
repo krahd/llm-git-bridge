@@ -115,6 +115,21 @@ class BridgeV6SecurityTests(unittest.TestCase):
         self.assertNotIn('button.title = "LEB"', source)
 
 
+    def test_approval_helper_status_item_identifier_is_bound(self):
+        source = (ROOT / "approval_helper.py").read_text(encoding="utf-8")
+        self.assertIn('statusItem.button.title = "🌉"', source)
+        self.assertNotIn('button.title = "🌉"', source.replace('statusItem.button.title = "🌉"', ''))
+
+    def test_approval_helper_has_no_keyboard_or_focus_approval_path(self):
+        source = (ROOT / "approval_helper.py").read_text(encoding="utf-8")
+        for primitive in ("keyEquivalent", "performKeyEquivalent", "keyDown", "defaultButtonCell", "sendAction"):
+            self.assertNotIn(primitive, source)
+        about_start = source.index("function showAbout()")
+        about_end = source.index("\n}", about_start) + 2
+        non_about = source[:about_start] + source[about_end:]
+        self.assertNotIn("activateIgnoringOtherApps", non_about)
+        self.assertNotIn("runModal", non_about)
+
     def test_approval_helper_is_menu_only_and_never_auto_opens_pending_requests(self):
         source = (ROOT / "approval_helper.py").read_text(encoding="utf-8")
         self.assertNotIn("review(firstNew)", source)
