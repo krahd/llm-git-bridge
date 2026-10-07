@@ -38,7 +38,13 @@ class BridgeV6SecurityTests(unittest.TestCase):
                                    read_roots=[Path("/tmp/repo")], deny_home_reads=True)
         self.assertIn("(deny network*)", p)
         self.assertIn("(deny file-read*", p)
-        self.assertIn(str(Path.home().resolve()), p)
+        home = Path.home().resolve()
+        self.assertIn(str(home), p)
+        self.assertIn(f'(literal "{home / ".gitconfig"}")', p)
+        self.assertIn(f'(subpath "{home / ".config" / "git"}")', p)
+        self.assertIn(f'(literal "{home.parent}")', p)
+        self.assertIn(f'(literal "{home}")', p)
+        self.assertIn(str(Path(tempfile.gettempdir()).resolve()), p)
 
     def test_workspace_trust_rejects_outer_shell_operator(self):
         with tempfile.TemporaryDirectory() as td:

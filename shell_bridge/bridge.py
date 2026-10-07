@@ -435,7 +435,8 @@ def sandbox_profile(write_roots: list[Path], *, allow_network: bool = True,
                     read_roots: list[Path] | None = None,
                     deny_home_reads: bool = False) -> str:
     roots: list[Path] = []
-    for root in write_roots:
+    scratch_roots = [Path(tempfile.gettempdir()), *write_roots]
+    for root in scratch_roots:
         try:
             resolved = root.expanduser().resolve()
         except OSError:
@@ -449,6 +450,11 @@ def sandbox_profile(write_roots: list[Path], *, allow_network: bool = True,
     if deny_home_reads:
         home = Path.home().resolve()
         parts.append(f'(deny file-read* (subpath "{_sbpl_string(str(home))}"))')
+        parts.append(
+            f'(allow file-read-metadata '
+            f'(literal "{_sbpl_string(str(home.parent))}") '
+            f'(literal "{_sbpl_string(str(home))}"))'
+        )
         allowed_reads: list[Path] = []
         for root in read_roots or []:
             try:
@@ -458,8 +464,15 @@ def sandbox_profile(write_roots: list[Path], *, allow_network: bool = True,
             if resolved not in allowed_reads:
                 allowed_reads.append(resolved)
         read_clauses = " ".join(f'(subpath "{_sbpl_string(str(root))}")' for root in allowed_reads)
-        if read_clauses:
-            parts.append(f"(allow file-read* {read_clauses})")
+        git_config = home / ".gitconfig"
+        git_config_dir = home / ".config" / "git"
+        git_config_clauses = (
+            f'(literal "{_sbpl_string(str(git_config))}") '
+            f'(subpath "{_sbpl_string(str(git_config_dir))}")'
+        )
+        combined_read_clauses = " ".join(x for x in (read_clauses, git_config_clauses) if x)
+        if combined_read_clauses:
+            parts.append(f"(allow file-read* {combined_read_clauses})")
     parts.append(f'(allow file-write* (literal "/dev/null") {write_clauses})')
     return "".join(parts)
 
