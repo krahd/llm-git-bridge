@@ -242,10 +242,10 @@ SWIFT_SDK="$DEVELOPER_DIR_VALUE/Platforms/MacOSX.platform/Developer/SDKs/MacOSX.
 [ -d "$SWIFT_SDK" ] || fail "macOS SDK is required to build the native approval menu-bar app: $SWIFT_SDK"
 mkdir -p "$APP_BUNDLE/Contents/MacOS"
 APPROVAL_ROOT="$STATE_DIR/approvals"
-python3 - "$APP_BUNDLE/Contents/Info.plist" "$APPROVAL_ROOT" "$INSTALL_DIR/approval_helper.py" <<'PYAPPPLIST'
+python3 - "$APP_BUNDLE/Contents/Info.plist" "$APPROVAL_ROOT" "$INSTALL_DIR/approval_helper.py" "$PYTHON_BIN" <<'PYAPPPLIST'
 import plistlib,sys
-path,approval_root,helper_path=sys.argv[1:]
-obj={'CFBundleIdentifier':'net.laurenzo.local-executor-approval','CFBundleName':'Local Executor Approval','CFBundleDisplayName':'Local Executor Approval','CFBundlePackageType':'APPL','CFBundleExecutable':'local-executor-approval','CFBundleVersion':'1','CFBundleShortVersionString':'1.0','LSUIElement':True,'NSHighResolutionCapable':True,'ApprovalRoot':approval_root,'ApprovalHelperPath':helper_path}
+path,approval_root,helper_path,python_path=sys.argv[1:]
+obj={'CFBundleIdentifier':'net.laurenzo.local-executor-approval','CFBundleName':'Local Executor Approval','CFBundleDisplayName':'Local Executor Approval','CFBundlePackageType':'APPL','CFBundleExecutable':'local-executor-approval','CFBundleVersion':'1','CFBundleShortVersionString':'1.0','LSUIElement':True,'NSHighResolutionCapable':True,'ApprovalRoot':approval_root,'ApprovalHelperPath':helper_path,'ApprovalPythonPath':python_path}
 with open(path,'wb') as f: plistlib.dump(obj,f,fmt=plistlib.FMT_XML,sort_keys=True)
 PYAPPPLIST
 "$SWIFTC_BIN" -sdk "$SWIFT_SDK" "$SCRIPT_DIR/approval_gui.swift" -framework AppKit -framework Foundation -o "$APP_BUNDLE/Contents/MacOS/local-executor-approval"
