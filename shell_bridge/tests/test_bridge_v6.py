@@ -95,7 +95,7 @@ class BridgeV6SecurityTests(unittest.TestCase):
             self.assertIn("confirmation_category", plan)
 
     def test_operator_approval_path_has_no_authentication_primitives(self):
-        approval_sources = [ROOT / "approval_helper.py", ROOT / "bridge.py"]
+        approval_sources = [ROOT / "approval_helper.py", ROOT / "approval_gui.swift", ROOT / "bridge.py"]
         forbidden = (
             "LocalAuthentication", "LAContext", "evaluatePolicy",
             "deviceOwnerAuthentication", "userPresence", "biometryType",
@@ -107,45 +107,35 @@ class BridgeV6SecurityTests(unittest.TestCase):
             self.assertNotIn(primitive, combined, f"approval path must not authenticate via {primitive}")
 
     def test_approval_helper_exposes_persistent_menu_bar_queue(self):
-        source = (ROOT / "approval_helper.py").read_text(encoding="utf-8")
-        self.assertIn("NSStatusBar", source)
-        self.assertIn("pendingRecords", source)
-        self.assertIn("objectAtIndex(i)", source)
-        self.assertIn("--queue", source)
-        self.assertIn("--decide", source)
-        self.assertIn('imageWithSystemSymbolNameAccessibilityDescription("bridge"', source)
+        source = (ROOT / "approval_gui.swift").read_text(encoding="utf-8")
+        self.assertIn("NSStatusBar.system.statusItem", source)
+        self.assertIn("pendingRequests", source)
+        self.assertIn("ApprovalRoot", source)
+        self.assertIn("ApprovalHelperPath", source)
         self.assertIn("🌉", source)
         self.assertIn("About Local Executor Bridge", source)
-        self.assertIn('"Version: " + versionLabel', source)
-        self.assertIn('"Build: " + buildId', source)
-        self.assertIn("install-manifest.json", source)
-        self.assertNotIn('button.title = "LEB"', source)
-
-
-    def test_approval_helper_status_item_identifier_is_bound(self):
-        source = (ROOT / "approval_helper.py").read_text(encoding="utf-8")
-        self.assertIn('statusItem.button.title = "🌉"', source)
-        self.assertNotIn('button.title = "🌉"', source.replace('statusItem.button.title = "🌉"', ''))
-
-    def test_approval_helper_has_no_keyboard_or_focus_approval_path(self):
-        source = (ROOT / "approval_helper.py").read_text(encoding="utf-8")
-        for primitive in ("keyEquivalent", "performKeyEquivalent", "keyDown", "defaultButtonCell", "sendAction"):
-            self.assertNotIn(primitive, source)
-        about_start = source.index("function showAbout()")
-        about_end = source.index("\n}", about_start) + 2
-        non_about = source[:about_start] + source[about_end:]
-        self.assertNotIn("activateIgnoringOtherApps", non_about)
-        self.assertNotIn("runModal", non_about)
-
-    def test_approval_helper_is_menu_only_and_never_auto_opens_pending_requests(self):
-        source = (ROOT / "approval_helper.py").read_text(encoding="utf-8")
-        self.assertNotIn("review(firstNew)", source)
-        self.assertNotIn("function review(req)", source)
-        self.assertNotIn('\"review:\"', source)
-        self.assertIn('\"allow:\"', source)
-        self.assertIn('\"reject:\"', source)
         self.assertIn("Allow once", source)
         self.assertIn("Reject", source)
+
+    def test_approval_helper_status_item_identifier_is_bound(self):
+        source = (ROOT / "approval_gui.swift").read_text(encoding="utf-8")
+        self.assertIn('statusItem.button?.title = "🌉"', source)
+
+    def test_approval_helper_has_no_keyboard_or_focus_approval_path(self):
+        source = (ROOT / "approval_gui.swift").read_text(encoding="utf-8")
+        for primitive in ("performKeyEquivalent", "keyDown", "defaultButtonCell", "sendAction"):
+            self.assertNotIn(primitive, source)
+        self.assertNotIn("NSWindow(", source)
+        self.assertEqual(source.count("runModal()"), 1)
+
+    def test_approval_helper_is_menu_only_and_never_auto_opens_pending_requests(self):
+        source = (ROOT / "approval_gui.swift").read_text(encoding="utf-8")
+        for primitive in ("LocalAuthentication", "LAContext", "SecureEnclave", "ApprovalWindowController"):
+            self.assertNotIn(primitive, source)
+        self.assertIn('#selector(allow(_:))', source)
+        self.assertIn('#selector(reject(_:))', source)
+        for label in ("What: ", "Why: ", "Where: ", "Allow once", "Reject"):
+            self.assertIn(label, source)
 
 class WakeLeaseTests(unittest.TestCase):
     def test_disabled_lease_is_inert(self):
@@ -177,10 +167,10 @@ class RepositoryVisibilityPolicyTests(unittest.TestCase):
 
 
 class V6ApprovalHelperSourceTests(unittest.TestCase):
-    def test_jxa_registered_delegate_is_resolved_from_objc_namespace(self):
-        source = (Path(__file__).resolve().parents[1] / "approval_helper.py").read_text(encoding="utf-8")
-        self.assertIn('ObjC.registerSubclass({', source)
-        self.assertIn('const Delegate = $.LEBApprovalQueueDelegate;', source)
-        self.assertNotIn('const Delegate = ObjC.registerSubclass({', source)
+    def test_native_app_owns_status_item_instead_of_python_jxa_child(self):
+        gui = (Path(__file__).resolve().parents[1] / "approval_gui.swift").read_text(encoding="utf-8")
+        self.assertNotIn("osascript", gui)
+        self.assertIn("NSApplication.shared", gui)
+        self.assertIn("NSStatusBar.system.statusItem", gui)
 
 if __name__ == "__main__": unittest.main()

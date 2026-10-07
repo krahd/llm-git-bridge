@@ -235,17 +235,21 @@ chmod 600 "$CONFIG_DIR/config.json"
 
 RCLONE_BIN="$(command -v rclone)"; PYTHON_BIN="$(command -v python3)"
 APP_BUNDLE="$INSTALL_DIR/Local Executor Approval.app"
+DEVELOPER_DIR_VALUE="${DEVELOPER_DIR:-$(/usr/bin/xcode-select -p 2>/dev/null || true)}"
+DIRECT_SWIFTC="$DEVELOPER_DIR_VALUE/Toolchains/XcodeDefault.xctoolchain/usr/bin/swiftc"
+if [ -x "$DIRECT_SWIFTC" ]; then SWIFTC_BIN="$DIRECT_SWIFTC"; else SWIFTC_BIN="$(command -v swiftc)" || fail "swiftc is required to build the native approval menu-bar app"; fi
+SWIFT_SDK="$DEVELOPER_DIR_VALUE/Platforms/MacOSX.platform/Developer/SDKs/MacOSX.sdk"
+[ -d "$SWIFT_SDK" ] || fail "macOS SDK is required to build the native approval menu-bar app: $SWIFT_SDK"
 mkdir -p "$APP_BUNDLE/Contents/MacOS"
-python3 - "$APP_BUNDLE/Contents/Info.plist" <<'PYAPPPLIST'
+APPROVAL_ROOT="$STATE_DIR/approvals"
+python3 - "$APP_BUNDLE/Contents/Info.plist" "$APPROVAL_ROOT" "$INSTALL_DIR/approval_helper.py" <<'PYAPPPLIST'
 import plistlib,sys
-obj={'CFBundleIdentifier':'net.laurenzo.local-executor-approval','CFBundleName':'Local Executor Approval','CFBundleDisplayName':'Local Executor Approval','CFBundlePackageType':'APPL','CFBundleExecutable':'approval-helper','CFBundleVersion':'1','CFBundleShortVersionString':'1.0','LSUIElement':True,'NSHighResolutionCapable':True}
-with open(sys.argv[1],'wb') as f: plistlib.dump(obj,f,fmt=plistlib.FMT_XML,sort_keys=True)
+path,approval_root,helper_path=sys.argv[1:]
+obj={'CFBundleIdentifier':'net.laurenzo.local-executor-approval','CFBundleName':'Local Executor Approval','CFBundleDisplayName':'Local Executor Approval','CFBundlePackageType':'APPL','CFBundleExecutable':'local-executor-approval','CFBundleVersion':'1','CFBundleShortVersionString':'1.0','LSUIElement':True,'NSHighResolutionCapable':True,'ApprovalRoot':approval_root,'ApprovalHelperPath':helper_path}
+with open(path,'wb') as f: plistlib.dump(obj,f,fmt=plistlib.FMT_XML,sort_keys=True)
 PYAPPPLIST
-cat > "$APP_BUNDLE/Contents/MacOS/approval-helper" <<EOFAPP
-#!/bin/sh
-exec "$PYTHON_BIN" "$INSTALL_DIR/approval_helper.py" --queue "$STATE_DIR/approvals"
-EOFAPP
-chmod 700 "$APP_BUNDLE/Contents/MacOS/approval-helper"
+"$SWIFTC_BIN" -sdk "$SWIFT_SDK" "$SCRIPT_DIR/approval_gui.swift" -framework AppKit -framework Foundation -o "$APP_BUNDLE/Contents/MacOS/local-executor-approval"
+chmod 700 "$APP_BUNDLE/Contents/MacOS/local-executor-approval"
 
 
 PATH_VALUE="$(dirname "$RCLONE_BIN"):$(dirname "$PYTHON_BIN"):/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin:/usr/sbin:/sbin"
