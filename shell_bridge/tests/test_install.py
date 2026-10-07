@@ -56,6 +56,8 @@ class InstallScriptTests(unittest.TestCase):
         self.assertIn("'CFBundleExecutable':'local-executor-approval'", self.text)
         self.assertIn("'ApprovalRoot':approval_root", self.text)
         self.assertIn("'ApprovalHelperPath':helper_path", self.text)
+        self.assertIn("'ApprovalPythonPath':python_path", self.text)
+        self.assertIn('"$INSTALL_DIR/approval_helper.py" "$PYTHON_BIN"', self.text)
         self.assertNotIn('exec "$PYTHON_BIN" "$INSTALL_DIR/approval_helper.py" --queue', self.text)
 
     def test_candidate_config_uses_its_own_approval_app_and_purges_legacy_keys(self):

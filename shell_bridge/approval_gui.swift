@@ -15,7 +15,9 @@ struct ApprovalRequest: Codable {
 final class ApprovalController: NSObject, NSApplicationDelegate {
     private let approvalRoot: URL
     private let helperPath: String
+    private let pythonPath: String
     private var statusItem: NSStatusItem!
+    private var lastDecisionError: String?
     private let menu = NSMenu(title: "Approvals")
     private var timer: Timer?
 
@@ -23,6 +25,7 @@ final class ApprovalController: NSObject, NSApplicationDelegate {
         let info = Bundle.main.infoDictionary ?? [:]
         let root = info["ApprovalRoot"] as? String ?? ""
         helperPath = info["ApprovalHelperPath"] as? String ?? ""
+        pythonPath = info["ApprovalPythonPath"] as? String ?? ""
         approvalRoot = URL(fileURLWithPath: root, isDirectory: true)
         super.init()
     }
@@ -76,12 +79,24 @@ final class ApprovalController: NSObject, NSApplicationDelegate {
         let pending = approvalRoot.appendingPathComponent("pending/" + req.request_id + ".json").path
         let out = approvalRoot.appendingPathComponent("decisions/" + req.request_id + ".json").path
         let process = Process()
-        process.executableURL = URL(fileURLWithPath: "/usr/bin/python3")
+        process.executableURL = URL(fileURLWithPath: pythonPath)
         process.arguments = [helperPath, "--decide", pending, out, decision]
         do {
+            guard !pythonPath.isEmpty else {
+                lastDecisionError = "Approval helper Python path is missing"
+                refresh()
+                return
+            }
             try process.run()
             process.waitUntilExit()
-        } catch { }
+            if process.terminationStatus == 0 {
+                lastDecisionError = nil
+            } else {
+                lastDecisionError = "Approval decision failed (exit \(process.terminationStatus))"
+            }
+        } catch {
+            lastDecisionError = "Approval decision failed: \(error.localizedDescription)"
+        }
         refresh()
     }
 
@@ -107,6 +122,9 @@ final class ApprovalController: NSObject, NSApplicationDelegate {
         let records = pendingRequests()
         menu.removeAllItems()
         menu.addItem(disabledItem("Local Executor Bridge v6"))
+        if let lastDecisionError {
+            menu.addItem(disabledItem("Error: " + short(lastDecisionError, 100)))
+        }
         menu.addItem(.separator())
         if records.isEmpty {
             menu.addItem(disabledItem("No approvals pending"))
