@@ -22,24 +22,38 @@ printf 'BEGIN %s suffix=%s\n' "$(date -u +%FT%TZ)" "$SUFFIX"
 fail(){ echo "ERROR: $*" >&2; exit 1; }
 need(){ command -v "$1" >/dev/null 2>&1 || fail "missing command: $1"; }
 need python3; need "$LAUNCHCTL"
-OLD_WAS_ACTIVE=0
+PREVIOUS_LABEL=""
+PREVIOUS_PLIST=""
 NEW_STARTED=0
 COMMITTED=0
+consider_previous(){
+  label="$1"; plist="$2"
+  [ "$label" != "$NEW_LABEL" ] || return 0
+  if "$LAUNCHCTL" print "gui/$UID_NOW/$label" >/dev/null 2>&1; then
+    [ -z "$PREVIOUS_LABEL" ] || fail "multiple active v6 staging services: $PREVIOUS_LABEL and $label"
+    PREVIOUS_LABEL="$label"; PREVIOUS_PLIST="$plist"
+  fi
+}
 rollback(){
   rc=$?
   if [ "$rc" -ne 0 ] && [ "$COMMITTED" -eq 0 ]; then
     echo "ROLLBACK rc=$rc"
     if [ "$NEW_STARTED" -eq 1 ]; then "$LAUNCHCTL" bootout "gui/$UID_NOW/$NEW_LABEL" >/dev/null 2>&1 || true; fi
-    if [ "$OLD_WAS_ACTIVE" -eq 1 ] && [ -f "$OLD_PLIST" ]; then
-      "$LAUNCHCTL" bootstrap "gui/$UID_NOW" "$OLD_PLIST" >/dev/null 2>&1 || true
-      "$LAUNCHCTL" kickstart -k "gui/$UID_NOW/$OLD_LABEL" >/dev/null 2>&1 || true
+    if [ -n "$PREVIOUS_LABEL" ] && [ -f "$PREVIOUS_PLIST" ]; then
+      "$LAUNCHCTL" bootstrap "gui/$UID_NOW" "$PREVIOUS_PLIST" >/dev/null 2>&1 || true
+      "$LAUNCHCTL" kickstart -k "gui/$UID_NOW/$PREVIOUS_LABEL" >/dev/null 2>&1 || true
     fi
   fi
   exit "$rc"
 }
 trap rollback EXIT
 [ -f "$OLD_PLIST" ] || fail "old v6 staging plist missing: $OLD_PLIST"
-if "$LAUNCHCTL" print "gui/$UID_NOW/$OLD_LABEL" >/dev/null 2>&1; then OLD_WAS_ACTIVE=1; fi
+consider_previous "$OLD_LABEL" "$OLD_PLIST"
+for plist in "$HOME_ROOT"/Library/LaunchAgents/net.laurenzo.local-executor-bridge-v6-candidate-*.plist; do
+  [ -e "$plist" ] || continue
+  label="$(basename "$plist" .plist)"
+  consider_previous "$label" "$plist"
+done
 if [ "${MIGRATOR_SKIP_STAGE:-0}" != 1 ]; then HOME="$HOME_ROOT" "$ROOT/shell_bridge/bootstrap_v6_noauth_stage.sh" "$SUFFIX"; fi
 [ -f "$NEW_PLIST" ] || fail "candidate plist missing: $NEW_PLIST"
 [ -f "$NEW_CONFIG" ] || fail "candidate config missing: $NEW_CONFIG"
@@ -64,10 +78,10 @@ if 'review(firstNew)' in s or 'function review(req)' in s: raise SystemExit('foc
 if 'Allow once' not in s or 'Reject' not in s: raise SystemExit('menu decisions missing')
 PYAUTH
 if [ "${MIGRATOR_DRY_RUN:-0}" = 1 ]; then
-  printf 'PLAN old=%s new=%s config=%s install=%s\n' "$OLD_LABEL" "$NEW_LABEL" "$NEW_CONFIG" "$NEW_INSTALL"
+  printf 'PLAN previous=%s new=%s config=%s install=%s\n' "${PREVIOUS_LABEL:-none}" "$NEW_LABEL" "$NEW_CONFIG" "$NEW_INSTALL"
   COMMITTED=1; trap - EXIT; exit 0
 fi
-if [ "$OLD_WAS_ACTIVE" -eq 1 ]; then "$LAUNCHCTL" bootout "gui/$UID_NOW/$OLD_LABEL"; fi
+if [ -n "$PREVIOUS_LABEL" ]; then "$LAUNCHCTL" bootout "gui/$UID_NOW/$PREVIOUS_LABEL"; fi
 "$LAUNCHCTL" bootout "gui/$UID_NOW/$NEW_LABEL" >/dev/null 2>&1 || true
 "$LAUNCHCTL" bootstrap "gui/$UID_NOW" "$NEW_PLIST"
 NEW_STARTED=1
@@ -92,4 +106,4 @@ PYHEALTH
 fi
 COMMITTED=1
 trap - EXIT
-printf 'MIGRATED old=%s new=%s instance=%s\n' "$OLD_LABEL" "$NEW_LABEL" "$INSTANCE_ID"
+printf 'MIGRATED previous=%s new=%s instance=%s\n' "${PREVIOUS_LABEL:-none}" "$NEW_LABEL" "$INSTANCE_ID"

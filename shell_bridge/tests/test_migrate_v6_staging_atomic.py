@@ -25,6 +25,20 @@ class AtomicMigratorTests(unittest.TestCase):
     def test_failure_after_candidate_start_rolls_back_old_v6_only(self):
         with tempfile.TemporaryDirectory() as td:
             home,suffix,fake,calls=self.make_fixture(td); r=self.run_migrator(home,suffix,fake,{'MIGRATOR_FAIL_AFTER_START':'1'}); self.assertNotEqual(r.returncode,0); text=calls.read_text(); self.assertIn('bootout gui/501/net.laurenzo.local-executor-bridge-v6-staging',text); self.assertIn('bootstrap gui/501 '+str(home/'Library/LaunchAgents/net.laurenzo.local-executor-bridge-v6-staging.plist'),text); self.assertNotIn('io.llm-git-bridge.daemon',text); self.assertNotIn('com.tom.chatgpt-shell-bridge',text)
+    def test_repeat_migration_retires_and_restores_active_candidate(self):
+        with tempfile.TemporaryDirectory() as td:
+            home,suffix,fake,calls=self.make_fixture(td)
+            prev='net.laurenzo.local-executor-bridge-v6-candidate-previous'
+            prev_plist=home/f'Library/LaunchAgents/{prev}.plist'; prev_plist.write_text('previous')
+            fake.write_text('#!/bin/bash\necho "$@" >> "'+str(calls)+'"\nif [ "$1" = print ]; then case "$2" in *candidate-previous) exit 0;; *) exit 1;; esac; fi\nexit 0\n'); fake.chmod(0o755)
+            r=self.run_migrator(home,suffix,fake,{'MIGRATOR_FAIL_AFTER_START':'1'})
+            self.assertNotEqual(r.returncode,0)
+            text=calls.read_text()
+            self.assertIn('bootout gui/501/'+prev,text)
+            self.assertIn('bootstrap gui/501 '+str(prev_plist),text)
+            self.assertIn('kickstart -k gui/501/'+prev,text)
+            self.assertNotIn('bootout gui/501/net.laurenzo.local-executor-bridge-v6-staging\n',text)
+
     def test_source_never_targets_v5(self):
         s=(ROOT/'migrate_v6_staging_atomic.sh').read_text(); self.assertNotIn('io.llm-git-bridge.daemon',s); self.assertNotIn('com.tom.chatgpt-shell-bridge',s); self.assertNotIn('chatgpt-shell-bridge/config',s)
     def test_app_builder_uses_single_atomic_migrator(self):
