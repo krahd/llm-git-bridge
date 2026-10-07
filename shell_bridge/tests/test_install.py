@@ -50,6 +50,14 @@ class InstallScriptTests(unittest.TestCase):
         self.assertIn("cutover.sh out-of-band", self.text)
 
 
+    def test_installer_builds_native_menu_bar_approval_app(self):
+        self.assertIn('approval_gui.swift', self.text)
+        self.assertIn('swiftc is required to build the native approval menu-bar app', self.text)
+        self.assertIn("'CFBundleExecutable':'local-executor-approval'", self.text)
+        self.assertIn("'ApprovalRoot':approval_root", self.text)
+        self.assertIn("'ApprovalHelperPath':helper_path", self.text)
+        self.assertNotIn('exec "$PYTHON_BIN" "$INSTALL_DIR/approval_helper.py" --queue', self.text)
+
     def test_candidate_config_uses_its_own_approval_app_and_purges_legacy_keys(self):
         self.assertIn('"$STATE_DIR" "$SHELL_BIN" "$INSTALL_DIR"', self.text)
         self.assertIn("state,shell,install_dir=sys.argv[1:]", self.text)
