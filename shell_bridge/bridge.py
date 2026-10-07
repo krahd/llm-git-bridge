@@ -466,9 +466,11 @@ def sandbox_profile(write_roots: list[Path], *, allow_network: bool = True,
         read_clauses = " ".join(f'(subpath "{_sbpl_string(str(root))}")' for root in allowed_reads)
         git_config = home / ".gitconfig"
         git_config_dir = home / ".config" / "git"
+        git_global_excludes = home / ".gitignore_global"
         git_config_clauses = (
             f'(literal "{_sbpl_string(str(git_config))}") '
-            f'(subpath "{_sbpl_string(str(git_config_dir))}")'
+            f'(subpath "{_sbpl_string(str(git_config_dir))}") '
+            f'(literal "{_sbpl_string(str(git_global_excludes))}")'
         )
         combined_read_clauses = " ".join(x for x in (read_clauses, git_config_clauses) if x)
         if combined_read_clauses:

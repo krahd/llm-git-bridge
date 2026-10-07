@@ -42,6 +42,7 @@ class BridgeV6SecurityTests(unittest.TestCase):
         self.assertIn(str(home), p)
         self.assertIn(f'(literal "{home / ".gitconfig"}")', p)
         self.assertIn(f'(subpath "{home / ".config" / "git"}")', p)
+        self.assertIn(f'(literal "{home / ".gitignore_global"}")', p)
         self.assertIn(f'(literal "{home.parent}")', p)
         self.assertIn(f'(literal "{home}")', p)
         self.assertIn(str(Path(tempfile.gettempdir()).resolve()), p)
