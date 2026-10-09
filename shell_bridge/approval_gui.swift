@@ -33,7 +33,16 @@ final class ApprovalController: NSObject, NSApplicationDelegate {
     func applicationDidFinishLaunching(_ notification: Notification) {
         NSApp.setActivationPolicy(.accessory)
         statusItem = NSStatusBar.system.statusItem(withLength: NSStatusItem.variableLength)
-        statusItem.button?.title = "🌉"
+        if let iconURL = Bundle.main.url(forResource: "bridge-menubar", withExtension: "png"),
+           let icon = NSImage(contentsOf: iconURL) {
+            icon.size = NSSize(width: 18, height: 18)
+            icon.isTemplate = true
+            statusItem.button?.image = icon
+            statusItem.button?.imagePosition = .imageLeft
+            statusItem.button?.title = ""
+        } else {
+            statusItem.button?.title = "Bridge"
+        }
         statusItem.button?.toolTip = "Local Executor Bridge approvals"
         statusItem.menu = menu
         refresh()
@@ -148,7 +157,7 @@ final class ApprovalController: NSObject, NSApplicationDelegate {
                 menu.addItem(item)
             }
         }
-        statusItem.button?.title = records.isEmpty ? "🌉" : "🌉 \(records.count)"
+        statusItem.button?.title = records.isEmpty ? "" : " \(records.count)"
         menu.addItem(.separator())
         let about = NSMenuItem(title: "About Local Executor Bridge", action: #selector(showAbout(_:)), keyEquivalent: "")
         about.target = self
