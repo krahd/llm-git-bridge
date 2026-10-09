@@ -221,9 +221,12 @@ def validate_request(req: dict, request_name: str, allowed_root: Path, max_timeo
     write_scope = req.get("write_scope", "auto")
     if write_scope not in WRITE_SCOPES:
         raise ValueError("write_scope must be auto, read_only, repository, or system")
+    operation_id = req.get("operation_id")
+    if operation_id is not None and (not isinstance(operation_id, str) or not ID_RE.fullmatch(operation_id)):
+        raise ValueError("operation_id must be a stable lowercase ASCII identifier")
     return {
         "id": rid, "cwd": cwd, "command": command, "timeout": timeout, "stdin": stdin,
-        "write_scope": write_scope, "explanation": explanation,
+        "write_scope": write_scope, "explanation": explanation, "operation_id": operation_id,
     }
 
 
@@ -550,7 +553,7 @@ def request_operator_confirmation(*, request_id: str, cwd: Path, command: str, c
     mode = operator_confirmation_mode(cfg)
     record = {"required": True, "category": category, "mode": mode, "approved": False}
     if mode == "off":
-        return {**record, "approved": True, "message": "operator confirmation explicitly disabled by local configuration"}
+        return {**record, "message": "operator approval is disabled; required elevation is denied"}
     if mode == "reject":
         return {**record, "message": "operator confirmation required; interactive approval is unavailable or disabled"}
 
@@ -584,7 +587,7 @@ def request_operator_confirmation(*, request_id: str, cwd: Path, command: str, c
         pending = {
             "protocol": 1, "kind": "operator_approval_request", "request_id": request_id,
             "nonce": nonce, "payload_sha256": payload_hash, "category": category,
-            "cwd": str(cwd), "command": _confirmation_command_excerpt(command),
+            "cwd": str(cwd), "command": command,
             "explanation": explanation, "created_at": now, "expires_at": expires_at,
         }
         _atomic_json(pending_path, pending)
@@ -1026,7 +1029,7 @@ def _contain_recorded_active(active_marker: Path, rid: str) -> None:
     _terminate_pgid(pgid)
 
 
-def process_one(name: str, cfg: dict) -> None:
+def _process_one_request(name: str, cfg: dict, preloaded_raw: bytes | None = None) -> None:
     rid_guess = validate_request_name(name)
     state_dir = Path(cfg["state_dir"]).expanduser()
     allowed_root = Path(cfg["allowed_root"]).expanduser()
@@ -1044,19 +1047,22 @@ def process_one(name: str, cfg: dict) -> None:
     finished_marker = request_dir / "finished.json"
     active_marker = request_dir / "active.json"
 
-    fd, tmp = tempfile.mkstemp(prefix="lsb-request-", suffix=".json")
-    os.close(fd)
-    tmp_path = Path(tmp)
-    try:
-        _copy_request(cfg, f"requests/{name}", tmp_path)
-        if tmp_path.stat().st_size > max_request_bytes:
-            request_sha = sha256_file(tmp_path)
-            result = result_envelope(rid_guess, request_sha, "rejected", {"message": "request is too large"})
-            _write_upload_delete(result, request_dir / "oversize-result.json", name, cfg)
-            return
-        raw = tmp_path.read_bytes()
-    finally:
-        tmp_path.unlink(missing_ok=True)
+    if preloaded_raw is None:
+        fd, tmp = tempfile.mkstemp(prefix="lsb-request-", suffix=".json")
+        os.close(fd)
+        tmp_path = Path(tmp)
+        try:
+            _copy_request(cfg, f"requests/{name}", tmp_path)
+            raw = tmp_path.read_bytes()
+        finally:
+            tmp_path.unlink(missing_ok=True)
+    else:
+        raw = preloaded_raw
+    if len(raw) > max_request_bytes:
+        request_sha = sha256_bytes(raw)
+        result = result_envelope(rid_guess, request_sha, "rejected", {"message": "request is too large"})
+        _write_upload_delete(result, request_dir / "oversize-result.json", name, cfg)
+        return
     request_sha = sha256_bytes(raw)
 
     prior_sha = _stored_sha(started_marker) if started_marker.exists() else None
@@ -1109,6 +1115,16 @@ def process_one(name: str, cfg: dict) -> None:
         _persist_then_publish(result, local_result, finished_marker, name, cfg)
         return
 
+    if write_plan.get("effective") == "system":
+        result = result_envelope(v["id"], request_sha, "rejected", {
+            "cwd": str(v["cwd"]),
+            "message": "unbounded system shell is not an agent capability; use a narrowly scoped trusted helper",
+            "policy_reason": "unbounded_system_authority_prohibited",
+            "write_scope": public_write_plan(write_plan),
+        })
+        _persist_then_publish(result, local_result, finished_marker, name, cfg)
+        return
+
     confirmation = None
     high_impact_category = high_impact_command_category(v["command"])
     category = high_impact_category or write_plan.get("confirmation_category")
@@ -1126,10 +1142,9 @@ def process_one(name: str, cfg: dict) -> None:
             })
             _persist_then_publish(result, local_result, finished_marker, name, cfg)
             return
-        # Approval of a recognised external/control-plane command grants network
-        # authority for this exact request while preserving its filesystem scope.
-        if high_impact_category is not None:
-            write_plan["allow_network"] = True
+        # Approval does not grant arbitrary network/credential access to a raw
+        # shell, which could circumvent mandatory repository-visibility policy.
+        # Trusted Git lifecycle capabilities have separate restricted network access.
 
     atomic_write(started_marker, json.dumps({
         "request_sha256": request_sha,
@@ -1185,6 +1200,115 @@ def process_one(name: str, cfg: dict) -> None:
     _persist_then_publish(result, local_result, finished_marker, name, cfg)
 
 
+def canonical_operation_payload(v: dict, cfg: dict) -> str:
+    """Stable execution identity independent of Drive/transport request filename.
+
+    The effective scope is included so the same operation cannot be replayed
+    with broader authority after config or workspace state changes.
+    """
+    plan = resolve_write_plan(v, cfg)
+    public = public_write_plan(plan)
+    payload = {
+        "cwd": str(v["cwd"]), "command": v["command"],
+        "stdin_sha256": sha256_bytes(v["stdin"]),
+        "timeout": v["timeout"], "explanation": v["explanation"],
+        "requested_scope": v["write_scope"], "effective_scope": public,
+    }
+    return sha256_bytes(json.dumps(payload, sort_keys=True, separators=(",", ":"), default=str).encode("utf-8"))
+
+
+def process_one(name: str, cfg: dict) -> None:
+    """Deduplicate logical operations across different late-arriving Drive IDs.
+
+    Legacy requests without operation_id retain their per-request-ID journal.
+    New clients provide operation_id explicitly. This is not a promise of
+    exactly-once external effects; ambiguous executions stay indeterminate.
+    """
+    validate_request_name(name)
+    fd, tmp = tempfile.mkstemp(prefix="lsb-prefetch-", suffix=".json")
+    os.close(fd)
+    prefetch = Path(tmp)
+    try:
+        _copy_request(cfg, f"requests/{name}", prefetch)
+        raw = prefetch.read_bytes()
+    finally:
+        prefetch.unlink(missing_ok=True)
+    if len(raw) > int(cfg.get("max_request_bytes", DEFAULT_MAX_REQUEST_BYTES)):
+        _process_one_request(name, cfg, raw)
+        return
+    try:
+        v = validate_request(load_json_bytes(raw), name, Path(cfg["allowed_root"]),
+                             int(cfg.get("max_timeout_seconds", DEFAULT_MAX_TIMEOUT)),
+                             int(cfg.get("max_command_bytes", DEFAULT_MAX_COMMAND_BYTES)),
+                             int(cfg.get("max_stdin_bytes", DEFAULT_MAX_STDIN_BYTES)))
+        operation_id = v.get("operation_id")
+    except (ValueError, KeyError, TypeError):
+        _process_one_request(name, cfg, raw)
+        return
+    if not operation_id:
+        _process_one_request(name, cfg, raw)
+        return
+    try:
+        digest = canonical_operation_payload(v, cfg)
+    except Exception:
+        _process_one_request(name, cfg, raw)
+        return
+    state = Path(cfg["state_dir"]).expanduser()
+    opdir = state / "operations" / hashlib.sha256(operation_id.encode()).hexdigest()
+    opdir.mkdir(mode=0o700, parents=True, exist_ok=True)
+    opdir.chmod(0o700)
+    lock = (opdir / "admission.lock").open("a+")
+    try:
+        fcntl.flock(lock.fileno(), fcntl.LOCK_EX)
+        admitted = opdir / "admitted.json"
+        if admitted.exists():
+            try:
+                original = load_json_bytes(admitted.read_bytes())
+            except (OSError, ValueError):
+                original = None
+            if not isinstance(original, dict) or original.get("operation_id") != operation_id:
+                status, details = "indeterminate", {"message": "logical operation admission record is corrupt; no replay"}
+            elif original.get("payload_sha256") != digest:
+                status, details = "rejected", {"message": "logical operation ID reused for conflicting canonical payload"}
+            else:
+                prior_id = original["original_request_id"]
+                if v["id"] == prior_id:
+                    original_path = state / "requests" / prior_id / "result.json"
+                    if original_path.is_file() and (state / "requests" / prior_id / "finished.json").is_file():
+                        _publish_stored(original_path, name, cfg)
+                        return
+                    # Never rewrite the original immutable request/result journal.
+                    return
+                original_dir = state / "requests" / prior_id
+                terminal_path = original_dir / "result.json"
+                finished = original_dir / "finished.json"
+                if terminal_path.is_file() and finished.is_file():
+                    prior = load_json_bytes(terminal_path.read_bytes())
+                    status = prior.get("status", "indeterminate")
+                    details = {k: value for k, value in prior.items() if k not in
+                               {"id", "protocol", "kind", "processed_at", "request_sha256", "status"}}
+                    details.update({"logical_operation_id": operation_id, "original_request_id": prior_id,
+                                    "replayed": True, "original_result_sha256": sha256_file(terminal_path)})
+                else:
+                    status, details = "indeterminate", {
+                        "message": "logical operation was admitted without a verified FINISHED result; no replay",
+                        "logical_operation_id": operation_id, "original_request_id": prior_id,
+                    }
+            request_sha = sha256_bytes(raw)
+            result = result_envelope(v["id"], request_sha, status, details)
+            request_dir = state / "requests" / v["id"]
+            request_dir.mkdir(parents=True, exist_ok=True)
+            _persist_then_publish(result, request_dir / "result.json", request_dir / "finished.json", name, cfg)
+            return
+        atomic_write(admitted, json.dumps({
+            "operation_id": operation_id, "payload_sha256": digest,
+            "original_request_id": v["id"], "admitted_at": time.time(),
+        }, sort_keys=True).encode("utf-8"))
+        _process_one_request(name, cfg, raw)
+    finally:
+        lock.close()
+
+
 def _auto_active_limit() -> int:
     cpus = os.cpu_count() or 2
     return max(4, min(DEFAULT_MAX_ACTIVE_CAP, cpus * 2))
@@ -1234,11 +1358,12 @@ def load_config(path: Path) -> dict:
 
 def _instance_lock_path(cfg: dict) -> Path:
     """Return a per-user lock path stable across state-dir/config migrations."""
-    instance_id = cfg.get("bridge_instance_id")
-    if isinstance(instance_id, str) and instance_id.strip():
-        identity = f"instance:{instance_id.strip()}"
+    folder = cfg.get("drive_root_folder_id")
+    if isinstance(folder, str) and folder.strip():
+        identity = f"drive-mailbox:{folder.strip()}"
     else:
-        # Backward-compatible fallback for incomplete/legacy configs.
+        # A missing canonical folder ID is not a safe production identity.
+        # Legacy testing may use a remote + base path, but NEVER an instance ID.
         remote = str(cfg.get("remote", ""))
         base = str(cfg.get("base_path", ""))
         identity = f"mailbox:{remote}|{base}"

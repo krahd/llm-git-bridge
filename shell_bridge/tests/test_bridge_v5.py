@@ -50,13 +50,19 @@ class V5InstanceLockTests(unittest.TestCase):
             second=b.acquire_instance_lock(cfg2)
             second.close()
 
-    def test_distinct_instance_ids_can_lock_independently(self):
+    def test_distinct_instance_ids_cannot_consume_same_mailbox(self):
         with tempfile.TemporaryDirectory() as td:
             cfg1={"state_dir":str(Path(td)/"state-a"),"bridge_instance_id":"instance-a","drive_root_folder_id":"root123"}
             cfg2={"state_dir":str(Path(td)/"state-b"),"bridge_instance_id":"instance-b","drive_root_folder_id":"root123"}
             first=b.acquire_instance_lock(cfg1)
+            try:
+                with self.assertRaisesRegex(RuntimeError,"another shell-bridge instance"):
+                    b.acquire_instance_lock(cfg2)
+            finally:
+                first.close()
+            cfg2["drive_root_folder_id"]="different-mailbox"
             second=b.acquire_instance_lock(cfg2)
-            second.close(); first.close()
+            second.close()
 
 
 class V5RcloneTests(unittest.TestCase):

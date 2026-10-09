@@ -140,7 +140,9 @@ class BridgeV6SecurityTests(unittest.TestCase):
         for primitive in ("performKeyEquivalent", "keyDown", "defaultButtonCell", "sendAction"):
             self.assertNotIn(primitive, source)
         self.assertNotIn("NSWindow(", source)
-        self.assertEqual(source.count("runModal()"), 1)
+        self.assertEqual(source.count("runModal()"), 2)
+        self.assertIn("reviewed[req.request_id] == req.payload_sha256", source)
+        self.assertIn("Exact command (read the entire command", source)
 
     def test_approval_helper_is_menu_only_and_never_auto_opens_pending_requests(self):
         source = (ROOT / "approval_gui.swift").read_text(encoding="utf-8")
