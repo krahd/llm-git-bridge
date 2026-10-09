@@ -14,7 +14,7 @@ Updated 2026-10-09. Canonical design and release gates: `docs/plans/BRIDGE-V6-TR
 
 - **Production:** v5 was still the live mailbox consumer when last verified. Production mailbox root `1PRsQHgVsgXhIYT_8akGFRGdhdlw9Lmk6` (requests `1jvTV0g4JVypFJ5olOovIPtCRIlawl4MP`; results `1SMdHzWEj2w2zRcOsCBc6fGT44ltco1fL`). No production cutover was authorized or executed in this work.
 - **Staging:** v6 candidate `275ccd65fa97f9ba3ed8b2d2ebdb28dee167fad8` was installed and activated in the *separate* staging mailbox root `15ql2yACOq7H6qo0IgzosySqW8nHgUKXv`, requests `101ZPUf3ZLCG2BW8HLgQazg48TNyUMrNa`, results `1xnU55UNAc-6APc6b-8naPNyk4DlUC3xd` (requests `v6-resume-stage-build-20261009-e07` / `v6-resume-stage-activate-20261009-e08`). Last staged health observed 2026-10-09T21:03:20Z: bridge v6, zero active requests and zero unfinished durable STARTED requests.
-- **Latest staging upgrade attempt:** request `v6-staging-upgrade-20261009-f13` submitted once via v5 mailbox. It would create a pinned detached worktree at `b7631be...`, build `candidate-b7631be`, and update *only staging*. **Status unresolved when this checkpoint was written**. Inspect the exact result and staged manifest/health; never resubmit simply because the conversation timed out. If rejected after approval timeout, classify not started. If completed, prove new daemon identity and run a new staged smoke.
+- **Latest staging upgrade attempt:** request `v6-staging-upgrade-20261009-f13` reached a terminal **rejected** result at `2026-10-09T21:09:07Z`: `system_write` operator confirmation timed out, and the command **was not started**. No new staging build/worktree was created by this attempt, and production v5 was unchanged. The last staged build remains `275ccd65...`. Do not replay `-f13`; a new, explicitly human-approved upgrade must pin fresh canonical `main` and requalify that exact installed candidate.
 
 ## Staged end-to-end evidence on `275ccd65...` (not transferrable to a newer build)
 
@@ -26,7 +26,7 @@ Updated 2026-10-09. Canonical design and release gates: `docs/plans/BRIDGE-V6-TR
 
 ## Mandatory stop/go gates still open
 
-1. Verify the exact `b7631be...` staged build manifest and executable identity after reconciling `-f13`; rerun a small restricted Edu smoke and source-vs-installed parity verification.
+1. Once a real Mac human approval is available, create an exact-current-main staging build (the `-f13` attempt **never started**), verify manifest and executable identity, and rerun a small restricted Edu smoke. The former `275ccd65...` staging smoke does not certify the newer code.
 2. In a genuine Mac GUI session, verify the native app displays the **full exact command before Allow**, correct category and path, clickable **Allow once/Reject** with no password/Touch ID, expiration and durable protected decisions. The `/usr/bin/open` success path alone does **not** establish actual visibility. A missed approval is fail-closed, not a passed UI test.
 3. Authorize and verify installed-v5 GC freeze (including metadata and local-branch deletion), or implement an enforceable alternative. Source code fixes do not update installed v5.
 4. Demonstrate real mailbox ownership exclusion across differently named instance IDs; delayed upload dedup; daemon restart/indeterminate handling; child-process containment; v6 mutation success followed by lost result; and safe v6-to-v5 rollback without replay. **Never resume v5 on an unreconciled v6 journal**.
