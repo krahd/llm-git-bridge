@@ -200,6 +200,28 @@ class WorkspaceTests(unittest.TestCase):
         self.assertNotIn(j['job_id'],out)
         self.assertTrue(p.exists());self.assertTrue(Path(j['worktree']).exists())
 
+    def test_trusted_git_push_refuses_redirected_push_url(self):
+        j=self.create('research:remote:pin-push')
+        self.exec(j['job_id'],"printf 'a1\n' > paper-a.txt")
+        alt=self.root/'attacker.git'
+        r('git','init','--bare','-q',str(alt))
+        r('git','-C',str(self.repo),'remote','set-url','--push','origin',str(alt))
+        with self.assertRaisesRegex(w.WorkspaceError,'configured Git remote changed'):
+            self.ready(j['job_id'])
+        self.assertFalse(r('git','-C',str(self.repo),'ls-remote',str(alt),'refs/heads/main').stdout)
+
+    def test_trusted_checkpoint_refuses_changed_fetch_url(self):
+        j=self.create('research:remote:pin-fetch')
+        alt=self.root/'alt.git'
+        r('git','clone','--bare','-q',str(self.origin),str(alt))
+        r('git','-C',str(self.repo),'remote','set-url','origin',str(alt))
+        wt=Path(j['worktree'])
+        (wt/'new-unique.txt').write_text('uncommitted and preserved\n')
+        with self.assertRaisesRegex(w.WorkspaceError,'configured Git remote changed'):
+            w._checkpoint(self.state,j,'changed URL rejected')
+        self.assertTrue((wt/'new-unique.txt').exists())
+        self.assertEqual(r('git','-C',str(wt),'status','--short').stdout.strip(),'?? new-unique.txt')
+
     def test_gc_maintenance_failed_worktree_removal_keeps_remote_and_metadata(self):
         from unittest.mock import patch
         j=self.create('research:paper:failure')
