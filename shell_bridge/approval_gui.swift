@@ -24,6 +24,9 @@ final class ApprovalController: NSObject, NSApplicationDelegate {
     private var reviewed: [String: String] = [:]
     private let menu = NSMenu(title: "Approvals")
     private var timer: Timer?
+    // Bring each new payload to the foreground exactly once; deferral remains fail-closed.
+    private var foregrounded: [String: String] = [:]
+    private var reviewOpen = false
 
     override init() {
         let info = Bundle.main.infoDictionary ?? [:]
@@ -86,6 +89,23 @@ final class ApprovalController: NSObject, NSApplicationDelegate {
               let req = pendingRequests().first(where: { $0.request_id == requestID }) else {
             refresh(); return
         }
+        foregrounded[req.request_id] = req.payload_sha256
+        reviewRequest(requestID: req.request_id, payloadHash: req.payload_sha256)
+    }
+
+    private func reviewRequest(requestID: String, payloadHash: String) {
+        guard !reviewOpen,
+              let req = pendingRequests().first(where: {
+                  $0.request_id == requestID && $0.payload_sha256 == payloadHash
+              }) else { return }
+        reviewOpen = true
+        // A menu-bar-only accessory app may launch without making any approval visible.
+        NSApp.setActivationPolicy(.regular)
+        defer {
+            reviewOpen = false
+            NSApp.setActivationPolicy(.accessory)
+            refresh()
+        }
         let detail = """
         Request: \(req.request_id)
         Scope / reason: \(req.category)
@@ -116,14 +136,26 @@ final class ApprovalController: NSObject, NSApplicationDelegate {
         scroll.documentView = contents
         let alert = NSAlert()
         alert.alertStyle = .warning
-        alert.messageText = "Inspect elevated operation"
-        alert.informativeText = "This description is supplied by the requesting agent. Verify the exact command and effects. No operation runs from this review screen."
+        alert.messageText = "Bridge approval required"
+        alert.informativeText = "Review the full exact command. Reject or defer if its effects are unclear. Allow once executes only this pending request."
         alert.accessoryView = scroll
-        alert.addButton(withTitle: "Close review")
+        // The safest option is the default. No approval is recorded without an explicit click.
+        alert.addButton(withTitle: "Reject")
+        alert.addButton(withTitle: "Review later")
+        alert.addButton(withTitle: "Allow once")
         NSApp.activate(ignoringOtherApps: true)
-        alert.runModal()
-        reviewed[req.request_id] = req.payload_sha256
-        refresh()
+        alert.window.makeKeyAndOrderFront(nil)
+        let choice = alert.runModal()
+        // A delayed/expired/replaced request cannot be authorized by an old review.
+        guard pendingRequests().contains(where: {
+            $0.request_id == requestID && $0.payload_sha256 == payloadHash
+        }) else { return }
+        if choice == .alertFirstButtonReturn {
+            decideRequest(req, "cancel")
+        } else if choice == .alertThirdButtonReturn {
+            reviewed[req.request_id] = req.payload_sha256
+            decideRequest(req, "allow")
+        }
     }
 
     @objc private func allow(_ sender: NSMenuItem) { decide(sender, "allow") }
@@ -132,6 +164,16 @@ final class ApprovalController: NSObject, NSApplicationDelegate {
     private func decide(_ sender: NSMenuItem, _ decision: String) {
         guard let requestID = sender.representedObject as? String,
               let req = pendingRequests().first(where: { $0.request_id == requestID }) else {
+            refresh(); return
+        }
+        decideRequest(req, decision)
+    }
+
+    private func decideRequest(_ req: ApprovalRequest, _ decision: String) {
+        guard pendingRequests().contains(where: {
+            $0.request_id == req.request_id && $0.payload_sha256 == req.payload_sha256
+        }) else {
+            lastDecisionError = "Approval request changed or expired"
             refresh(); return
         }
         guard decision != "allow" || reviewed[req.request_id] == req.payload_sha256 else {
@@ -165,7 +207,7 @@ final class ApprovalController: NSObject, NSApplicationDelegate {
     @objc private func showAbout(_ sender: NSMenuItem) {
         let alert = NSAlert()
         alert.messageText = "Local Executor Bridge"
-        alert.informativeText = "Approval queue: menu-only Allow once / Reject; no identity authentication."
+        alert.informativeText = "New approvals open a foreground review; Allow once / Reject remain available in the menu. No identity authentication."
         alert.alertStyle = .informational
         alert.addButton(withTitle: "OK")
         NSApp.activate(ignoringOtherApps: true)
@@ -216,6 +258,14 @@ final class ApprovalController: NSObject, NSApplicationDelegate {
             }
         }
         statusItem.button?.title = records.isEmpty ? "" : " \(records.count)"
+        if !reviewOpen, let req = records.first(where: {
+            foregrounded[$0.request_id] != $0.payload_sha256
+        }) {
+            foregrounded[req.request_id] = req.payload_sha256
+            DispatchQueue.main.async { [weak self] in
+                self?.reviewRequest(requestID: req.request_id, payloadHash: req.payload_sha256)
+            }
+        }
         menu.addItem(.separator())
         let about = NSMenuItem(title: "About Local Executor Bridge", action: #selector(showAbout(_:)), keyEquivalent: "")
         about.target = self
