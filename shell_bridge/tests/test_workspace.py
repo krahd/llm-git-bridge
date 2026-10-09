@@ -160,18 +160,42 @@ class WorkspaceTests(unittest.TestCase):
         self.assertFalse(marker.exists())
         self.assertEqual(w.load_job(self.state,j['job_id'])['state'],'interrupted')
 
-    def test_gc_can_remove_older_integrated_job_after_main_advances(self):
-        a=self.create('research:paper:a'); self.exec(a['job_id'],"printf 'a1\\n' > paper-a.txt"); self.ready(a['job_id']); self.integrate(a['job_id'])
-        b=self.create('research:paper:b'); self.exec(b['job_id'],"printf 'b1\\n' > paper-b.txt"); self.ready(b['job_id']); self.integrate(b['job_id'])
-        p=w.job_path(self.state,a['job_id']); meta=json.loads(p.read_text()); meta['integrated_at']='2000-01-01T00:00:00Z'; p.write_text(json.dumps(meta))
-        removed=w.gc_jobs(argparse.Namespace(state_dir=str(self.state),repo=None,retention_days=1,delete_remote_branch=False))
-        self.assertIn(a['job_id'],removed)
+    def test_gc_is_frozen_by_default_and_preserves_every_artifact(self):
+        j=self.create('research:paper:a')
+        self.exec(j['job_id'],"printf 'a1\\n' > paper-a.txt")
+        self.ready(j['job_id']); self.integrate(j['job_id'])
+        p=w.job_path(self.state,j['job_id'])
+        branch=j['branch']
+        before=r('git','-C',str(self.repo),'ls-remote','origin',f'refs/heads/{branch}').stdout
+        with self.assertRaisesRegex(w.WorkspaceError,'frozen'):
+            w.gc_jobs(argparse.Namespace(state_dir=str(self.state),repo=None,retention_days=0,delete_remote_branch=True))
+        self.assertTrue(p.exists())
+        self.assertTrue(Path(j['worktree']).exists())
+        self.assertEqual(r('git','-C',str(self.repo),'ls-remote','origin',f'refs/heads/{branch}').stdout,before)
 
-    def test_gc_refuses_dirty_integrated_worktree(self):
-        j=self.create('research:paper:a'); self.exec(j['job_id'],"printf 'a1\\n' > paper-a.txt"); self.ready(j['job_id']); ij=self.integrate(j['job_id'])
-        p=w.job_path(self.state,j['job_id']); meta=json.loads(p.read_text()); meta['integrated_at']='2000-01-01T00:00:00Z'; p.write_text(json.dumps(meta))
-        Path(j['worktree'],'LOCAL').write_text('dirty')
-        removed=w.gc_jobs(argparse.Namespace(state_dir=str(self.state),repo=None,retention_days=1,delete_remote_branch=False))
-        self.assertNotIn(j['job_id'],removed); self.assertTrue(p.exists())
+    def test_gc_maintenance_preserves_later_unintegrated_remote_commit(self):
+        j=self.create('research:paper:a')
+        self.exec(j['job_id'],"printf 'a1\\n' > paper-a.txt")
+        self.ready(j['job_id']); self.integrate(j['job_id'])
+        p=w.job_path(self.state,j['job_id'])
+        meta=json.loads(p.read_text());meta['integrated_at']='2000-01-01T00:00:00Z';p.write_text(json.dumps(meta))
+        wt=Path(j['worktree']); (wt/'later.txt').write_text('unintegrated')
+        r('git','-C',str(wt),'add','later.txt');r('git','-C',str(wt),'commit','-qm','later unique work')
+        r('git','-C',str(wt),'push','origin',f"HEAD:refs/heads/{j['branch']}")
+        tip=r('git','-C',str(wt),'rev-parse','HEAD').stdout.strip()
+        out=w.gc_jobs(argparse.Namespace(state_dir=str(self.state),repo=None,retention_days=1,delete_remote_branch=True,enable_maintenance_gc=True))
+        self.assertNotIn(j['job_id'],out)
+        self.assertTrue(p.exists());self.assertTrue(wt.exists())
+        self.assertEqual(r('git','-C',str(self.repo),'ls-remote','origin',f"refs/heads/{j['branch']}").stdout.split()[0],tip)
+
+    def test_gc_maintenance_refuses_locked_worktree_and_keeps_metadata(self):
+        j=self.create('research:paper:a')
+        self.exec(j['job_id'],"printf 'a1\\n' > paper-a.txt")
+        self.ready(j['job_id']); self.integrate(j['job_id'])
+        p=w.job_path(self.state,j['job_id'])
+        meta=json.loads(p.read_text());meta['integrated_at']='2000-01-01T00:00:00Z';p.write_text(json.dumps(meta))
+        out=w.gc_jobs(argparse.Namespace(state_dir=str(self.state),repo=None,retention_days=1,delete_remote_branch=True,enable_maintenance_gc=True))
+        self.assertNotIn(j['job_id'],out)
+        self.assertTrue(p.exists());self.assertTrue(Path(j['worktree']).exists())
 
 if __name__=='__main__': unittest.main(verbosity=2)

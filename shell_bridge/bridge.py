@@ -312,7 +312,7 @@ def _trusted_workspace_coordinator(command: str, allowed_root: Path, state_dir: 
     if script != WORKSPACE_COORDINATOR.expanduser().resolve():
         return False
     subcommand = argv[2]
-    allowed_subcommands = {"create", "ensure", "exec", "ready", "integrate", "show", "list", "recover", "gc", "mark-reconciled"}
+    allowed_subcommands = {"create", "ensure", "exec", "ready", "integrate", "show", "list", "recover", "mark-reconciled"}
     if subcommand not in allowed_subcommands:
         return False
 
