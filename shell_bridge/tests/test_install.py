@@ -60,6 +60,11 @@ class InstallScriptTests(unittest.TestCase):
         self.assertIn('"$INSTALL_DIR/approval_helper.py" "$PYTHON_BIN"', self.text)
         self.assertNotIn('exec "$PYTHON_BIN" "$INSTALL_DIR/approval_helper.py" --queue', self.text)
 
+    def test_manifest_embedded_python_has_no_literal_newline_in_string(self):
+        bad = "f.write(" + chr(39) + chr(10) + chr(39) + ")"
+        self.assertNotIn(bad, self.text)
+        self.assertIn("f.write(chr(10))", self.text)
+
     def test_stage_manifest_binds_no_auth_approval_and_generated_artifacts(self):
         for token in (
             "'approval_helper_sha256':sha256(approval_helper_path)",
