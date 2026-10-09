@@ -1525,10 +1525,45 @@ class WakeLease:
             }
 
 
+def installed_build_identity() -> dict:
+    """Report the running code's manifest identity without asserting release acceptance.
+
+    A manifest names the source revision, but does not authenticate itself. The
+    identity is useful only when its recorded file digests match the installed
+    code and an independent release record binds that build to qualification.
+    """
+    install = Path(__file__).resolve().parent
+    manifest_path = install / "install-manifest.json"
+    if not manifest_path.is_file():
+        return {"build_source_commit": None, "build_manifest_sha256": None,
+                "build_code_integrity": "unpackaged_source"}
+    try:
+        raw = manifest_path.read_bytes()
+        manifest = json.loads(raw)
+        expected = {
+            "bridge_sha256": install / "bridge.py",
+            "workspace_sha256": install / "workspace.py",
+            "approval_helper_sha256": install / "approval_helper.py",
+        }
+        valid = manifest.get("schema") == 1
+        source = manifest.get("source_commit")
+        valid = valid and isinstance(source, str) and bool(re.fullmatch(r"[0-9a-f]{40}", source))
+        for key, path in expected.items():
+            if not path.is_file() or manifest.get(key) != hashlib.sha256(path.read_bytes()).hexdigest():
+                valid = False
+        return {"build_source_commit": source if isinstance(source, str) else None,
+                "build_manifest_sha256": hashlib.sha256(raw).hexdigest(),
+                "build_code_integrity": "matches_manifest" if valid else "mismatch"}
+    except (OSError, ValueError, TypeError, json.JSONDecodeError):
+        return {"build_source_commit": None, "build_manifest_sha256": None,
+                "build_code_integrity": "manifest_invalid"}
+
+
 def doctor(cfg: dict, *, probe_transport: bool = True) -> dict:
     info = {
         "protocol": PROTOCOL,
         "bridge_version": VERSION,
+        **installed_build_identity(),
         "bridge_instance_id": cfg.get("bridge_instance_id"),
         "remote": cfg["remote"],
         "base_path": cfg.get("base_path"),

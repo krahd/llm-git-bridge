@@ -12,6 +12,32 @@ bridge = importlib.util.module_from_spec(spec); spec.loader.exec_module(bridge)
 
 
 class BridgeV6SecurityTests(unittest.TestCase):
+    def test_installed_build_identity_is_reported_and_verified(self):
+        import hashlib
+        with tempfile.TemporaryDirectory() as td:
+            home = Path(td)
+            content = {"bridge.py": b"test bridge", "workspace.py": b"test workspace",
+                       "approval_helper.py": b"test approval"}
+            for name, raw in content.items():
+                (home / name).write_bytes(raw)
+            m = {"schema": 1, "source_commit": "1" * 40}
+            for name, key in (("bridge.py", "bridge_sha256"),
+                              ("workspace.py", "workspace_sha256"),
+                              ("approval_helper.py", "approval_helper_sha256")):
+                m[key] = hashlib.sha256(content[name]).hexdigest()
+            (home / "install-manifest.json").write_text(json.dumps(m))
+            original = bridge.__file__
+            try:
+                bridge.__file__ = str(home / "bridge.py")
+                good = bridge.installed_build_identity()
+                self.assertEqual(good["build_source_commit"], "1" * 40)
+                self.assertEqual(good["build_code_integrity"], "matches_manifest")
+                self.assertEqual(len(good["build_manifest_sha256"]), 64)
+                (home / "approval_helper.py").write_text("modified helper")
+                self.assertEqual(bridge.installed_build_identity()["build_code_integrity"], "mismatch")
+            finally:
+                bridge.__file__ = original
+
     def test_version_and_product(self):
         self.assertEqual(bridge.VERSION, "6")
         self.assertEqual(bridge.PRODUCT_NAME, "Local Executor Bridge")
