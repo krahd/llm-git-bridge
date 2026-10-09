@@ -6,7 +6,7 @@ class CutoverIdentityTests(unittest.TestCase):
     def test_cutover_targets_canonical_v6_identity_and_retires_old_services(self):
         text = (pathlib.Path(__file__).parents[1] / "cutover.sh").read_text()
         self.assertIn("net.laurenzo.local-executor-bridge", text)
-        self.assertIn("LOCAL_EXECUTOR_BRIDGE_CUTOVER=1", text)
+        self.assertIn("LOCAL_EXECUTOR_BRIDGE_CUTOVER_PROVISIONAL=1", text)
         self.assertIn("com.tom.chatgpt-shell-bridge", text)
         self.assertIn("io.llm-git-bridge.daemon", text)
         self.assertIn("net.laurenzo.mac-executor-bridge", text)
@@ -27,14 +27,14 @@ class CutoverIdentityTests(unittest.TestCase):
         self.assertIn("started_without_finished", text)
         self.assertIn("production request mailbox is not empty", text)
         self.assertIn("LOCAL_EXECUTOR_BRIDGE_OK", text)
-        self.assertIn("Cutover failed after stopping legacy consumers; restoring", text)
+        self.assertIn("cutover_holding_reconciliation", text)
         smoke = text.index("v6 production smoke failed")
-        committed = text.index("CUTOVER_COMMITTED=1", smoke)
-        compat = text.index("ln -sfn", committed)
-        archive = text.index("# Archive obsolete service plists", committed)
-        self.assertLess(smoke, committed)
-        self.assertLess(committed, compat)
-        self.assertLess(committed, archive)
+        provisional = text.index("PROVISIONAL_ACTIVATION=1", smoke)
+        committed = text.index("CUTOVER_COMMITTED=1", provisional)
+        self.assertLess(smoke, provisional)
+        self.assertLess(provisional, committed)
+        self.assertIn('legacy retirement is forbidden during provisional cutover', text)
+        self.assertIn('do not restart v5 until a journal/mailbox reconciliation', text)
 
 
     def test_cutover_verifies_staged_manifest_and_approval_helper_before_service_switch(self):
@@ -90,12 +90,10 @@ class CutoverIdentityTests(unittest.TestCase):
         text = (pathlib.Path(__file__).parents[1] / "cutover.sh").read_text()
         self.assertIn('RETIRE_OLD_AFTER_SMOKE="${RETIRE_OLD_AFTER_SMOKE:-0}"', text)
         self.assertIn('cutover-rollback-services.tsv', text)
-        self.assertIn('if [ "$RETIRE_OLD_AFTER_SMOKE" -eq 1 ]; then', text)
-        guard = text.index('if [ "$RETIRE_OLD_AFTER_SMOKE" -eq 1 ]; then')
-        archive = text.index("# Archive obsolete service plists", guard)
-        compat = text.index("ln -sfn", guard)
-        self.assertLess(guard, compat)
-        self.assertLess(guard, archive)
+        self.assertIn('state=provisional', text)
+        self.assertIn('RETIRE_OLD_AFTER_SMOKE must be 0', text)
+        self.assertNotIn('ln -sfn "$NEW_INSTALL_DIR/workspace.py"', text)
+        self.assertNotIn('mv "$plist" "$archive_plists/', text)
 
     def test_cutover_uses_no_auth_native_approval_executable(self):
         text = (pathlib.Path(__file__).parents[1] / "cutover.sh").read_text()
@@ -109,3 +107,13 @@ class CutoverIdentityTests(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+class CutoverNoReplayTests(unittest.TestCase):
+    def test_failure_after_new_start_does_not_restart_v5(self):
+        source=(pathlib.Path(__file__).parents[1]/'cutover.sh').read_text()
+        rollback=source.split('rollback() {',1)[1].split('trap rollback EXIT',1)[0]
+        elevated=rollback.split('if [ "$STARTED_NEW" -eq 1 ]; then',1)[1].split('elif [ "$OLD_CONSUMERS_STOPPED"',1)[0]
+        self.assertNotIn('launchctl bootstrap "gui/${UID_NOW}" "$plist"', elevated)
+        self.assertIn('cutover-reconciliation-required', elevated)
+        self.assertIn('cutover-rollback-services.tsv', elevated)
+        self.assertIn('launchctl bootout "gui/${UID_NOW}/${NEW_LABEL}"', elevated)
