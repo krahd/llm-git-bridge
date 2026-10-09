@@ -57,6 +57,16 @@ class BridgeV6SecurityTests(unittest.TestCase):
             cmd = f"python3 {ws} show --job {job}; touch /tmp/escape"
             self.assertFalse(bridge._trusted_workspace_coordinator(cmd, root, state))
 
+    def test_child_environment_exports_isolated_cutover_controller_identity(self):
+        env = bridge.child_environment(
+            'request-1', caller_bridge_instance_id='staging-instance',
+            caller_drive_root_folder_id='staging-root', caller_state_dir='/tmp/staging-state',
+        )
+        self.assertEqual(env['CHATGPT_SHELL_BRIDGE_REQUEST_ID'], 'request-1')
+        self.assertEqual(env['LOCAL_EXECUTOR_CALLER_BRIDGE_INSTANCE_ID'], 'staging-instance')
+        self.assertEqual(env['LOCAL_EXECUTOR_CALLER_DRIVE_ROOT_FOLDER_ID'], 'staging-root')
+        self.assertEqual(env['LOCAL_EXECUTOR_CALLER_STATE_DIR'], '/tmp/staging-state')
+
     def test_safe_system_request_inside_repo_is_downgraded_without_confirmation(self):
         with tempfile.TemporaryDirectory() as td:
             root = Path(td); repo = root / "repo"; repo.mkdir(); (repo / ".git").mkdir()
