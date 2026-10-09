@@ -176,6 +176,17 @@ class BridgeV6SecurityTests(unittest.TestCase):
         self.assertNotIn("NSWindow(", source)
         self.assertEqual(source.count("runModal()"), 2)
         self.assertIn("reviewed[req.request_id] == req.payload_sha256", source)
+        # Live GUI approvals must not rely on a hidden menu or blindly trust a summary.
+        self.assertIn("NSApp.setActivationPolicy(.regular)", source)
+        self.assertIn("DispatchQueue.main.async", source)
+        self.assertIn("foregrounded[req.request_id] = req.payload_sha256", source)
+        self.assertIn("Exact command (read the entire command before allowing):", source)
+        self.assertIn('alert.addButton(withTitle: "Reject")', source)
+        self.assertIn('alert.addButton(withTitle: "Review later")', source)
+        self.assertIn('alert.addButton(withTitle: "Allow once")', source)
+        self.assertIn("choice == .alertThirdButtonReturn", source)
+        self.assertIn("$0.request_id == req.request_id && $0.payload_sha256 == req.payload_sha256", source)
+        self.assertIn("NSApp.setActivationPolicy(.accessory)", source)
         self.assertIn("Exact command (read the entire command", source)
 
     def test_approval_helper_is_menu_only_and_never_auto_opens_pending_requests(self):
