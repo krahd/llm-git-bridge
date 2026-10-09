@@ -116,14 +116,14 @@ class BridgeV6SecurityTests(unittest.TestCase):
         self.assertNotIn('/usr/bin/python3', source)
         self.assertIn("terminationStatus", source)
         self.assertIn("lastDecisionError", source)
-        self.assertIn("🌉", source)
+        self.assertIn("icon.isTemplate = true", source)
         self.assertIn("About Local Executor Bridge", source)
         self.assertIn("Allow once", source)
         self.assertIn("Reject", source)
 
     def test_approval_helper_status_item_identifier_is_bound(self):
         source = (ROOT / "approval_gui.swift").read_text(encoding="utf-8")
-        self.assertIn('statusItem.button?.title = "🌉"', source)
+        self.assertIn('statusItem.button?.image = icon', source)
 
     def test_approval_helper_has_no_keyboard_or_focus_approval_path(self):
         source = (ROOT / "approval_gui.swift").read_text(encoding="utf-8")
@@ -178,3 +178,15 @@ class V6ApprovalHelperSourceTests(unittest.TestCase):
         self.assertIn("NSStatusBar.system.statusItem", gui)
 
 if __name__ == "__main__": unittest.main()
+
+class BridgeMenuIconAssetTests(unittest.TestCase):
+    def test_menu_icon_is_bundled_as_a_template(self):
+        from pathlib import Path
+        r = Path(__file__).resolve().parents[1]
+        self.assertTrue((r / "assets/bridge-menubar.png").is_file())
+        swift = (r / "approval_gui.swift").read_text(encoding="utf-8")
+        install = (r / "install.sh").read_text(encoding="utf-8")
+        self.assertIn('icon.isTemplate = true', swift)
+        self.assertIn('withExtension: "png"', swift)
+        self.assertIn('Contents/Resources/bridge-menubar.png', install)
+        self.assertNotIn('🌉', swift)
