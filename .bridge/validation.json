@@ -1,0 +1,4 @@
+{
+  "schema": 1,
+  "command": "python3 -m unittest discover -s shell_bridge/tests -p 'test_*v6.py'"
+}

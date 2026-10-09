@@ -25,6 +25,8 @@ class WorkspaceTests(unittest.TestCase):
         r('git','init','-q','-b','main',str(self.seed))
         r('git','-C',str(self.seed),'config','user.name','Test User'); r('git','-C',str(self.seed),'config','user.email','test@example.invalid')
         (self.seed/'paper-a.txt').write_text('a0\n'); (self.seed/'paper-b.txt').write_text('b0\n')
+        (self.seed/'.bridge').mkdir()
+        (self.seed/'.bridge'/'validation.json').write_text(json.dumps({'schema':1,'command':'git diff --cached --check'}))
         r('git','-C',str(self.seed),'add','.'); r('git','-C',str(self.seed),'commit','-qm','initial')
         r('git','clone','-q','--bare',str(self.seed),str(self.origin)); r('git','clone','-q',str(self.origin),str(self.repo))
         r('git','-C',str(self.repo),'config','user.name','Test User'); r('git','-C',str(self.repo),'config','user.email','test@example.invalid')
