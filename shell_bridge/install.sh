@@ -186,9 +186,9 @@ cp "$SCRIPT_DIR/workspace.py" "$INSTALL_DIR/workspace.py"
 cp "$SCRIPT_DIR/approval_helper.py" "$INSTALL_DIR/approval_helper.py"
 chmod 700 "$INSTALL_DIR/bridge.py" "$INSTALL_DIR/workspace.py" "$INSTALL_DIR/approval_helper.py"
 SOURCE_COMMIT="$(git -C "$SCRIPT_DIR/.." rev-parse HEAD)"
-python3 - "$INSTALL_DIR/install-manifest.json" "$SOURCE_COMMIT" "$INSTALL_DIR/bridge.py" "$INSTALL_DIR/workspace.py" <<'PYMAN'
+python3 - "$INSTALL_DIR/install-manifest.json" "$SOURCE_COMMIT" "$INSTALL_DIR/bridge.py" "$INSTALL_DIR/workspace.py" "$INSTALL_DIR/approval_helper.py" <<'PYMAN'
 import hashlib,json,sys
-manifest_path,source_commit,bridge_path,workspace_path=sys.argv[1:]
+manifest_path,source_commit,bridge_path,workspace_path,approval_helper_path=sys.argv[1:]
 def sha256(path):
     with open(path,'rb') as f:
         return hashlib.sha256(f.read()).hexdigest()
@@ -197,6 +197,7 @@ manifest={
     'source_commit':source_commit,
     'bridge_sha256':sha256(bridge_path),
     'workspace_sha256':sha256(workspace_path),
+    'approval_helper_sha256':sha256(approval_helper_path),
 }
 with open(manifest_path,'w',encoding='utf-8') as f:
     json.dump(manifest,f,indent=2,sort_keys=True)
@@ -262,6 +263,32 @@ obj={'Label':label,'ProgramArguments':[python,bridge,'daemon','--config',config]
 with open(plist,'wb') as f: plistlib.dump(obj,f,fmt=plistlib.FMT_XML,sort_keys=True)
 PY
 chmod 600 "$PLIST"
+
+python3 - "$INSTALL_DIR/install-manifest.json" "$CONFIG_DIR/config.json" "$PLIST" "$APP_BUNDLE/Contents/Info.plist" "$APP_BUNDLE/Contents/MacOS/local-executor-approval" <<'PYGENERATED'
+import hashlib,json,os,sys,tempfile
+manifest_path,config_path,plist_path,app_info_path,app_exec_path=sys.argv[1:]
+def sha256(path):
+    with open(path,'rb') as f:
+        return hashlib.sha256(f.read()).hexdigest()
+with open(manifest_path,encoding='utf-8') as f:
+    manifest=json.load(f)
+manifest.update({
+    'config_sha256':sha256(config_path),
+    'launchagent_plist_sha256':sha256(plist_path),
+    'approval_app_info_sha256':sha256(app_info_path),
+    'approval_app_executable_sha256':sha256(app_exec_path),
+})
+parent=os.path.dirname(manifest_path)
+fd,tmp=tempfile.mkstemp(prefix='.install-manifest.',dir=parent)
+try:
+    with os.fdopen(fd,'w',encoding='utf-8') as f:
+        json.dump(manifest,f,indent=2,sort_keys=True); f.write('
+'); f.flush(); os.fsync(f.fileno())
+    os.chmod(tmp,0o600)
+    os.replace(tmp,manifest_path)
+finally:
+    if os.path.exists(tmp): os.unlink(tmp)
+PYGENERATED
 
 if [ "$STAGE_ONLY" -eq 1 ]; then
   echo "SHELL_BRIDGE_STAGED=1"

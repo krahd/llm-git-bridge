@@ -10,6 +10,7 @@ LEGACY_STATE_DIR="${LEGACY_STATE_DIR:-$HOME/.local/state/chatgpt-shell-bridge}"
 OLD_LABELS=("com.tom.chatgpt-shell-bridge" "io.llm-git-bridge.daemon" "net.laurenzo.mac-executor-bridge")
 SMOKE_ATTEMPTS="${SMOKE_ATTEMPTS:-30}"
 SMOKE_SLEEP="${SMOKE_SLEEP:-2}"
+RETIRE_OLD_AFTER_SMOKE="${RETIRE_OLD_AFTER_SMOKE:-0}"
 UID_NOW="$(id -u)"
 ROLLBACK_FILE=""
 TMP_REQ=""
@@ -51,6 +52,7 @@ trap rollback EXIT
 
 [ "$(uname -s)" = Darwin ] || fail "macOS required"
 need python3; need rclone; need launchctl
+[ "$RETIRE_OLD_AFTER_SMOKE" = 0 ] || [ "$RETIRE_OLD_AFTER_SMOKE" = 1 ] || fail "RETIRE_OLD_AFTER_SMOKE must be 0 or 1"
 [ -f "$NEW_PLIST" ] || fail "staged v6 plist missing: $NEW_PLIST"
 [ -f "$NEW_CONFIG" ] || fail "staged v6 config missing: $NEW_CONFIG"
 [ -f "$NEW_INSTALL_DIR/bridge.py" ] || fail "staged v6 bridge missing: $NEW_INSTALL_DIR/bridge.py"
@@ -125,7 +127,7 @@ print(v if isinstance(v,str) else '')
 PYAPP
 )"
 [ "$CONFIG_APPROVAL_APP" = "$EXPECTED_APPROVAL_APP" ] || fail "staged v6 approval app path does not match install directory"
-[ -x "$EXPECTED_APPROVAL_APP/Contents/MacOS/approval-helper" ] || fail "staged v6 approval app executable missing"
+[ -x "$EXPECTED_APPROVAL_APP/Contents/MacOS/local-executor-approval" ] || fail "staged v6 approval app executable missing"
 
 # Existing durable workspace state must survive an in-place v5 upgrade.
 if [ -d "$LEGACY_STATE_DIR/workspaces" ]; then
@@ -241,6 +243,7 @@ PYRESULT
 CUTOVER_COMMITTED=1
 "${R[@]}" deletefile "${REMOTE}results/${RID}.json" >/dev/null 2>&1 || true
 
+if [ "$RETIRE_OLD_AFTER_SMOKE" -eq 1 ]; then
 # Post-commit housekeeping. Preserve compatibility for clients that still invoke the
 # historical coordinator path, but make it resolve to the bundled v6 coordinator.
 archive_dir="$STATE_DIR/retired-v5-runtime"
@@ -261,9 +264,16 @@ for label in "${OLD_LABELS[@]}"; do
   fi
 done
 
+else
+  if [ -s "$ROLLBACK_FILE" ]; then
+    cp -p "$ROLLBACK_FILE" "$STATE_DIR/cutover-rollback-services.tsv"
+    chmod 600 "$STATE_DIR/cutover-rollback-services.tsv"
+  fi
+fi
 trap - EXIT
 rm -f "$ROLLBACK_FILE" "$TMP_REQ" "$TMP_RESULT" "$TMP_HEALTH"
 printf 'LOCAL_EXECUTOR_BRIDGE_CUTOVER=1\n'
 printf 'LABEL: %s\n' "$NEW_LABEL"
+printf 'RETIRED_OLD: %s\n' "$RETIRE_OLD_AFTER_SMOKE"
 printf 'CONFIG: %s\n' "$NEW_CONFIG"
 printf 'WORKSPACE: %s\n' "$NEW_INSTALL_DIR/workspace.py"

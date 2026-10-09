@@ -86,6 +86,22 @@ class CutoverIdentityTests(unittest.TestCase):
         self.assertLess(stop, start)
         self.assertLess(text.index('OLD_CONSUMERS_STOPPED=1', stop), start)
 
+    def test_first_cutover_preserves_rollback_and_defers_legacy_retirement(self):
+        text = (pathlib.Path(__file__).parents[1] / "cutover.sh").read_text()
+        self.assertIn('RETIRE_OLD_AFTER_SMOKE="${RETIRE_OLD_AFTER_SMOKE:-0}"', text)
+        self.assertIn('cutover-rollback-services.tsv', text)
+        self.assertIn('if [ "$RETIRE_OLD_AFTER_SMOKE" -eq 1 ]; then', text)
+        guard = text.index('if [ "$RETIRE_OLD_AFTER_SMOKE" -eq 1 ]; then')
+        archive = text.index("# Archive obsolete service plists", guard)
+        compat = text.index("ln -sfn", guard)
+        self.assertLess(guard, compat)
+        self.assertLess(guard, archive)
+
+    def test_cutover_uses_no_auth_native_approval_executable(self):
+        text = (pathlib.Path(__file__).parents[1] / "cutover.sh").read_text()
+        self.assertIn("Contents/MacOS/local-executor-approval", text)
+        self.assertNotIn("Contents/MacOS/approval-helper", text)
+
     def test_cutover_preserves_legacy_workspace_state_on_upgrade(self):
         text = (pathlib.Path(__file__).parents[1] / "cutover.sh").read_text()
         self.assertIn("LEGACY_STATE_DIR", text)
