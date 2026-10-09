@@ -1,8 +1,10 @@
 # Local Executor Bridge v6
 
-`llm-git-bridge` now has **one production bridge architecture**: Local Executor Bridge v6. One daemon owns the mailbox, shell execution, durable request/replay state, operator approvals, and the trusted Git workspace coordinator. Git is not a second remote bridge. Substantial repository work is a first-class capability of the same local executor.
+`llm-git-bridge` targets **one production bridge architecture**: Local Executor Bridge v6. One daemon owns the mailbox, shell execution, durable request/replay state, operator approvals, and the trusted Git workspace coordinator. Git is not a second remote bridge. Substantial repository work is a first-class capability of the same local executor.
 
 The repository still retains the older protocol-v2 Git implementation for compatibility, migration, and historical tests, but it is **not** the recommended production architecture and should not run as a second daemon beside v6.
+
+> **Deployment is independent of source:** this repository documents the intended v6 architecture; do not infer that your running daemon is v6. See the [2026-10-09 v6 audit and implementation plan](docs/plans/BRIDGE-V6-TRANSPARENT-EXECUTION-2026-10-09.md) and verify the live mailbox/build before migrating or retiring v5.
 
 ## Architecture
 

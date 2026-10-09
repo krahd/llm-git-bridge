@@ -1,5 +1,7 @@
 # Local Executor Bridge v6 — audited completion and cutover plan
 
+> **Historical plan (2026-10-05):** see the [2026-10-09 transparent v6 audit and implementation plan](plans/BRIDGE-V6-TRANSPARENT-EXECUTION-2026-10-09.md) for the current prioritized blockers, evidence limits and release gates. This document remains for historical provenance.
+
 Date: 2026-10-05
 Owner: v6 cutover durable workspace `bridge-v6-cutover-20261004-a1`
 Canonical repository: `krahd/llm-git-bridge`
