@@ -60,6 +60,17 @@ class InstallScriptTests(unittest.TestCase):
         self.assertIn('"$INSTALL_DIR/approval_helper.py" "$PYTHON_BIN"', self.text)
         self.assertNotIn('exec "$PYTHON_BIN" "$INSTALL_DIR/approval_helper.py" --queue', self.text)
 
+    def test_stage_manifest_binds_no_auth_approval_and_generated_artifacts(self):
+        for token in (
+            "'approval_helper_sha256':sha256(approval_helper_path)",
+            "'config_sha256':sha256(config_path)",
+            "'launchagent_plist_sha256':sha256(plist_path)",
+            "'approval_app_info_sha256':sha256(app_info_path)",
+            "'approval_app_executable_sha256':sha256(app_exec_path)",
+            "Contents/MacOS/local-executor-approval",
+        ):
+            self.assertIn(token, self.text)
+
     def test_candidate_config_uses_its_own_approval_app_and_purges_legacy_keys(self):
         self.assertIn('"$STATE_DIR" "$SHELL_BIN" "$INSTALL_DIR"', self.text)
         self.assertIn("state,shell,install_dir=sys.argv[1:]", self.text)

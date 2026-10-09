@@ -159,3 +159,8 @@ Fresh v6 installs use `~/.local/share/local-executor-bridge` and `~/.local/state
 
 v6 uses **effect-before-command approval**, not scope-before-command approval. Merely requesting broad `system` authority does not grant it and does not by itself create an approval prompt: safe requests are downgraded to repository or read-only authority. Approval is reserved for operations whose concrete effect is destructive/high-impact, escapes the repository boundary, or is not reasonably recoverable inside the normal Git workflow. The approval helper is a persistent menu-bar queue: popups are an attention mechanism, while pending approvals remain accessible from the menu bar until allowed, rejected, or expired. Approval is click-only; it must never require Touch ID, a password, LocalAuthentication, Secure Enclave user-presence, or equivalent identity authentication.
 
+### Native approval-menu icon
+
+The v6 approval menu bundles `assets/bridge-menubar.png` as an AppKit template image.
+AppKit tints it automatically for light and dark menu bars; pending approval counts
+appear as text beside the icon. The app does not use the previous emoji glyph.
