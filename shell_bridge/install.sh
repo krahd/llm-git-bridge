@@ -283,8 +283,7 @@ parent=os.path.dirname(manifest_path)
 fd,tmp=tempfile.mkstemp(prefix='.install-manifest.',dir=parent)
 try:
     with os.fdopen(fd,'w',encoding='utf-8') as f:
-        json.dump(manifest,f,indent=2,sort_keys=True); f.write('
-'); f.flush(); os.fsync(f.fileno())
+        json.dump(manifest,f,indent=2,sort_keys=True); f.write(chr(10)); f.flush(); os.fsync(f.fileno())
     os.chmod(tmp,0o600)
     os.replace(tmp,manifest_path)
 finally:
