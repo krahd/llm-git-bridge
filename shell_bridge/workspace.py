@@ -74,6 +74,36 @@ def remote_url(repo: Path, remote: str) -> str:
     return git(repo, "remote", "get-url", remote).stdout.strip()
 
 
+def remote_push_url(repo: Path, remote: str) -> str:
+    return git(repo, "remote", "get-url", "--push", remote).stdout.strip()
+
+
+def _assert_remote_identity(job: dict) -> None:
+    """Never let a sandboxed job redirect trusted, credentialed Git transport.
+
+    In particular, git-remote changes are shared across worktrees; using a
+    mutable remote alias at the moment of a trusted push is unsafe. All
+    network actions below use the recorded effective URL instead.
+    """
+    repo = Path(job["repo"])
+    expected_fetch = job.get("remote_url")
+    expected_push = job.get("remote_push_url", expected_fetch)
+    if not expected_fetch or not expected_push:
+        raise WorkspaceError("job has no pinned Git remote URL")
+    if remote_url(repo, job["remote"]) != expected_fetch or remote_push_url(repo, job["remote"]) != expected_push:
+        raise WorkspaceError("configured Git remote changed since workspace admission; preserve job and reconcile")
+
+
+def _fetch_target(job: dict) -> str:
+    _assert_remote_identity(job)
+    return job["remote_url"]
+
+
+def _push_target(job: dict) -> str:
+    _assert_remote_identity(job)
+    return job.get("remote_push_url", job["remote_url"])
+
+
 def repo_id(repo: Path, remote: str = "origin") -> str:
     raw = f"{repo.resolve()}\0{remote_url(repo, remote)}".encode()
     return hashlib.sha256(raw).hexdigest()[:16]
@@ -152,7 +182,9 @@ def create_job(args) -> dict:
     resource = _safe_resource(args.resource)
     remote = args.remote
     target = args.target
-    git(repo, "fetch", "--prune", remote, f"refs/heads/{target}:refs/remotes/{remote}/{target}")
+    initial_fetch_url = remote_url(repo, remote)
+    initial_push_url = remote_push_url(repo, remote)
+    git(repo, "fetch", "--prune", initial_fetch_url, f"refs/heads/{target}:refs/remotes/{remote}/{target}")
     base = git(repo, "rev-parse", f"refs/remotes/{remote}/{target}^{{commit}}").stdout.strip()
     jid = args.job_id or _new_job_id(resource)
     if job_path(state, jid).exists():
@@ -175,7 +207,8 @@ def create_job(args) -> dict:
         "repo": str(repo),
         "repo_id": rid,
         "remote": remote,
-        "remote_url": remote_url(repo, remote),
+        "remote_url": initial_fetch_url,
+        "remote_push_url": initial_push_url,
         "target_branch": target,
         "base_commit": base,
         "branch": branch,
@@ -191,9 +224,9 @@ def create_job(args) -> dict:
     }
     save_job(state, job)
     if args.push_initial:
-        git(worktree, "push", "-u", remote, f"HEAD:refs/heads/{branch}")
+        git(worktree, "push", initial_push_url, f"HEAD:refs/heads/{branch}")
         head = git(worktree, "rev-parse", "HEAD").stdout.strip()
-        _verify_remote_branch(repo, remote, branch, head)
+        _verify_remote_branch(repo, initial_fetch_url, branch, head)
         job["last_remote_checkpoint"] = head
         save_job(state, job)
     return job
@@ -234,8 +267,8 @@ def ensure_job(args) -> dict:
         )
     if args.push_initial and not job.get("last_remote_checkpoint"):
         head = git(worktree, "rev-parse", "HEAD").stdout.strip()
-        git(worktree, "push", "-u", job["remote"], f"HEAD:refs/heads/{job['branch']}")
-        _verify_remote_branch(repo, job["remote"], job["branch"], head)
+        git(worktree, "push", _push_target(job), f"HEAD:refs/heads/{job['branch']}")
+        _verify_remote_branch(repo, _fetch_target(job), job["branch"], head)
         job["last_remote_checkpoint"] = head
         save_job(state, job)
     return job
@@ -247,6 +280,7 @@ def _dirty(worktree: Path) -> bool:
 
 def _checkpoint(state: Path, job: dict, message: str | None = None) -> str:
     wt = Path(job["worktree"])
+    _assert_remote_identity(job)
     git(wt, "add", "-A")
     staged = git(wt, "diff", "--cached", "--quiet", check=False)
     if staged.returncode == 0:
@@ -255,8 +289,8 @@ def _checkpoint(state: Path, job: dict, message: str | None = None) -> str:
         msg = message or f"checkpoint: {job['job_id']}"
         git(wt, "commit", "--no-verify", "-m", msg)
         head = git(wt, "rev-parse", "HEAD").stdout.strip()
-    git(wt, "push", job["remote"], f"HEAD:refs/heads/{job['branch']}")
-    _verify_remote_branch(Path(job["repo"]), job["remote"], job["branch"], head)
+    git(wt, "push", _push_target(job), f"HEAD:refs/heads/{job['branch']}")
+    _verify_remote_branch(Path(job["repo"]), _fetch_target(job), job["branch"], head)
     job["last_checkpoint"] = head
     job["last_remote_checkpoint"] = head
     job["state"] = "active"
@@ -411,22 +445,33 @@ def show_job(args) -> dict:
     return load_job(state_root(args.state_dir), args.job)
 
 
-def ready_job(args) -> dict:
-    state=state_root(args.state_dir); job=load_job(state,args.job); wt=Path(job["worktree"])
+def _ready_job_locked(args, state: Path, job: dict) -> dict:
+    if job.get("state") == "integrated":
+        raise WorkspaceError("already integrated; do not reset historical completion")
+    wt=Path(job["worktree"])
     if _dirty(wt):
         if args.checkpoint:
             _checkpoint(state, job, args.message)
         else:
             raise WorkspaceError("job worktree is dirty; checkpoint before marking ready")
     head=git(wt,"rev-parse","HEAD").stdout.strip()
-    _verify_remote_branch(Path(job["repo"]),job["remote"],job["branch"],head)
+    _verify_remote_branch(Path(job["repo"]),_fetch_target(job),job["branch"],head)
     job["last_checkpoint"]=head; job["last_remote_checkpoint"]=head; job["state"]="ready"
     save_job(state,job); return job
 
 
+def ready_job(args) -> dict:
+    state=state_root(args.state_dir)
+    lock=_lock(state/"workspaces"/"locks"/f"job-{args.job}.lock")
+    try:
+        return _ready_job_locked(args,state,load_job(state,args.job))
+    finally:
+        lock.close()
+
+
 def mark_reconciled(args) -> dict:
     state=state_root(args.state_dir); job=load_job(state,args.job); repo=Path(job["repo"])
-    git(repo,"fetch","--prune",job["remote"],f"refs/heads/{job['target_branch']}:refs/remotes/{job['remote']}/{job['target_branch']}")
+    git(repo,"fetch","--prune",_fetch_target(job),f"refs/heads/{job['target_branch']}:refs/remotes/{job['remote']}/{job['target_branch']}")
     target=git(repo,"rev-parse",f"refs/remotes/{job['remote']}/{job['target_branch']}^{{commit}}").stdout.strip()
     if args.target and args.target != target:
         raise WorkspaceError(f"target moved: expected {args.target}, actual {target}")
@@ -451,23 +496,122 @@ def _resource_seen_since(repo: Path, base: str, current: str, resource: str) -> 
     return any(needle in msg for msg in cp.stdout.split("\x00"))
 
 
+VALIDATION_POLICY_PATH = ".bridge/validation.json"
+
+
+def _trusted_validation(repo: Path, current: str, job: dict) -> tuple[str, str]:
+    """Load a policy from verified canonical history, never the candidate."""
+    policy = git(repo, "show", f"{current}:{VALIDATION_POLICY_PATH}", check=False)
+    if policy.returncode != 0:
+        raise WorkspaceError("missing trusted canonical validation policy; publication blocked")
+    try:
+        raw = policy.stdout.encode("utf-8")
+        value = json.loads(policy.stdout)
+        command = value["command"]
+        if value.get("schema") != 1 or not isinstance(command,str) or not command.strip() or len(command)>4096:
+            raise ValueError("invalid validation policy")
+    except (KeyError, ValueError, TypeError, json.JSONDecodeError) as exc:
+        raise WorkspaceError("invalid trusted canonical validation policy; publication blocked") from exc
+    return command, hashlib.sha256(raw).hexdigest()
+
+
+def _receipt_file(state: Path, job_id: str) -> Path:
+    return state / "workspaces" / "receipts" / f"{job_id}.json"
+
+
+def _write_terminal_receipt(state: Path, job: dict, *, policy_rev: str | None,
+                            policy_sha: str | None, candidate_tree: str | None,
+                            legacy_recovered: bool = False) -> dict:
+    receipt = {
+        "schema": 1, "kind": "workspace_integration_receipt", "job_id": job["job_id"],
+        "repo": job["repo"], "remote": job["remote"], "target": job["target_branch"],
+        "checkpoint": job["last_checkpoint"], "integration_commit": job["integration_commit"],
+        "policy_revision": policy_rev, "policy_sha256": policy_sha,
+        "candidate_tree": candidate_tree, "legacy_unverified": bool(legacy_recovered),
+        "verified_at": now_iso(),
+    }
+    path = _receipt_file(state, job["job_id"])
+    path.parent.mkdir(parents=True, exist_ok=True)
+    if path.exists():
+        existing=json.loads(path.read_text("utf-8"))
+        if any(existing.get(k)!=receipt[k] for k in ("checkpoint","integration_commit","job_id")):
+            raise WorkspaceError("terminal receipt conflicts with integrated effect; preserve evidence")
+        return existing
+    # Never replace a historical receipt after later main changes/reversions.
+    fd=os.open(path, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
+    with os.fdopen(fd,"w",encoding="utf-8") as out:
+        json.dump(receipt,out,sort_keys=True,indent=2)
+        out.write("\n");out.flush();os.fsync(out.fileno())
+    return receipt
+
+
+def _find_existing_integration(state: Path, job: dict) -> dict | None:
+    """Reconcile a successful remote push lost before local metadata write."""
+    repo=Path(job["repo"])
+    remote=job["remote"];target=job["target_branch"]
+    git(repo,"fetch","--prune",_fetch_target(job),f"refs/heads/{target}:refs/remotes/{remote}/{target}")
+    tip=git(repo,"rev-parse",f"refs/remotes/{remote}/{target}^{{commit}}").stdout.strip()
+    out=git(repo,"log","--max-count=2000","--format=%H", "--fixed-strings",
+            f"--grep=Bridge-Job-ID: {job['job_id']}", tip).stdout.splitlines()
+    matched=[]
+    checkpoint=job.get("last_remote_checkpoint") or job.get("last_checkpoint")
+    for sha in out:
+        msg=git(repo,"show","-s","--format=%B",sha).stdout
+        if (f"Bridge-Job-ID: {job['job_id']}" in msg and
+                f"Bridge-Checkpoint: {checkpoint}" in msg):
+            matched.append((sha,msg))
+    if len(matched)>1:
+        raise WorkspaceError("multiple canonical integrations match job checkpoint; manual reconciliation required")
+    if not matched:
+        return None
+    sha,msg=matched[0]
+    job["state"]="integrated";job["integration_commit"]=sha
+    job["last_checkpoint"]=checkpoint;job["last_remote_checkpoint"]=checkpoint
+    job["integrated_at"]=job.get("integrated_at") or now_iso()
+    policy_sha=next((line.split(': ',1)[1] for line in msg.splitlines() if line.startswith("Bridge-Policy-SHA256: ")),None)
+    policy_rev=next((line.split(': ',1)[1] for line in msg.splitlines() if line.startswith("Bridge-Policy-Revision: ")),None)
+    tree=git(repo,"rev-parse",sha+"^{tree}").stdout.strip()
+    _write_terminal_receipt(state,job,policy_rev=policy_rev,policy_sha=policy_sha,
+                            candidate_tree=tree,legacy_recovered=(policy_sha is None))
+    save_job(state,job)
+    return job
+
+
 def integrate_job(args) -> dict:
+    state=state_root(args.state_dir)
+    lock=_lock(state/"workspaces"/"locks"/f"job-{args.job}.lock")
+    try:
+        return _integrate_job_locked(args)
+    finally:
+        lock.close()
+
+
+def _integrate_job_locked(args) -> dict:
     state=state_root(args.state_dir); job=load_job(state,args.job); repo=Path(job["repo"]); wt=Path(job["worktree"])
-    if job.get("state") not in {"ready","active","conflicted","interrupted"}:
-        raise WorkspaceError(f"job state cannot integrate: {job.get('state')}")
+    if job.get("state") == "integrated":
+        # The historical receipt is durable even if later commits change content.
+        return job
+    existing = _find_existing_integration(state,job)
+    if existing is not None:
+        return existing
+    if job.get("state") != "ready":
+        raise WorkspaceError("job must be ready before canonical integration")
     if _dirty(wt): raise WorkspaceError("job worktree is dirty; checkpoint first")
     checkpoint=git(wt,"rev-parse","HEAD").stdout.strip()
-    _verify_remote_branch(repo,job["remote"],job["branch"],checkpoint)
+    _verify_remote_branch(repo,_fetch_target(job),job["branch"],checkpoint)
     lock_name=hashlib.sha256(f"{job['repo_id']}\0{job['target_branch']}".encode()).hexdigest()[:24]
     lock=_lock(state/"workspaces"/"locks"/f"integrate-{lock_name}.lock")
     tmp=None
     try:
-        git(repo,"fetch","--prune",job["remote"],f"refs/heads/{job['target_branch']}:refs/remotes/{job['remote']}/{job['target_branch']}")
+        git(repo,"fetch","--prune",_fetch_target(job),f"refs/heads/{job['target_branch']}:refs/remotes/{job['remote']}/{job['target_branch']}")
         current=git(repo,"rev-parse",f"refs/remotes/{job['remote']}/{job['target_branch']}^{{commit}}").stdout.strip()
         anc=git(repo,"merge-base","--is-ancestor",job["base_commit"],current,check=False)
         if anc.returncode != 0:
             raise WorkspaceError("job base is no longer an ancestor of canonical target; manual recovery required")
         changed_job=_changed_paths(repo,job["base_commit"],checkpoint)
+        if VALIDATION_POLICY_PATH in changed_job:
+            raise WorkspaceError("candidate changed the trusted validation policy; use a separately reviewed policy update")
+        validator, policy_sha = _trusted_validation(repo,current,job)
         changed_main=_changed_paths(repo,job["base_commit"],current)
         overlap=sorted(changed_job & changed_main)
         resource_seen=_resource_seen_since(repo,job["base_commit"],current,job["resource"])
@@ -485,31 +629,66 @@ def integrate_job(args) -> dict:
         if merge.returncode != 0:
             job["state"]="conflicted"; job["last_error"]=(merge.stderr or merge.stdout).strip(); save_job(state,job)
             raise WorkspaceError("squash merge conflicted; job requires reconciliation")
-        if args.validate:
+        rc, stdout, stderr = _run_job_shell(args.shell, validator, tmp, args.timeout)
+        if rc != 0:
+            raise WorkspaceError(f"trusted integration validation failed rc={rc}: {(stderr or stdout)[-3000:]}")
+        if args.validate and args.validate != validator:
             rc, stdout, stderr = _run_job_shell(args.shell, args.validate, tmp, args.timeout)
             if rc != 0:
-                raise WorkspaceError(f"integration validation failed rc={rc}: {(stderr or stdout)[-3000:]}")
+                raise WorkspaceError(f"additional integration validation failed rc={rc}: {(stderr or stdout)[-3000:]}")
         if git(tmp,"diff","--cached","--quiet",check=False).returncode == 0:
             raise WorkspaceError("job has no canonical changes to integrate")
         msg=args.message or f"Integrate workspace {job['job_id']}"
         body=(f"{msg}\n\nBridge-Job-ID: {job['job_id']}\nBridge-Resource: {job['resource']}\n"
-              f"Bridge-Base: {job['base_commit']}\nBridge-Checkpoint: {checkpoint}\n")
+              f"Bridge-Base: {job['base_commit']}\nBridge-Checkpoint: {checkpoint}\n"
+              f"Bridge-Policy-Revision: {current}\nBridge-Policy-SHA256: {policy_sha}\n")
         git(tmp,"commit","-m",body,timeout=args.timeout)
         candidate=git(tmp,"rev-parse","HEAD").stdout.strip()
-        git(repo,"fetch","--prune",job["remote"],f"refs/heads/{job['target_branch']}:refs/remotes/{job['remote']}/{job['target_branch']}")
+        git(repo,"fetch","--prune",_fetch_target(job),f"refs/heads/{job['target_branch']}:refs/remotes/{job['remote']}/{job['target_branch']}")
         latest=git(repo,"rev-parse",f"refs/remotes/{job['remote']}/{job['target_branch']}^{{commit}}").stdout.strip()
         if latest != current:
             raise WorkspaceError(f"canonical target moved during integration: {current} -> {latest}")
-        push=git(tmp,"push",job["remote"],f"HEAD:refs/heads/{job['target_branch']}",check=False,timeout=args.timeout)
+        push=git(tmp,"push",_push_target(job),f"HEAD:refs/heads/{job['target_branch']}",check=False,timeout=args.timeout)
         if push.returncode != 0:
             raise WorkspaceError(f"canonical push rejected: {(push.stderr or push.stdout).strip()}")
-        _verify_remote_branch(repo,job["remote"],job["target_branch"],candidate)
+        _verify_remote_branch(repo,_fetch_target(job),job["target_branch"],candidate)
         job["state"]="integrated"; job["integration_commit"]=candidate; job["integrated_at"]=now_iso(); job["last_checkpoint"]=checkpoint; job["last_remote_checkpoint"]=checkpoint
+        tree=git(repo,"rev-parse",candidate+"^{tree}").stdout.strip()
+        _write_terminal_receipt(state,job,policy_rev=current,policy_sha=policy_sha,candidate_tree=tree)
         save_job(state,job)
         return job
     finally:
         if tmp is not None and tmp.exists():
             git(repo,"worktree","remove","--force",str(tmp),check=False)
+        lock.close()
+
+
+def finish_job(args) -> dict:
+    """Bounded idempotent completion; never invokes garbage collection."""
+    state=state_root(args.state_dir)
+    lock=_lock(state/"workspaces"/"locks"/f"job-{args.job}.lock")
+    try:
+        job=load_job(state,args.job)
+        if job.get("state") == "integrated":
+            _find_existing_integration(state,job)
+            receipt=_receipt_file(state,args.job)
+            if not receipt.exists():
+                raise WorkspaceError("integrated metadata lacks terminal receipt; recover before finish")
+            return {"job":job,"receipt":json.loads(receipt.read_text("utf-8"))}
+        existing=_find_existing_integration(state,job)
+        if existing is not None:
+            receipt=_receipt_file(state,args.job)
+            return {"job":existing,"receipt":json.loads(receipt.read_text("utf-8"))}
+        wt=Path(job["worktree"])
+        if _dirty(wt):
+            _checkpoint(state,job,args.message)
+        _ready_job_locked(argparse.Namespace(checkpoint=False,message=args.message),state,job)
+        job=_integrate_job_locked(args)
+        receipt=_receipt_file(state,args.job)
+        if not receipt.is_file():
+            raise WorkspaceError("integration missing immutable completion receipt")
+        return {"job":job,"receipt":json.loads(receipt.read_text("utf-8"))}
+    finally:
         lock.close()
 
 
@@ -532,34 +711,104 @@ def recover_jobs(args) -> list[dict]:
         if p.exists():
             recovered.append(load_job(state,jid)); continue
         wt=Path(data["worktree"]); head=data.get("HEAD") or git(wt,"rev-parse","HEAD").stdout.strip()
-        git(repo,"fetch","--prune",remote,f"refs/heads/{target}:refs/remotes/{remote}/{target}")
+        git(repo,"fetch","--prune",remote_url(repo,remote),f"refs/heads/{target}:refs/remotes/{remote}/{target}")
         current=git(repo,"rev-parse",f"refs/remotes/{remote}/{target}^{{commit}}").stdout.strip()
         mb=git(repo,"merge-base",head,current).stdout.strip()
-        job={"schema":1,"job_id":jid,"repo":str(repo),"repo_id":rid,"remote":remote,"remote_url":remote_url(repo,remote),"target_branch":target,"base_commit":mb,"branch":JOB_BRANCH_PREFIX+jid,"worktree":str(wt),"resource":f"repo:{rid}","state":"interrupted","created_at":now_iso(),"updated_at":now_iso(),"last_checkpoint":head,"last_remote_checkpoint":None,"reconciled_target":mb,"integration_commit":None,"recovery_note":"metadata reconstructed conservatively from Git worktree"}
+        job={"schema":1,"job_id":jid,"repo":str(repo),"repo_id":rid,"remote":remote,"remote_url":remote_url(repo,remote),"remote_push_url":remote_push_url(repo,remote),"target_branch":target,"base_commit":mb,"branch":JOB_BRANCH_PREFIX+jid,"worktree":str(wt),"resource":f"repo:{rid}","state":"interrupted","created_at":now_iso(),"updated_at":now_iso(),"last_checkpoint":head,"last_remote_checkpoint":None,"reconciled_target":mb,"integration_commit":None,"recovery_note":"metadata reconstructed conservatively from Git worktree"}
         save_job(state,job); recovered.append(job)
     return recovered
 
 
 def gc_jobs(args) -> list[str]:
-    state=state_root(args.state_dir); removed=[]; cutoff=time.time()-args.retention_days*86400
-    for job in list_jobs(argparse.Namespace(state_dir=args.state_dir,repo=args.repo)):
-        if job.get("state") != "integrated": continue
-        try: integrated_epoch=calendar.timegm(time.strptime(job["integrated_at"],"%Y-%m-%dT%H:%M:%SZ"))
-        except Exception: continue
-        if integrated_epoch > cutoff: continue
-        repo=Path(job["repo"]); wt=Path(job["worktree"]); commit=job.get("integration_commit")
-        git(repo,"fetch","--prune",job["remote"],f"refs/heads/{job['target_branch']}:refs/remotes/{job['remote']}/{job['target_branch']}")
-        current=git(repo,"rev-parse",f"refs/remotes/{job['remote']}/{job['target_branch']}^{{commit}}").stdout.strip()
-        if git(repo,"merge-base","--is-ancestor",commit,current,check=False).returncode != 0:
-            continue
-        if wt.exists() and _dirty(wt): continue
-        if wt.exists(): git(repo,"worktree","remove",str(wt),check=False)
-        git(repo,"branch","-D",job["branch"],check=False)
-        if args.delete_remote_branch:
-            git(repo,"push",job["remote"],f":refs/heads/{job['branch']}",check=False)
-        job_path(state,job["job_id"]).unlink(missing_ok=True); removed.append(job["job_id"])
-    return removed
+    """Operator-only maintenance; remote agents cannot grant cleanup authority.
 
+    Destructive GC is disabled by default. The explicit local maintenance switch
+    exists for qualified cleanup only and must never be exposed via the mailbox.
+    Even in maintenance mode each job is independently fail-closed.
+    """
+    if not getattr(args, "enable_maintenance_gc", False):
+        raise WorkspaceError("destructive workspace GC is frozen; no artifacts removed")
+    state = state_root(args.state_dir)
+    removed = []
+    cutoff = time.time() - args.retention_days * 86400
+    for snapshot in list_jobs(argparse.Namespace(state_dir=args.state_dir, repo=args.repo)):
+        job_id = snapshot.get("job_id")
+        if not job_id:
+            continue
+        # Match exec and integration locking; retryable refusal is safer than
+        # racing another request that is checkpointing the same job.
+        lock = _lock(state / "workspaces" / "locks" / f"job-{job_id}.lock", nonblocking=True)
+        try:
+            job = load_job(state, job_id)
+            if job.get("state") != "integrated":
+                continue
+            try:
+                integrated_epoch = calendar.timegm(time.strptime(job["integrated_at"], "%Y-%m-%dT%H:%M:%SZ"))
+            except (KeyError, ValueError, TypeError):
+                continue
+            if integrated_epoch > cutoff:
+                continue
+            repo = repo_root(Path(job["repo"]))
+            wt = Path(job["worktree"])
+            checkpoint = job.get("last_remote_checkpoint")
+            integration = job.get("integration_commit")
+            if not checkpoint or not integration or checkpoint != job.get("last_checkpoint"):
+                continue
+            branch = job.get("branch", "")
+            if branch != JOB_BRANCH_PREFIX + job_id:
+                continue
+            # Proven canonical integration is historical, not inferred from
+            # the current file tree (which later work may legitimately change).
+            git(repo, "fetch", "--prune", _fetch_target(job),
+                f"refs/heads/{job['target_branch']}:refs/remotes/{job['remote']}/{job['target_branch']}")
+            current = git(repo, "rev-parse", f"refs/remotes/{job['remote']}/{job['target_branch']}^{{commit}}").stdout.strip()
+            if git(repo, "merge-base", "--is-ancestor", integration, current, check=False).returncode != 0:
+                continue
+            message = git(repo, "show", "-s", "--format=%B", integration).stdout
+            if (f"Bridge-Job-ID: {job_id}" not in message or
+                    f"Bridge-Checkpoint: {checkpoint}" not in message):
+                continue
+            local_tip = git(repo, "rev-parse", f"refs/heads/{branch}", check=False)
+            if local_tip.returncode != 0 or local_tip.stdout.strip() != checkpoint:
+                continue
+            try:
+                remote_tip = _remote_ref(repo, _fetch_target(job), branch)
+            except WorkspaceError:
+                continue
+            if remote_tip != checkpoint:
+                continue
+            if not wt.is_dir() or _dirty(wt):
+                continue
+            # Refuse a running/in-use workspace; only an explicitly unlocked
+            # worktree can be removed by local maintenance. Never force removal.
+            registered = git(repo, "worktree", "list", "--porcelain").stdout
+            record = next((block for block in registered.split("\n\n")
+                           if f"worktree {wt}" in block.splitlines()), None)
+            if record is None or any(line.startswith("locked") for line in record.splitlines()):
+                continue
+            # Check every effect, and keep metadata until all effects and
+            # their postconditions have been verified. No --force branch deletion.
+            removal = git(repo, "worktree", "remove", str(wt), check=False)
+            if removal.returncode != 0 or wt.exists():
+                continue
+            # At this point the remote checkpoint is still available. A
+            # concurrent remote advance is protected by the Git lease below.
+            if getattr(args, "delete_remote_branch", False):
+                push = git(repo, "push", f"--force-with-lease=refs/heads/{branch}:{checkpoint}",
+                           _push_target(job), f":refs/heads/{branch}", check=False)
+                if push.returncode != 0:
+                    continue
+                if git(repo, "ls-remote", "--heads", _fetch_target(job), f"refs/heads/{branch}").stdout.strip():
+                    continue
+            # Local job branch is a recovery anchor; retain it and the
+            # terminal receipt even after a successful maintenance cleanup.
+            job["worktree_released_at"] = now_iso()
+            job["gc_remote_deleted"] = bool(getattr(args, "delete_remote_branch", False))
+            save_job(state, job)
+            removed.append(job_id)
+        finally:
+            lock.close()
+    return removed
 
 def emit(value):
     print(json.dumps(value,indent=2,sort_keys=True))
@@ -577,8 +826,9 @@ def main():
     p=sub.add_parser("ready"); p.add_argument("--job",required=True); p.add_argument("--checkpoint",action="store_true"); p.add_argument("--message"); p.set_defaults(fn=ready_job)
     p=sub.add_parser("mark-reconciled"); p.add_argument("--job",required=True); p.add_argument("--target"); p.set_defaults(fn=mark_reconciled)
     p=sub.add_parser("integrate"); p.add_argument("--job",required=True); p.add_argument("--message"); p.add_argument("--validate"); p.add_argument("--timeout",type=int,default=240); p.add_argument("--shell",default="/bin/zsh" if Path('/bin/zsh').exists() else "/bin/bash"); p.set_defaults(fn=integrate_job)
+    p=sub.add_parser("finish"); p.add_argument("--job",required=True); p.add_argument("--message"); p.add_argument("--validate"); p.add_argument("--timeout",type=int,default=240); p.add_argument("--shell",default="/bin/zsh" if Path('/bin/zsh').exists() else "/bin/bash"); p.set_defaults(fn=finish_job)
     p=sub.add_parser("recover"); p.add_argument("--repo",required=True); p.add_argument("--remote",default="origin"); p.add_argument("--target",default="main"); p.set_defaults(fn=recover_jobs)
-    p=sub.add_parser("gc"); p.add_argument("--repo"); p.add_argument("--retention-days",type=int,default=14); p.add_argument("--delete-remote-branch",action="store_true"); p.set_defaults(fn=gc_jobs)
+    p=sub.add_parser("gc"); p.add_argument("--repo"); p.add_argument("--retention-days",type=int,default=14); p.add_argument("--delete-remote-branch",action="store_true"); p.add_argument("--enable-maintenance-gc",action="store_true",help="local operator only; never through remote bridge"); p.set_defaults(fn=gc_jobs)
     args=ap.parse_args()
     try:
         emit(args.fn(args)); return 0

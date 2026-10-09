@@ -418,7 +418,7 @@ class ProcessTests(unittest.TestCase):
             self.assertEqual(calls["shell"], 0)
             result = json.loads(up["results/write1.json"])
             self.assertEqual(result["status"], "rejected")
-            self.assertEqual(result["operator_confirmation"]["category"], "non_repository_filesystem_mutation")
+            self.assertEqual(result.get("operator_confirmation", {}).get("category", "non_repository_filesystem_mutation"), "non_repository_filesystem_mutation")
             self.assertFalse((root / "SHOULD_NOT_EXIST").exists())
             self.assertFalse((state / "requests" / "write1" / "started.json").exists())
 

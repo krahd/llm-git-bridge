@@ -17,6 +17,7 @@ TMP_REQ=""
 TMP_RESULT=""
 TMP_HEALTH=""
 CUTOVER_COMMITTED=0
+PROVISIONAL_ACTIVATION=0
 STARTED_NEW=0
 OLD_CONSUMERS_STOPPED=0
 
@@ -27,9 +28,20 @@ rollback() {
   rc=$?
   if [ "$rc" -ne 0 ] && [ "$CUTOVER_COMMITTED" -eq 0 ]; then
     if [ "$STARTED_NEW" -eq 1 ]; then
+      # v6 might have executed an effect before publishing its result. A
+      # successful process shutdown is not evidence that its journal is safe
+      # for v5. Hold both consumers rather than blindly replaying requests.
       launchctl bootout "gui/${UID_NOW}/${NEW_LABEL}" >/dev/null 2>&1 || true
-    fi
-    if [ "$OLD_CONSUMERS_STOPPED" -eq 1 ]; then
+      mkdir -p "$STATE_DIR"; chmod 700 "$STATE_DIR" || true
+      printf 'HOLD: v6 admitted a request or could have; do not restart v5 until a journal/mailbox reconciliation proves no duplicate effects.\n' >&2
+      printf '%s\n' "cutover_holding_reconciliation $(date -u +%Y-%m-%dT%H:%M:%SZ)" > "$STATE_DIR/cutover-reconciliation-required"
+      if [ -n "$ROLLBACK_FILE" ] && [ -s "$ROLLBACK_FILE" ]; then
+        cp -p "$ROLLBACK_FILE" "$STATE_DIR/cutover-rollback-services.tsv"
+        chmod 600 "$STATE_DIR/cutover-rollback-services.tsv"
+      fi
+    elif [ "$OLD_CONSUMERS_STOPPED" -eq 1 ]; then
+      # No v6 admission was possible; restoring the original consumer does
+      # not introduce a v6/v5 duplicate-execution race.
       echo "Cutover failed after stopping legacy consumers; restoring previously active bridge service(s)." >&2
       if [ -n "$ROLLBACK_FILE" ] && [ -f "$ROLLBACK_FILE" ]; then
         while IFS='|' read -r label plist; do
@@ -48,11 +60,12 @@ rollback() {
   [ -n "$TMP_HEALTH" ] && rm -f "$TMP_HEALTH" || true
   exit "$rc"
 }
+
 trap rollback EXIT
 
 [ "$(uname -s)" = Darwin ] || fail "macOS required"
 need python3; need rclone; need launchctl
-[ "$RETIRE_OLD_AFTER_SMOKE" = 0 ] || [ "$RETIRE_OLD_AFTER_SMOKE" = 1 ] || fail "RETIRE_OLD_AFTER_SMOKE must be 0 or 1"
+[ "$RETIRE_OLD_AFTER_SMOKE" = 0 ] || fail "legacy retirement requires separate verified production acceptance; RETIRE_OLD_AFTER_SMOKE must be 0"
 [ -f "$NEW_PLIST" ] || fail "staged v6 plist missing: $NEW_PLIST"
 [ -f "$NEW_CONFIG" ] || fail "staged v6 config missing: $NEW_CONFIG"
 [ -f "$NEW_INSTALL_DIR/bridge.py" ] || fail "staged v6 bridge missing: $NEW_INSTALL_DIR/bridge.py"
@@ -240,40 +253,30 @@ r=json.load(open(sys.argv[1],encoding='utf-8'))
 if r.get('status')!='completed' or r.get('exit_code')!=0 or 'LOCAL_EXECUTOR_BRIDGE_OK' not in r.get('stdout_text',''):
     print(json.dumps(r,indent=2),file=sys.stderr); raise SystemExit('v6 production smoke failed')
 PYRESULT
-CUTOVER_COMMITTED=1
-"${R[@]}" deletefile "${REMOTE}results/${RID}.json" >/dev/null 2>&1 || true
-
+# A harmless shell smoke only proves transport, not replay/approval/Git
+# acceptance. Activation remains provisional until a separate, independently
+# verified acceptance operation; preserve its smoke result as evidence.
+PROVISIONAL_ACTIVATION=1
 if [ "$RETIRE_OLD_AFTER_SMOKE" -eq 1 ]; then
-# Post-commit housekeeping. Preserve compatibility for clients that still invoke the
-# historical coordinator path, but make it resolve to the bundled v6 coordinator.
-archive_dir="$STATE_DIR/retired-v5-runtime"
-mkdir -p "$archive_dir" "$LEGACY_INSTALL_DIR"
-chmod 700 "$archive_dir" "$LEGACY_INSTALL_DIR" || true
-if [ -e "$LEGACY_INSTALL_DIR/workspace.py" ] && [ ! -L "$LEGACY_INSTALL_DIR/workspace.py" ]; then
-  cp -p "$LEGACY_INSTALL_DIR/workspace.py" "$archive_dir/workspace.py.$(date +%Y%m%d%H%M%S)"
+  fail "legacy retirement is forbidden during provisional cutover; complete independent production acceptance first"
 fi
-ln -sfn "$NEW_INSTALL_DIR/workspace.py" "$LEGACY_INSTALL_DIR/workspace.py"
-
-# Archive obsolete service plists only after the v6 production smoke passes.
-archive_plists="$STATE_DIR/retired-launchagents"
-mkdir -p "$archive_plists"; chmod 700 "$archive_plists" || true
-for label in "${OLD_LABELS[@]}"; do
-  plist="$HOME/Library/LaunchAgents/$label.plist"
-  if [ -f "$plist" ]; then
-    mv "$plist" "$archive_plists/${label}.$(date +%Y%m%d%H%M%S).plist"
-  fi
-done
-
-else
-  if [ -s "$ROLLBACK_FILE" ]; then
-    cp -p "$ROLLBACK_FILE" "$STATE_DIR/cutover-rollback-services.tsv"
-    chmod 600 "$STATE_DIR/cutover-rollback-services.tsv"
-  fi
+# Keep a durable rollback-service list and explicit provisional state.
+mkdir -p "$STATE_DIR"; chmod 700 "$STATE_DIR" || true
+if [ -s "$ROLLBACK_FILE" ]; then
+  cp -p "$ROLLBACK_FILE" "$STATE_DIR/cutover-rollback-services.tsv"
+  chmod 600 "$STATE_DIR/cutover-rollback-services.tsv"
 fi
+printf 'source=%s\nlabel=%s\nsmoke_id=%s\nstate=provisional\n' "$STAGED_SOURCE_COMMIT" "$NEW_LABEL" "$RID" > "$STATE_DIR/cutover-provisional.txt"
+chmod 600 "$STATE_DIR/cutover-provisional.txt"
+CUTOVER_COMMITTED=1
+
+# No automatic retirement or replacement of legacy coordinator files.
+# Production acceptance is separate from activation and cannot be inferred
+# from a read-only smoke. Preserve all legacy plists, journals and checkpoints.
 trap - EXIT
 rm -f "$ROLLBACK_FILE" "$TMP_REQ" "$TMP_RESULT" "$TMP_HEALTH"
-printf 'LOCAL_EXECUTOR_BRIDGE_CUTOVER=1\n'
+printf 'LOCAL_EXECUTOR_BRIDGE_CUTOVER_PROVISIONAL=1\n'
 printf 'LABEL: %s\n' "$NEW_LABEL"
-printf 'RETIRED_OLD: %s\n' "$RETIRE_OLD_AFTER_SMOKE"
+printf 'RETIRED_OLD: 0\n'
 printf 'CONFIG: %s\n' "$NEW_CONFIG"
 printf 'WORKSPACE: %s\n' "$NEW_INSTALL_DIR/workspace.py"

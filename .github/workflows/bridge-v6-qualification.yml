@@ -1,0 +1,24 @@
+name: Bridge v6 qualification
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+  workflow_dispatch:
+permissions:
+  contents: read
+jobs:
+  bridge-v6-regressions:
+    runs-on: macos-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v4
+      - name: Validate cutover shell syntax
+        run: bash -n shell_bridge/cutover.sh
+      - name: Run bridge Python regression suite
+        env:
+          PYTHONDONTWRITEBYTECODE: '1'
+          _LOCAL_EXECUTOR_NESTED_VALIDATION: '1'
+        run: python3 -m unittest discover -s shell_bridge/tests -q
+      - name: Typecheck native approval application
+        run: xcrun swiftc -typecheck -framework AppKit shell_bridge/approval_gui.swift

@@ -25,6 +25,8 @@ class WorkspaceTests(unittest.TestCase):
         r('git','init','-q','-b','main',str(self.seed))
         r('git','-C',str(self.seed),'config','user.name','Test User'); r('git','-C',str(self.seed),'config','user.email','test@example.invalid')
         (self.seed/'paper-a.txt').write_text('a0\n'); (self.seed/'paper-b.txt').write_text('b0\n')
+        (self.seed/'.bridge').mkdir()
+        (self.seed/'.bridge'/'validation.json').write_text(json.dumps({'schema':1,'command':'git diff --cached --check'}))
         r('git','-C',str(self.seed),'add','.'); r('git','-C',str(self.seed),'commit','-qm','initial')
         r('git','clone','-q','--bare',str(self.seed),str(self.origin)); r('git','clone','-q',str(self.origin),str(self.repo))
         r('git','-C',str(self.repo),'config','user.name','Test User'); r('git','-C',str(self.repo),'config','user.email','test@example.invalid')
@@ -160,18 +162,115 @@ class WorkspaceTests(unittest.TestCase):
         self.assertFalse(marker.exists())
         self.assertEqual(w.load_job(self.state,j['job_id'])['state'],'interrupted')
 
-    def test_gc_can_remove_older_integrated_job_after_main_advances(self):
-        a=self.create('research:paper:a'); self.exec(a['job_id'],"printf 'a1\\n' > paper-a.txt"); self.ready(a['job_id']); self.integrate(a['job_id'])
-        b=self.create('research:paper:b'); self.exec(b['job_id'],"printf 'b1\\n' > paper-b.txt"); self.ready(b['job_id']); self.integrate(b['job_id'])
-        p=w.job_path(self.state,a['job_id']); meta=json.loads(p.read_text()); meta['integrated_at']='2000-01-01T00:00:00Z'; p.write_text(json.dumps(meta))
-        removed=w.gc_jobs(argparse.Namespace(state_dir=str(self.state),repo=None,retention_days=1,delete_remote_branch=False))
-        self.assertIn(a['job_id'],removed)
+    def test_gc_is_frozen_by_default_and_preserves_every_artifact(self):
+        j=self.create('research:paper:a')
+        self.exec(j['job_id'],"printf 'a1\\n' > paper-a.txt")
+        self.ready(j['job_id']); self.integrate(j['job_id'])
+        p=w.job_path(self.state,j['job_id'])
+        branch=j['branch']
+        before=r('git','-C',str(self.repo),'ls-remote','origin',f'refs/heads/{branch}').stdout
+        with self.assertRaisesRegex(w.WorkspaceError,'frozen'):
+            w.gc_jobs(argparse.Namespace(state_dir=str(self.state),repo=None,retention_days=0,delete_remote_branch=True))
+        self.assertTrue(p.exists())
+        self.assertTrue(Path(j['worktree']).exists())
+        self.assertEqual(r('git','-C',str(self.repo),'ls-remote','origin',f'refs/heads/{branch}').stdout,before)
 
-    def test_gc_refuses_dirty_integrated_worktree(self):
-        j=self.create('research:paper:a'); self.exec(j['job_id'],"printf 'a1\\n' > paper-a.txt"); self.ready(j['job_id']); ij=self.integrate(j['job_id'])
-        p=w.job_path(self.state,j['job_id']); meta=json.loads(p.read_text()); meta['integrated_at']='2000-01-01T00:00:00Z'; p.write_text(json.dumps(meta))
-        Path(j['worktree'],'LOCAL').write_text('dirty')
-        removed=w.gc_jobs(argparse.Namespace(state_dir=str(self.state),repo=None,retention_days=1,delete_remote_branch=False))
-        self.assertNotIn(j['job_id'],removed); self.assertTrue(p.exists())
+    def test_gc_maintenance_preserves_later_unintegrated_remote_commit(self):
+        j=self.create('research:paper:a')
+        self.exec(j['job_id'],"printf 'a1\\n' > paper-a.txt")
+        self.ready(j['job_id']); self.integrate(j['job_id'])
+        p=w.job_path(self.state,j['job_id'])
+        meta=json.loads(p.read_text());meta['integrated_at']='2000-01-01T00:00:00Z';p.write_text(json.dumps(meta))
+        wt=Path(j['worktree']); (wt/'later.txt').write_text('unintegrated')
+        r('git','-C',str(wt),'add','later.txt');r('git','-C',str(wt),'commit','-qm','later unique work')
+        r('git','-C',str(wt),'push','origin',f"HEAD:refs/heads/{j['branch']}")
+        tip=r('git','-C',str(wt),'rev-parse','HEAD').stdout.strip()
+        out=w.gc_jobs(argparse.Namespace(state_dir=str(self.state),repo=None,retention_days=1,delete_remote_branch=True,enable_maintenance_gc=True))
+        self.assertNotIn(j['job_id'],out)
+        self.assertTrue(p.exists());self.assertTrue(wt.exists())
+        self.assertEqual(r('git','-C',str(self.repo),'ls-remote','origin',f"refs/heads/{j['branch']}").stdout.split()[0],tip)
+
+    def test_gc_maintenance_refuses_locked_worktree_and_keeps_metadata(self):
+        j=self.create('research:paper:a')
+        self.exec(j['job_id'],"printf 'a1\\n' > paper-a.txt")
+        self.ready(j['job_id']); self.integrate(j['job_id'])
+        p=w.job_path(self.state,j['job_id'])
+        meta=json.loads(p.read_text());meta['integrated_at']='2000-01-01T00:00:00Z';p.write_text(json.dumps(meta))
+        out=w.gc_jobs(argparse.Namespace(state_dir=str(self.state),repo=None,retention_days=1,delete_remote_branch=True,enable_maintenance_gc=True))
+        self.assertNotIn(j['job_id'],out)
+        self.assertTrue(p.exists());self.assertTrue(Path(j['worktree']).exists())
+
+    def test_trusted_git_push_refuses_redirected_push_url(self):
+        j=self.create('research:remote:pin-push')
+        self.exec(j['job_id'],"printf 'a1\n' > paper-a.txt")
+        alt=self.root/'attacker.git'
+        r('git','init','--bare','-q',str(alt))
+        r('git','-C',str(self.repo),'remote','set-url','--push','origin',str(alt))
+        with self.assertRaisesRegex(w.WorkspaceError,'configured Git remote changed'):
+            self.ready(j['job_id'])
+        self.assertFalse(r('git','-C',str(self.repo),'ls-remote',str(alt),'refs/heads/main').stdout)
+
+    def test_trusted_checkpoint_refuses_changed_fetch_url(self):
+        j=self.create('research:remote:pin-fetch')
+        alt=self.root/'alt.git'
+        r('git','clone','--bare','-q',str(self.origin),str(alt))
+        r('git','-C',str(self.repo),'remote','set-url','origin',str(alt))
+        wt=Path(j['worktree'])
+        (wt/'new-unique.txt').write_text('uncommitted and preserved\n')
+        with self.assertRaisesRegex(w.WorkspaceError,'configured Git remote changed'):
+            w._checkpoint(self.state,j,'changed URL rejected')
+        self.assertTrue((wt/'new-unique.txt').exists())
+        self.assertEqual(r('git','-C',str(wt),'status','--short').stdout.strip(),'?? new-unique.txt')
+
+    def test_gc_maintenance_failed_worktree_removal_keeps_remote_and_metadata(self):
+        from unittest.mock import patch
+        j=self.create('research:paper:failure')
+        self.exec(j['job_id'],"printf 'a1\n' > paper-a.txt")
+        self.ready(j['job_id']);self.integrate(j['job_id'])
+        meta_path=w.job_path(self.state,j['job_id'])
+        meta=json.loads(meta_path.read_text());meta['integrated_at']='2000-01-01T00:00:00Z';meta_path.write_text(json.dumps(meta))
+        ref=f"refs/heads/{j['branch']}"
+        expected=r('git','-C',str(self.repo),'ls-remote','origin',ref).stdout
+        old_git=w.git
+        def fail_worktree_removal(cwd,*args,**kw):
+            if args[:2]==('worktree','remove'):
+                return subprocess.CompletedProcess(['git',*args],1,'','simulated removal failure')
+            return old_git(cwd,*args,**kw)
+        with patch.object(w,'git',side_effect=fail_worktree_removal):
+            out=w.gc_jobs(argparse.Namespace(state_dir=str(self.state),repo=None,retention_days=1,delete_remote_branch=True,enable_maintenance_gc=True))
+        self.assertNotIn(j['job_id'],out)
+        self.assertTrue(meta_path.exists());self.assertTrue(Path(j['worktree']).exists())
+        self.assertEqual(r('git','-C',str(self.repo),'ls-remote','origin',ref).stdout,expected)
+
+    def test_gc_maintenance_remote_lease_rejects_concurrent_branch_advance(self):
+        from unittest.mock import patch
+        j=self.create('research:paper:lease')
+        self.exec(j['job_id'],"printf 'a1\n' > paper-a.txt")
+        self.ready(j['job_id']);self.integrate(j['job_id'])
+        meta_path=w.job_path(self.state,j['job_id'])
+        meta=json.loads(meta_path.read_text());meta['integrated_at']='2000-01-01T00:00:00Z';meta_path.write_text(json.dumps(meta))
+        ref=f"refs/heads/{j['branch']}"
+        old_remote_ref=w._remote_ref
+        once=[True];new_sha=[None]
+        def advance_during_gc(repo,remote,branch):
+            original=old_remote_ref(repo,remote,branch)
+            if once[0]:
+                once[0]=False
+                clone=self.root/'gc-concurrent-clone'
+                r('git','clone','-q',str(self.origin),str(clone))
+                r('git','-C',str(clone),'config','user.name','Concurrent')
+                r('git','-C',str(clone),'config','user.email','other@example.invalid')
+                r('git','-C',str(clone),'checkout','-q','-b','advance',original)
+                (clone/'new-unique.txt').write_text('remote newer\n')
+                r('git','-C',str(clone),'add','new-unique.txt')
+                r('git','-C',str(clone),'commit','-qm','concurrent unique commit')
+                new_sha[0]=r('git','-C',str(clone),'rev-parse','HEAD').stdout.strip()
+                r('git','-C',str(clone),'push','origin',f'HEAD:{ref}')
+            return original
+        with patch.object(w,'_remote_ref',side_effect=advance_during_gc):
+            out=w.gc_jobs(argparse.Namespace(state_dir=str(self.state),repo=None,retention_days=1,delete_remote_branch=True,enable_maintenance_gc=True))
+        self.assertNotIn(j['job_id'],out)
+        self.assertTrue(meta_path.exists())
+        self.assertEqual(r('git','-C',str(self.repo),'ls-remote','origin',ref).stdout.split()[0],new_sha[0])
 
 if __name__=='__main__': unittest.main(verbosity=2)

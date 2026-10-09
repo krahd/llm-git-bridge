@@ -1,0 +1,4 @@
+{
+  "schema": 1,
+  "command": "PYTHONDONTWRITEBYTECODE=1 _LOCAL_EXECUTOR_NESTED_VALIDATION=1 python3 -m unittest discover -s shell_bridge/tests -q"
+}

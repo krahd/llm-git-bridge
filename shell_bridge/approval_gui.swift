@@ -8,6 +8,8 @@ struct ApprovalRequest: Codable {
     let category: String
     let explanation: String
     let cwd: String
+    let command: String
+    let payload_sha256: String
     let expires_at: Double
     let created_at: Double?
 }
@@ -18,6 +20,8 @@ final class ApprovalController: NSObject, NSApplicationDelegate {
     private let pythonPath: String
     private var statusItem: NSStatusItem!
     private var lastDecisionError: String?
+    // A summary cannot authorize. Exact payload must be inspected in this app session.
+    private var reviewed: [String: String] = [:]
     private let menu = NSMenu(title: "Approvals")
     private var timer: Timer?
 
@@ -77,12 +81,61 @@ final class ApprovalController: NSObject, NSApplicationDelegate {
         return String(compact.prefix(max(0, limit - 1))) + "…"
     }
 
+    @objc private func review(_ sender: NSMenuItem) {
+        guard let requestID = sender.representedObject as? String,
+              let req = pendingRequests().first(where: { $0.request_id == requestID }) else {
+            refresh(); return
+        }
+        let detail = """
+        Request: \(req.request_id)
+        Scope / reason: \(req.category)
+        Directory: \(req.cwd)
+        Payload SHA-256: \(req.payload_sha256)
+        Expires: \(Date(timeIntervalSince1970: req.expires_at))
+
+        Agent description (unverified):
+        \(req.explanation)
+
+        Exact command (read the entire command before allowing):
+        \(req.command)
+        """
+        let scroll = NSScrollView(frame: NSRect(x: 0, y: 0, width: 650, height: 380))
+        scroll.hasVerticalScroller = true
+        scroll.hasHorizontalScroller = true
+        let contents = NSTextView(frame: NSRect(x: 0, y: 0, width: 635, height: 380))
+        contents.isEditable = false
+        contents.isSelectable = true
+        contents.isRichText = false
+        contents.font = NSFont.monospacedSystemFont(ofSize: 11, weight: .regular)
+        contents.string = detail
+        contents.minSize = NSSize(width: 635, height: 380)
+        contents.maxSize = NSSize(width: CGFloat.greatestFiniteMagnitude, height: CGFloat.greatestFiniteMagnitude)
+        contents.isVerticallyResizable = true
+        contents.textContainer?.widthTracksTextView = false
+        contents.textContainer?.containerSize = NSSize(width: 3000, height: CGFloat.greatestFiniteMagnitude)
+        scroll.documentView = contents
+        let alert = NSAlert()
+        alert.alertStyle = .warning
+        alert.messageText = "Inspect elevated operation"
+        alert.informativeText = "This description is supplied by the requesting agent. Verify the exact command and effects. No operation runs from this review screen."
+        alert.accessoryView = scroll
+        alert.addButton(withTitle: "Close review")
+        NSApp.activate(ignoringOtherApps: true)
+        alert.runModal()
+        reviewed[req.request_id] = req.payload_sha256
+        refresh()
+    }
+
     @objc private func allow(_ sender: NSMenuItem) { decide(sender, "allow") }
     @objc private func reject(_ sender: NSMenuItem) { decide(sender, "cancel") }
 
     private func decide(_ sender: NSMenuItem, _ decision: String) {
         guard let requestID = sender.representedObject as? String,
               let req = pendingRequests().first(where: { $0.request_id == requestID }) else {
+            refresh(); return
+        }
+        guard decision != "allow" || reviewed[req.request_id] == req.payload_sha256 else {
+            lastDecisionError = "Inspect the exact command before allowing"
             refresh(); return
         }
         let pending = approvalRoot.appendingPathComponent("pending/" + req.request_id + ".json").path
@@ -145,7 +198,12 @@ final class ApprovalController: NSObject, NSApplicationDelegate {
                 submenu.addItem(disabledItem("Why: " + short(req.category.replacingOccurrences(of: "_", with: " "), 110)))
                 submenu.addItem(disabledItem("Where: " + short(req.cwd, 110)))
                 submenu.addItem(.separator())
+                let reviewItem = NSMenuItem(title: "Inspect exact command…", action: #selector(review(_:)), keyEquivalent: "")
+                reviewItem.target = self
+                reviewItem.representedObject = req.request_id
+                submenu.addItem(reviewItem)
                 let allowItem = NSMenuItem(title: "Allow once", action: #selector(allow(_:)), keyEquivalent: "")
+                allowItem.isEnabled = reviewed[req.request_id] == req.payload_sha256
                 allowItem.target = self
                 allowItem.representedObject = req.request_id
                 submenu.addItem(allowItem)
