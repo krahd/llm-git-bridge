@@ -241,7 +241,8 @@ DIRECT_SWIFTC="$DEVELOPER_DIR_VALUE/Toolchains/XcodeDefault.xctoolchain/usr/bin/
 if [ -x "$DIRECT_SWIFTC" ]; then SWIFTC_BIN="$DIRECT_SWIFTC"; else SWIFTC_BIN="$(command -v swiftc)" || fail "swiftc is required to build the native approval menu-bar app"; fi
 SWIFT_SDK="$DEVELOPER_DIR_VALUE/Platforms/MacOSX.platform/Developer/SDKs/MacOSX.sdk"
 [ -d "$SWIFT_SDK" ] || fail "macOS SDK is required to build the native approval menu-bar app: $SWIFT_SDK"
-mkdir -p "$APP_BUNDLE/Contents/MacOS"
+mkdir -p "$APP_BUNDLE/Contents/MacOS" "$APP_BUNDLE/Contents/Resources"
+install -m 644 "$SCRIPT_DIR/assets/bridge-menubar.png" "$APP_BUNDLE/Contents/Resources/bridge-menubar.png"
 APPROVAL_ROOT="$STATE_DIR/approvals"
 python3 - "$APP_BUNDLE/Contents/Info.plist" "$APPROVAL_ROOT" "$INSTALL_DIR/approval_helper.py" "$PYTHON_BIN" <<'PYAPPPLIST'
 import plistlib,sys
