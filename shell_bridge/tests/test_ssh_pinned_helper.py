@@ -79,11 +79,11 @@ class PinnedSSHHelperTests(unittest.TestCase):
         for commands in [
             {"status": ["/bin/true"]},
             {"run": ["relative-executable", "arg"]},
-            {"run": ["/bin/echo", "bad\\narg"]},
+            {"run": ["/bin/echo", "bad" + chr(10) + "arg"]},
             {"run": "/bin/echo"},
             {"run": []},
             {"run": ["/bin/../bin/sh"]},
-            {"run": ["/bin/sh", "bad\\x00arg"]},
+            {"run": ["/bin/sh", "bad" + chr(0) + "arg"]},
             {"run": ["/bin/echo", 23]},
         ]:
             with self.subTest(commands=commands):
