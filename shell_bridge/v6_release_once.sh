@@ -25,9 +25,10 @@ if [ -z "${V6_SSH_POLICY_DIR:-}" ]; then
 fi
 REGISTER_PINNED_SSH_POLICY_DIR="$V6_SSH_POLICY_DIR"
 export REGISTER_PINNED_SSH_POLICY_DIR
-echo "SSH prerequisite: macOS Remote Login must be restricted to the current account."
-inbound_ready=0
-for attempt in 1 2 3; do
+if [ "${V6_REQUIRE_INBOUND_SSH:-0}" = 1 ]; then
+  echo "Optional inbound SSH acceptance enabled: Remote Login must be restricted to the current account."
+  inbound_ready=0
+  for attempt in 1 2 3; do
   if PYTHONDONTWRITEBYTECODE=1 python3 shell_bridge/inbound_ssh_preflight.py; then
     inbound_ready=1
     break
@@ -39,7 +40,10 @@ for attempt in 1 2 3; do
   IFS= read -r response || fail "Remote Login preflight interrupted; v5 unchanged"
   [ "$response" = "RECHECK SSH" ] || fail "Remote Login not qualified; v5 unchanged"
 done
-[ "$inbound_ready" = 1 ] || fail "Remote Login remains unverified; v5 unchanged"
+  [ "$inbound_ready" = 1 ] || fail "Remote Login remains unverified; v5 unchanged"
+else
+  echo "INBOUND_SSH_NOT_REQUESTED=1 (bridge transport does not require Remote Login)"
+fi
 echo "Phase 1: macOS regressions, live owner inventory, isolated v6 startup and smoke"
 REGISTER_MAILBOX_INSPECTOR=1 bash shell_bridge/prepare_v6_on_mac.sh
 # The preparation script created exactly this isolated and uniquely named build.
@@ -138,6 +142,7 @@ approval_canary "$CANDIDATE_ROOT" "$CANDIDATE_ALLOWED" deny staging
 approval_canary "$CANDIDATE_ROOT" "$CANDIDATE_ALLOWED" allow staging
 ssh_status_canary "$CANDIDATE_ROOT" "$CANDIDATE_ALLOWED" staging
 
+if [ "${V6_REQUIRE_INBOUND_SSH:-0}" = 1 ]; then
 echo "Phase 2b: verify macOS inbound Remote Login and a real separate-device SSH session"
 [ -d "$HOME/.local/state" ] || fail "SSH witness state directory is missing"
 SSH_WITNESS_DIR="$(mktemp -d "$HOME/.local/state/v6-inbound-ssh.XXXXXXXX")" ||
@@ -161,6 +166,9 @@ done
 [ "$inbound_confirmed" = 1 ] ||
   fail "external-device SSH login witness missing or invalid; v5 has not been stopped"
 echo "NONLOCAL_INBOUND_SSH_SESSION_WITNESS_VERIFIED=1"
+else
+  echo "INBOUND_SSH_WITNESS_SKIPPED=1 (optional capability not requested)"
+fi
 
 echo "Phase 3: stage immutable production v6 without starting it"
 LEGACY_CONFIG="$HOME/.config/chatgpt-shell-bridge/config.json"

@@ -134,23 +134,37 @@ If previous production workflows depend on arbitrary outbound SSH or transfers,
 SSH capabilities and live tests are available. This is a business-functionality
 and safety gate, not a request to weaken the sandbox.
 
+## Optional inbound SSH acceptance
+
+Direct macOS Remote Login is separate from the Google Drive bridge transport
+and is **not required** to operate v6 remotely through the bridge. By default,
+the one-run controller records `INBOUND_SSH_NOT_REQUESTED=1` and skips
+Remote Login inspection and external-device witness verification.
+
+To qualify direct inbound SSH as an additional capability during the same
+release, run the launcher with `V6_REQUIRE_INBOUND_SSH=1`. In that mode,
+both the restricted-account preflight and real separate-device witness
+remain mandatory and fail closed. Other values are not an enablement;
+only the exact value `1` opts in. This opt-in does not configure or expose
+Remote Login or qualify reachability over the public internet.
+
 ## Inbound SSH requirement and limits
 
-Inbound SSH is macOS Remote Login, not the bridge transport. Before v6
-production staging, the one-run controller reads Remote Login status and checks
-that the current account belongs to the restricted SSH access group. If this
+Inbound SSH is macOS Remote Login, not the bridge transport. When `V6_REQUIRE_INBOUND_SSH=1` is selected, the one-run controller checks
+Remote Login status and restricted account access before production staging. If this
 is not yet configured, the operator can use macOS System Settings > General >
 Sharing > Remote Login, restrict access to specific authorized users, and
 recheck from the same running script. No script enables Remote Login, installs
 a service, opens a firewall port or weakens host authentication.
 
-Before production switching, a fresh 48-hex-digit challenge is generated in
-a private local state directory. An operator must establish a genuine SSH login
+With inbound SSH acceptance enabled, a fresh 48-hex-digit challenge is
+generated in a private local state directory before production switching. An operator must establish a genuine SSH login
 to the Mac **from a separate device**, execute the displayed witness command
 in that authenticated session, and let the running controller verify its
 identity, peer address and freshness. A missing or expired witness blocks
-production handover. This is a separate-client SSH session diagnostic; it does
-not independently establish public-internet routing, nor can local source
+production handover only when inbound SSH acceptance was explicitly requested.
+This is a separate-client SSH session diagnostic; it does not independently
+establish public-internet routing, nor can local source
 tests prove access through an off-site firewall/VPN.
 
 The SSH login account can operate through ordinary macOS SSH authorization;
