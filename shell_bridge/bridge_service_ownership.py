@@ -9,6 +9,7 @@ from __future__ import annotations
 
 import json
 import plistlib
+import re
 import subprocess
 import sys
 from pathlib import Path
@@ -37,7 +38,7 @@ def _safe_child(path: Path, home: Path) -> bool:
     return True
 
 
-def inspect_services(home: Path, launchctl_listing: str) -> dict:
+def inspect_services(home: Path, launchctl_listing: str, process_listing: str | None = None) -> dict:
     """Read only fixed user's LaunchAgent plists and their declared config paths."""
     home = home.absolute()
     records = []
@@ -98,6 +99,16 @@ def inspect_services(home: Path, launchctl_listing: str) -> dict:
             record["state"] = "unverifiable"
             problems.append("unverifiable loaded bridge: " + label)
         records.append(record)
+    if process_listing is not None:
+        known_pids = {item["pid"] for item in records if item.get("pid")}
+        for line in process_listing.splitlines():
+            part = line.strip().split(None, 1)
+            if len(part) != 2 or not part[0].isdecimal():
+                continue
+            pid, argv = part
+            if (re.search(r"(?:^|/)bridge\\.py\\s+daemon\\b", argv)
+                    and pid not in known_pids):
+                problems.append("unmanaged bridge daemon PID=" + pid)
     for field in ("drive_root_folder_id", "requests_folder_id", "results_folder_id",
                   "state_dir"):
         values = {}
@@ -119,7 +130,12 @@ def main() -> int:
                                 text=True, timeout=8, check=False)
         if output.returncode != 0:
             raise ValueError("launchctl could not enumerate loaded services")
-        inventory = inspect_services(Path.home(), output.stdout)
+        processes = subprocess.run(["/bin/ps", "-axo", "pid=,command="],
+                                   capture_output=True, text=True,
+                                   timeout=8, check=False)
+        if processes.returncode != 0:
+            raise ValueError("cannot inspect non-launchd daemon processes")
+        inventory = inspect_services(Path.home(), output.stdout, processes.stdout)
     except (OSError, subprocess.TimeoutExpired, ValueError):
         print("BRIDGE_OWNERSHIP_UNVERIFIED: launchd inventory unavailable", file=sys.stderr)
         return 2
