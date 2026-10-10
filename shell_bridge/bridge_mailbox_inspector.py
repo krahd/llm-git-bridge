@@ -75,9 +75,11 @@ def _launchctl(label: str) -> str:
 def main() -> int:
     import os
     home = Path.home()
-    # Deliberately accept no action, root, command, or credential arguments.
-    if len(__import__("sys").argv) != 1:
-        raise SystemExit("usage: bridge_mailbox_inspector.py (no arguments)")
+    # Direct operator invocation takes no arguments; the pinned bridge
+    # dispatcher passes the fixed registered action and the user's home root.
+    argv = __import__("sys").argv[1:]
+    if argv not in ([], ["inspect", str(home)]):
+        raise SystemExit("invalid registered mailbox-inspection invocation")
     print(json.dumps(inspect(home), sort_keys=True))
     return 0
 
