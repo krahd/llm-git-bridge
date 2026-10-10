@@ -8,7 +8,6 @@ arguments, tokens, or executable content. It does not change service state.
 from __future__ import annotations
 
 import json
-import re
 import subprocess
 from pathlib import Path
 
@@ -22,6 +21,7 @@ LABELS = {
 }
 FIELDS = ("bridge_instance_id", "drive_root_folder_id", "requests_folder_id",
           "results_folder_id", "state_dir", "base_path")
+REQUIRED_FIELDS = FIELDS[:5]
 
 
 def inspect(home: Path, *, launchctl=None) -> dict:
@@ -39,9 +39,15 @@ def inspect(home: Path, *, launchctl=None) -> dict:
                 raise ValueError("config is not an object")
             for key in FIELDS:
                 v = value.get(key)
-                if isinstance(v, str) and len(v) <= 512 and not re.search(r"[\\x00-\\x1f\\x7f]", v):
+                if isinstance(v, str) and 0 < len(v) <= 512 and v.isprintable():
                     record[key] = v
-            record["config_status"] = "readable"
+            # Missing or malformed identities must never be reported as a
+            # successful mailbox-ownership audit. In particular, do not
+            # silently omit rejected Drive IDs and miss a collision.
+            if any(field not in record for field in REQUIRED_FIELDS):
+                record["config_status"] = "incomplete_or_invalid"
+            else:
+                record["config_status"] = "readable"
         except (OSError, ValueError, UnicodeError):
             record["config_status"] = "unreadable_or_invalid"
         record["service_state"] = launchctl(label)
