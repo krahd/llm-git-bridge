@@ -9,9 +9,7 @@ fail(){ printf 'HOLD: %s\n' "$*" >&2; exit 1; }
 [ "$(uname -s)" = Darwin ] || fail "requires macOS"
 [ "$#" -eq 0 ] || fail "usage: bash shell_bridge/v6_release_once.sh"
 [ -z "${CHATGPT_SHELL_BRIDGE_REQUEST_ID:-}" ] || fail "run from a local Terminal, never the bridge being replaced"
-[ -n "${V6_SSH_POLICY_DIR:-}" ] || fail "v5 retirement requires an operator-pinned SSH policy; no production change made"
-REGISTER_PINNED_SSH_POLICY_DIR="$V6_SSH_POLICY_DIR"
-export REGISTER_PINNED_SSH_POLICY_DIR
+
 for tool in git python3 rclone launchctl; do
   command -v "$tool" >/dev/null 2>&1 || fail "missing $tool"
 done
@@ -20,6 +18,13 @@ SOURCE="$(git rev-parse HEAD)"
 [ "${#SOURCE}" -eq 40 ] || fail "invalid source identity"
 [ "$(git rev-parse refs/remotes/origin/main 2>/dev/null)" = "$SOURCE" ] || fail "this worktree is not the freshly fetched canonical origin/main release"
 echo "RELEASE_SOURCE=$SOURCE"
+if [ -z "${V6_SSH_POLICY_DIR:-}" ]; then
+  echo "One-time operator enrollment: select an existing verified SSH host."
+  V6_SSH_POLICY_DIR="$(PYTHONDONTWRITEBYTECODE=1 python3 shell_bridge/setup_v6_pinned_ssh.py "$SOURCE" "${ALLOWED_ROOT:-$HOME/tom-repos}")" ||
+    fail "SSH enrollment incomplete; production v5 has not been modified"
+fi
+REGISTER_PINNED_SSH_POLICY_DIR="$V6_SSH_POLICY_DIR"
+export REGISTER_PINNED_SSH_POLICY_DIR
 echo "Phase 1: macOS regressions, live owner inventory, isolated v6 startup and smoke"
 REGISTER_MAILBOX_INSPECTOR=1 bash shell_bridge/prepare_v6_on_mac.sh
 # The preparation script created exactly this isolated and uniquely named build.
@@ -180,9 +185,13 @@ PYMATCH
 python3 "$PROD_INSTALL/bridge.py" doctor --config "$PROD_CONFIG" >/dev/null
 # Only a local operator may authorize transferring the production mailbox.
 echo "Phase 4: consequential cutover authorization"
-printf 'Ready to stop v5 and provisionally activate v6. Type MIGRATE to proceed: '
+echo "IMPORTANT: v6 currently supports only pinned SSH status/identity actions."
+echo "Arbitrary SSH, SCP, SFTP and RSYNC are NOT yet qualified as v5 replacement capabilities."
+echo "If those workflows are required, STOP here and keep v5 as production."
+printf 'To deliberately accept this limited SSH scope and switch production, type MIGRATE LIMITED SSH: '
 IFS= read -r authorization
-[ "$authorization" = MIGRATE ] || fail "operator did not authorize production handover"
+[ "$authorization" = "MIGRATE LIMITED SSH" ] ||
+  fail "operator did not accept limited SSH capability and authorize production handover"
 echo "Phase 5: guarded production cutover with no automatic legacy retirement"
 EXPECTED_SOURCE_COMMIT="$SOURCE" \
 LOCAL_EXECUTOR_LABEL="$PROD_LABEL" NEW_PLIST="$PROD_PLIST" \

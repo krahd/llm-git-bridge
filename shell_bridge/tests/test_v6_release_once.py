@@ -23,7 +23,8 @@ class SingleRunReleaseContractTests(unittest.TestCase):
         self.assertLess(deny, allow)
         self.assertLess(allow, stage_production)
         self.assertLess(stage_production, cutover)
-        self.assertIn('Type MIGRATE to proceed', SCRIPT)
+        self.assertIn('MIGRATE LIMITED SSH', SCRIPT)
+        self.assertIn('Arbitrary SSH, SCP, SFTP and RSYNC are NOT yet qualified', SCRIPT)
 
     def test_dangerous_actions_are_guarded(self):
         self.assertIn('[ -z "${CHATGPT_SHELL_BRIDGE_REQUEST_ID:-}" ]', SCRIPT)
@@ -59,6 +60,8 @@ class SingleRunReleaseContractTests(unittest.TestCase):
         self.assertLess(cutover, prod)
         self.assertLess(prod, retirement)
         self.assertIn("verify_v6_pinned_ssh.py", SCRIPT)
+        self.assertIn("setup_v6_pinned_ssh.py", SCRIPT)
+        self.assertIn("SSH enrollment incomplete; production v5 has not been modified", SCRIPT)
         self.assertIn("ambiguous SSH smoke submission", SCRIPT)
 
     def test_register_read_only_inspector_only_opt_in(self):

@@ -103,3 +103,33 @@ arbitrary interactive remote shell access or unrestricted SSH deployment.
 Additional host/operation profiles require explicit policy design and
 installation before v5 parity can be asserted. Do not run the older
 unqualified release command; it lacks the operator-pinned SSH profile.
+
+## Single-run interactive SSH enrollment
+
+If `V6_SSH_POLICY_DIR` is not provided, the same release invocation now runs
+`setup_v6_pinned_ssh.py` before any staging or production mutation. It prompts
+once for a pinned SSH hostname, account, port, existing owner-only identity key,
+and the already trusted `known_hosts` file. It displays the previously trusted
+SSH host-key fingerprint(s), and **requires the explicit confirmation** `PIN
+SSH` before writing a separate operator-owned SHA-bound policy directory.
+
+The wizard does not call `ssh-keyscan`, use automatic trust-on-first-use, or
+connect to a remote SSH endpoint. If the selected host is not already present
+in the Mac's trusted host-key database, enrollment holds before staging so the
+operator can verify the host key independently. Existing enrollments are never
+overwritten; the operator can point `V6_SSH_POLICY_DIR` at a verified existing
+policy on a later safe run.
+
+This keeps the release at one shell invocation, with one-time host consent,
+two deliberate native approval tests, and a separate consequential `MIGRATE`
+authorization. No routine SSH status call requires another popup.
+
+## Deliberate limited-SSH release decision
+
+Passing the pinned `status` probe does not imply general SSH/SCP/SFTP/RSYNC
+support. Before stopping v5, the release controller states this limitation and
+requires the explicit one-time phrase `MIGRATE LIMITED SSH` to accept it.
+If previous production workflows depend on arbitrary outbound SSH or transfers,
+**do not authorize the cutover**; keep v5 running until corresponding bounded
+SSH capabilities and live tests are available. This is a business-functionality
+and safety gate, not a request to weaken the sandbox.
