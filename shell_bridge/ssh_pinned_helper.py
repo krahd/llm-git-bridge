@@ -70,6 +70,9 @@ def load_policy(directory: Path, action: str) -> tuple[list[str], int]:
     key = Path(identity)
     if not key.is_absolute() or key.is_symlink() or not key.is_file():
         raise SSHPolicyError("SSH identity file unavailable or symlinked")
+    key_info = key.stat()
+    if key_info.st_uid != os.getuid() or key_info.st_mode & 0o077:
+        raise SSHPolicyError("SSH private identity ownership or permissions invalid")
     # This helper invokes exactly one pinned, read-only remote program.
     # Disable user SSH configuration, arbitrary options, proxy helpers, shell
     # interactivity and forwarding even when the Mac user's dotfiles differ.
