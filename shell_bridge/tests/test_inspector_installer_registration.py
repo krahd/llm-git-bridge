@@ -93,6 +93,37 @@ class InspectorInstallerRegistrationTests(unittest.TestCase):
         self.assertEqual(cfg["pinned_ssh_identity_sha256"],
                          hashlib.sha256(identity.read_bytes()).hexdigest())
 
+    def test_schema2_ssh_profiles_are_registered_but_not_implicitly_preapproved(self):
+        policy_dir = self.home / ".config" / "custom-ssh"
+        policy_dir.mkdir(parents=True)
+        policy_dir.chmod(0o700)
+        identity = policy_dir / "id"
+        identity.write_text("test fixture")
+        identity.chmod(0o600)
+        known = policy_dir / "known_hosts"
+        known.write_text("example.invalid ssh-ed25519 FAKE_FIXTURE\\n")
+        known.chmod(0o600)
+        policy = policy_dir / "ssh-policy.json"
+        policy.write_text(json.dumps({
+            "schema": 2, "host": "example.invalid", "user": "deploy",
+            "port": 22, "identity_file": str(identity),
+            "commands": {"repo-status": ["/usr/bin/git", "status"],
+                         "service-restart": ["/bin/systemctl", "restart", "app"]},
+        }))
+        policy.chmod(0o600)
+        helper = self.install / "ssh_pinned_helper.py"
+        helper.write_text((ROOT / "ssh_pinned_helper.py").read_text())
+        helper.chmod(0o700)
+        result = self.run_config(False, ssh_policy=str(policy_dir))
+        self.assertEqual(result.returncode, 0, result.stderr)
+        cfg = json.loads(self.cfg.read_text())
+        operation = registered_operation_from_config(
+            cfg, "ssh-pinned-readonly", "service-restart", self.agent_root)
+        self.assertTrue(operation.requires_confirmation)
+        self.assertEqual(operation.permitted_actions,
+                         ("status", "identity", "repo-status", "service-restart"))
+        self.assertTrue(cfg["preapproved_pinned_ssh_readonly"])
+
     def test_installer_rejects_agent_writable_ssh_identity(self):
         policy_dir = self.home / ".config" / "ssh-pinned"
         policy_dir.mkdir(parents=True)
