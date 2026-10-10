@@ -123,6 +123,32 @@ approval_canary "$CANDIDATE_ROOT" "$CANDIDATE_ALLOWED" deny staging
 approval_canary "$CANDIDATE_ROOT" "$CANDIDATE_ALLOWED" allow staging
 ssh_status_canary "$CANDIDATE_ROOT" "$CANDIDATE_ALLOWED" staging
 
+echo "Phase 2b: verify macOS inbound Remote Login and a real separate-device SSH session"
+PYTHONDONTWRITEBYTECODE=1 python3 shell_bridge/inbound_ssh_preflight.py ||
+  fail "inbound Remote Login not safely configured; preserve v5 and configure access locally"
+[ -d "$HOME/.local/state" ] || fail "SSH witness state directory is missing"
+SSH_WITNESS_DIR="$(mktemp -d "$HOME/.local/state/v6-inbound-ssh.XXXXXXXX")" ||
+  fail "cannot reserve a private SSH witness directory"
+SSH_WITNESS_NONCE="$(python3 -c 'import secrets; print(secrets.token_hex(24))')"
+SSH_WITNESS_FILE="$SSH_WITNESS_DIR/verified.json"
+echo "From a DIFFERENT computer, establish an authenticated SSH login to this Mac."
+echo "Inside that inbound SSH session, run this exact read-only witness command:"
+printf 'python3 %q create %q %q\n' \
+  "$ROOT/shell_bridge/inbound_ssh_witness.py" "$SSH_WITNESS_FILE" "$SSH_WITNESS_NONCE"
+echo "The challenge expires after 3 minutes. No inbound SSH settings are changed."
+inbound_confirmed=0
+for attempt in {1..36}; do
+  if PYTHONDONTWRITEBYTECODE=1 python3 shell_bridge/inbound_ssh_witness.py verify \
+    "$SSH_WITNESS_FILE" "$SSH_WITNESS_NONCE" >/dev/null 2>&1; then
+    inbound_confirmed=1
+    break
+  fi
+  sleep 5
+done
+[ "$inbound_confirmed" = 1 ] ||
+  fail "external-device SSH login witness missing or invalid; v5 has not been stopped"
+echo "NONLOCAL_INBOUND_SSH_SESSION_WITNESS_VERIFIED=1"
+
 echo "Phase 3: stage immutable production v6 without starting it"
 LEGACY_CONFIG="$HOME/.config/chatgpt-shell-bridge/config.json"
 [ -f "$LEGACY_CONFIG" ] && [ ! -L "$LEGACY_CONFIG" ] || fail "canonical v5 config missing or symlinked"
