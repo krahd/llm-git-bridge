@@ -28,6 +28,7 @@ class SingleRunReleaseContractTests(unittest.TestCase):
     def test_dangerous_actions_are_guarded(self):
         self.assertIn('[ -z "${CHATGPT_SHELL_BRIDGE_REQUEST_ID:-}" ]', SCRIPT)
         self.assertIn('SOURCE="$(git rev-parse HEAD)"', SCRIPT)
+        self.assertIn("refs/remotes/origin/main", SCRIPT)
         self.assertIn('if ! rclone --drive-root-folder-id "$root"', SCRIPT)
         self.assertIn('HOLD: ambiguous approval request upload', SCRIPT)
         self.assertIn('RETIRE_OLD_AFTER_SMOKE=0', SCRIPT)
