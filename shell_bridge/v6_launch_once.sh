@@ -28,7 +28,9 @@ if [ "${V6_RELEASE_DRY_RUN:-0}" != 1 ]; then
   [ -t 0 ] || hold "native approval and cutover require an interactive local Terminal"
 fi
 # Updates only the remote-tracking ref; preserves dirty worktree and HEAD.
-git -C "$REPO" fetch origin refs/heads/main:refs/remotes/origin/main ||
+# Ref updates can invoke an untracked local reference-transaction hook.
+# Do not execute operator-unreviewed Git hooks during the release fetch.
+git -c core.hooksPath=/dev/null -C "$REPO" fetch origin refs/heads/main:refs/remotes/origin/main ||
   hold "canonical main fetch failed; preserve the local checkout"
 SOURCE="$(git -C "$REPO" rev-parse --verify refs/remotes/origin/main^{commit})" ||
   hold "canonical origin/main could not be verified"
