@@ -259,7 +259,7 @@ def high_impact_command_category(command: str) -> str | None:
     # classifier. This is a high-impact alert heuristic, NOT a proof that
     # arbitrary shell text is reversible or safe.
     if re.search(
-        r"(?im)(?<![\w-])git(?:\s+-C\s+\S+)*\s+(?:reset\s+--hard\b|clean\s+(?:-[A-Za-z]*f[A-Za-z]*\b|--force\b))",
+        r"(?im)(?<![\w-])git(?:\s+-C\s+\S+)*\s+(?:reset\b[^\n;|&]*--hard\b|clean\b[^\n;|&]*(?:--force\b|\s-[A-Za-z]*f[A-Za-z]*\b))",
         command,
     ):
         return "git_destructive_local"
