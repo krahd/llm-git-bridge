@@ -1143,6 +1143,19 @@ def _process_one_request(name: str, cfg: dict, preloaded_raw: bytes | None = Non
         _persist_then_publish(result, local_result, finished_marker, name, cfg)
         return
 
+    # Raw SSH/network copy is not an approved capability: the ordinary shell
+    # has network denied, while broad system-shell authority is prohibited.
+    # Reject before the native approval UI so operators are not asked to
+    # approve an operation that could never execute under this policy.
+    if high_impact_command_category(v["command"]) == "remote_shell_or_copy" and v.get("trusted_operation") is None:
+        result = result_envelope(v["id"], request_sha, "rejected", {
+            "cwd": str(v["cwd"]),
+            "message": "raw SSH/SCP/SFTP/rsync cannot be authorized by a popup; use a separately installed, host- and action-pinned trusted operation",
+            "policy_reason": "remote_shell_requires_pinned_capability",
+        })
+        _persist_then_publish(result, local_result, finished_marker, name, cfg)
+        return
+
     try:
         write_plan = resolve_write_plan(v, cfg)
     except Exception as exc:
