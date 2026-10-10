@@ -66,6 +66,11 @@ class PinnedSSHHelperTests(unittest.TestCase):
         with self.assertRaises(helper.SSHPolicyError):
             helper.load_policy(self.root, "status")
 
+    def test_private_key_permissions_must_be_owner_only(self):
+        self.key.chmod(0o644)
+        with self.assertRaises(helper.SSHPolicyError):
+            helper.load_policy(self.root, "status")
+
     def test_refuses_unexpected_policy_fields(self):
         self.data["command"] = "rm -rf /"
         self.write_policy()
