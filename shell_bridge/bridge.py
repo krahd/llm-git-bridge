@@ -1335,7 +1335,6 @@ def _process_one_request(name: str, cfg: dict, preloaded_raw: bytes | None = Non
     # pass the independent native operator approval gate.
     if (v.get("trusted_operation") is not None
             and v["trusted_operation"]["name"] == "ssh-pinned-readonly"
-            and cfg.get("preapproved_pinned_ssh_readonly") is True
             and not pinned_ssh_material_unchanged(v, cfg, write_plan)):
         result = result_envelope(v["id"], request_sha, "rejected", {
             "message": "pinned SSH policy or known-host material changed since operator installation; re-provision locally",
