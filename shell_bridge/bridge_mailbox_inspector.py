@@ -32,7 +32,7 @@ def inspect(home: Path, *, launchctl=None) -> dict:
         record = {"label": label}
         file = home / relative
         try:
-            if any(node.is_symlink() for node in (file, *file.parents) if node != home.parent):
+            if any(node.is_symlink() for node in (file, *[p for p in file.parents if p != home and home in p.parents])):
                 raise ValueError("config path traverses symlink")
             value = json.loads(file.read_text("utf-8"))
             if not isinstance(value, dict):
