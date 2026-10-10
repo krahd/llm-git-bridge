@@ -58,11 +58,11 @@ class CutoverIdentityTests(unittest.TestCase):
     def test_partial_legacy_stop_is_rollback_safe_and_drain_is_rechecked(self):
         text = (pathlib.Path(__file__).parents[1] / "cutover.sh").read_text()
         bootout = text.index('launchctl bootout "gui/${UID_NOW}/${label}" || fail')
-        stopped = text.index('OLD_CONSUMERS_STOPPED=1', bootout)
-        second_check = text.index('PENDING_AFTER_STOP=', stopped)
+        stopped = text.index('OLD_CONSUMERS_STOPPED=1', text.index('# Stop old consumers first.'))
+        second_check = text.index('PENDING_AFTER_STOP=', bootout)
         new_start = text.index('launchctl bootstrap "gui/${UID_NOW}" "$NEW_PLIST"', second_check)
-        self.assertLess(bootout, stopped)
-        self.assertLess(stopped, second_check)
+        self.assertLess(stopped, bootout)
+        self.assertLess(bootout, second_check)
         self.assertLess(second_check, new_start)
         self.assertIn('if ! launchctl print "gui/${UID_NOW}/${label}"', text)
 

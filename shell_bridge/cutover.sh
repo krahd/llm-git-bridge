@@ -206,8 +206,10 @@ done
 # Stop old consumers first. Only then may v6 attach to the same production mailbox.
 for label in "${OLD_LABELS[@]}"; do
   if launchctl print "gui/${UID_NOW}/${label}" >/dev/null 2>&1; then
-    launchctl bootout "gui/${UID_NOW}/${label}" || fail "failed to stop legacy service: $label"
+    # A failed bootout may still have stopped the service. Record rollback
+    # responsibility before attempting the non-atomic external operation.
     OLD_CONSUMERS_STOPPED=1
+    launchctl bootout "gui/${UID_NOW}/${label}" || fail "failed to stop legacy service: $label"
   fi
 done
 for label in "${OLD_LABELS[@]}"; do
