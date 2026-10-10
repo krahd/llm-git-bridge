@@ -15,7 +15,7 @@ jobs:
       - uses: actions/checkout@v4
       - name: Validate all installer and migration shell syntax
         run: |
-          for script in shell_bridge/install.sh shell_bridge/cutover.sh shell_bridge/migrate_v6_staging_atomic.sh shell_bridge/prepare_v6_on_mac.sh shell_bridge/v6_release_once.sh; do
+          for script in shell_bridge/install.sh shell_bridge/cutover.sh shell_bridge/migrate_v6_staging_atomic.sh shell_bridge/prepare_v6_on_mac.sh shell_bridge/v6_release_once.sh shell_bridge/v6_launch_once.sh; do
             bash -n "$script"
           done
       - name: Compile all bridge and test Python sources before regressions
