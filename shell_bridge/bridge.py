@@ -264,7 +264,7 @@ def high_impact_command_category(command: str) -> str | None:
     ):
         return "git_destructive_local"
     if re.search(
-        r"(?im)(?:^|[;&|]\s*|\n)\s*(?:sudo\s+)?rm\b[^\n;]*\s+(?:--recursive\b|--force\b|-[A-Za-z]*[rRfF][A-Za-z]*\b)",
+        r"(?im)(?:^|[;&|]\s*|\n)\s*(?:sudo\s+)?rm\b[^\n;]*\s+(?:--recursive\b|-[A-Za-z]*[rR][A-Za-z]*\b)",
         command,
     ):
         return "filesystem_recursive_delete"
