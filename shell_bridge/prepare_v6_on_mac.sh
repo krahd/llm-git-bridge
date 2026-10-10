@@ -25,7 +25,6 @@ done
 PYTHONDONTWRITEBYTECODE=1 python3 -m unittest discover -s shell_bridge/tests -p 'test_*.py'
 printf '\n=== Read-only mailbox inventory ===\n'
 report="$(mktemp)"
-trap 'rm -f "$report"' EXIT
 PYTHONDONTWRITEBYTECODE=1 python3 shell_bridge/bridge_mailbox_inspector.py > "$report"
 python3 - "$report" <<'PY'
 import json, sys
@@ -43,6 +42,16 @@ print('MAILBOX_OWNERSHIP_PREFLIGHT=PASS')
 PY
 printf '\n=== Stage new candidate; never use production mailbox ===\n'
 source_commit="$(git rev-parse HEAD)"
+# Atomic per-build lock prevents two invocations from racing to create the
+# same remote mailbox. A stale lock is not automatically stolen.
+lock_parent="$HOME/.local/state"
+[ -d "$lock_parent" ] || { echo "HOLD: bridge state root missing" >&2; exit 6; }
+lockdir="$lock_parent/.v6-preflight-${source_commit:0:12}.lock"
+if ! mkdir "$lockdir" 2>/dev/null; then
+  echo "HOLD: same-build staging already running or stale lock: $lockdir" >&2
+  exit 6
+fi
+trap 'rm -f "${report:-}" "${health_json:-}" "${smoke_request:-}" "${smoke_result:-}"; rmdir "$lockdir" >/dev/null 2>&1 || true' EXIT
 suffix="candidate-${source_commit:0:12}"
 label="net.laurenzo.local-executor-bridge-v6-${suffix}"
 config="$HOME/.config/local-executor-bridge-v6-${suffix}/config.json"
@@ -120,7 +129,6 @@ print(root)
 PYROOT
 )"
 health_json="$(mktemp)"
-trap 'rm -f "$report" "$health_json"' EXIT
 qualified=0
 for attempt in 1 2 3 4 5 6 7 8 9 10 11 12 13 14 15; do
   if rclone --drive-root-folder-id "$root_id" --timeout 20s copyto "${RCLONE_REMOTE}health.json" "$health_json" >/dev/null 2>&1 &&
@@ -142,7 +150,6 @@ printf '\n=== Read-only end-to-end staging smoke ===\n'
 smoke_id="v6-smoke-$(date -u +%Y%m%d%H%M%S)-$$"
 smoke_request="$(mktemp)"
 smoke_result="$(mktemp)"
-trap 'rm -f "$report" "$health_json" "$smoke_request" "$smoke_result"' EXIT
 python3 - "$smoke_request" "$smoke_id" "$ROOT" <<'PYREQUEST'
 import json,sys
 path,rid,cwd=sys.argv[1:]
