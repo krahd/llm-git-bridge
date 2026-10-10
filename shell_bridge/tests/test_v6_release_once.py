@@ -59,7 +59,7 @@ class SingleRunReleaseContractTests(unittest.TestCase):
         value = subprocess.check_output(
             ["/bin/bash", "-c", 'prefix=staging; ' + assignment +
              '; printf "%s" "$rid"'], text=True)
-        self.assertRegex(value, r"\\Av6-ssh-staging-[0-9]{14}-[0-9]+\\Z")
+        self.assertIsNotNone(re.fullmatch("v6-ssh-staging-[0-9]{14}-[0-9a-f]{12}", value))
         self.assertNotIn("$", value)
 
     def test_inbound_ssh_requires_real_separate_device_witness_before_cutover(self):
