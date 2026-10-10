@@ -133,6 +133,15 @@ if __name__ == "__main__":
     unittest.main()
 
 class CutoverNoReplayTests(unittest.TestCase):
+    def test_failed_v6_bootout_is_observable_and_keeps_hold(self):
+        text=(pathlib.Path(__file__).parents[1]/'cutover.sh').read_text()
+        rollback=text.split('rollback() {',1)[1].split('trap rollback EXIT',1)[0]
+        v6=rollback.split('if [ "$STARTED_NEW" -eq 1 ]; then',1)[1].split('elif [ "$OLD_CONSUMERS_STOPPED"',1)[0]
+        self.assertIn('if launchctl print "gui/${UID_NOW}/${NEW_LABEL}"',v6)
+        self.assertIn('v6 remains loaded after rollback bootout',v6)
+        self.assertIn('cutover-reconciliation-required',v6)
+        self.assertNotIn('launchctl bootstrap "gui/${UID_NOW}" "$plist"',v6)
+
     def test_failure_after_new_start_does_not_restart_v5(self):
         source=(pathlib.Path(__file__).parents[1]/'cutover.sh').read_text()
         rollback=source.split('rollback() {',1)[1].split('trap rollback EXIT',1)[0]
