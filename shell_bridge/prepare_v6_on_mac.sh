@@ -157,7 +157,7 @@ request={
     "protocol":1,
     "id":rid,
     "cwd":cwd,
-    "command":"printf 'ISOLATED_V6_SMOKE_OK\\n'",
+    "command":"printf ISOLATED_V6_SMOKE_OK",
     "explanation":"Non-mutating local v6 staging acceptance canary",
     "timeout_seconds":20,
     "write_scope":"read_only",
