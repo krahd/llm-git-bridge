@@ -18,6 +18,8 @@ class BridgeMailboxInspectorTests(unittest.TestCase):
                 path.write_text(json.dumps({
                     "drive_root_folder_id": "same" if i < 2 else "other-" + str(i),
                     "state_dir": "/state/" + str(i),
+                    "bridge_instance_id": "instance-" + str(i),
+                    "results_folder_id": "results-" + str(i),
                     "remote": "sensitive:server",
                     "oauth_token": "SECRET-DONT-PRINT",
                     "shell": "/bin/zsh",
@@ -28,6 +30,7 @@ class BridgeMailboxInspectorTests(unittest.TestCase):
             self.assertNotIn("SECRET-DONT-PRINT", encoded)
             self.assertNotIn("sensitive:server", encoded)
             self.assertEqual(len(answer["shared_drive_roots"]["same"]), 2)
+            self.assertTrue(all(x["config_status"] == "readable" for x in answer["records"]))
             self.assertTrue(all(x["service_state"] == "loaded" for x in answer["records"]))
             self.assertFalse(answer["mutations_performed"])
 
@@ -71,3 +74,41 @@ class BridgeMailboxInspectorTests(unittest.TestCase):
             first.write_text(json.dumps({"drive_root_folder_id": "secret\\ncredential"}))
             answer = inspect(home, launchctl=lambda label: "loaded")
             self.assertNotIn("secret", json.dumps(answer))
+
+    def test_realistic_drive_ids_are_preserved_without_dropping_digits(self):
+        with tempfile.TemporaryDirectory() as td:
+            home = pathlib.Path(td)
+            for i, relative in enumerate(LABELS.values()):
+                path = home / relative
+                path.parent.mkdir(parents=True, exist_ok=True)
+                path.write_text(json.dumps({
+                    "bridge_instance_id": f"bridge-0x7f-{i}",
+                    "drive_root_folder_id": "15ql2yACOq7H6qo0IgzosySqW8nHgUKXv"
+                                            if i < 2 else f"other-{i}",
+                    "requests_folder_id": f"requests-2026-{i}",
+                    "results_folder_id": f"results-001-{i}",
+                    "state_dir": f"/tmp/state-1f7-{i}"
+                }))
+            result = inspect(home, launchctl=lambda _: "loaded")
+            self.assertTrue(all(x['config_status'] == 'readable'
+                                for x in result['records']))
+            self.assertEqual(len(result['shared_drive_roots']
+                                 ['15ql2yACOq7H6qo0IgzosySqW8nHgUKXv']), 2)
+
+    def test_missing_or_control_character_identity_blocks_success(self):
+        with tempfile.TemporaryDirectory() as td:
+            home = pathlib.Path(td)
+            name = next(iter(LABELS.values()))
+            path = home / name
+            path.parent.mkdir(parents=True, exist_ok=True)
+            path.write_text(json.dumps({
+                "bridge_instance_id": "bridge",
+                "drive_root_folder_id": "root\u000auntrusted",
+                "requests_folder_id": "requests",
+                "state_dir": "/tmp/state",
+                # results_folder_id deliberately missing
+            }))
+            result = inspect(home, launchctl=lambda _: "loaded")
+            self.assertEqual(result['records'][0]['config_status'],
+                             'incomplete_or_invalid')
+            self.assertNotIn('untrusted', json.dumps(result))
