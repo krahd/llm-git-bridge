@@ -79,6 +79,13 @@ class SingleRunReleaseContractTests(unittest.TestCase):
         self.assertIn('external-device SSH login witness missing', SCRIPT)
         self.assertNotIn('systemsetup -setremotelogin', SCRIPT)
 
+    def test_optional_inbound_setting_rejects_invalid_values_before_side_effects(self):
+        self.assertIn('case "${V6_REQUIRE_INBOUND_SSH:-0}" in', SCRIPT)
+        self.assertIn('0|1) ;;', SCRIPT)
+        self.assertIn('V6_REQUIRE_INBOUND_SSH must be exactly 0 or 1', SCRIPT)
+        self.assertLess(SCRIPT.index('case "${V6_REQUIRE_INBOUND_SSH:-0}" in'),
+                        SCRIPT.index('prepare_v6_on_mac.sh'))
+
     def test_ssh_requires_operator_policy_and_live_dual_smoke(self):
         self.assertIn('V6_SSH_POLICY_DIR', SCRIPT)
         self.assertIn('REGISTER_PINNED_SSH_POLICY_DIR="$V6_SSH_POLICY_DIR"', SCRIPT)
