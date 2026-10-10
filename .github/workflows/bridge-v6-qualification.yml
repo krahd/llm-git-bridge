@@ -23,12 +23,9 @@ jobs:
           PYTHONDONTWRITEBYTECODE: '1'
           _LOCAL_EXECUTOR_NESTED_VALIDATION: '1'
         run: python3 -m unittest discover -s shell_bridge/tests -q
-      - name: Verify direct macOS sandbox and workspace integration
+      - name: Run complete direct macOS sandbox suite (no nested bypass)
         env:
           PYTHONDONTWRITEBYTECODE: '1'
-        run: |
-          python3 -m unittest discover -s shell_bridge/tests -p 'test_bridge_legacy.py' -k read_only_sandbox_blocks_write_and_repository_scope_allows_only_repo -q
-          python3 -m unittest discover -s shell_bridge/tests -p 'test_workspace.py' -k validation_shell_uses_private_home_without_login_profile -q
-          python3 -m unittest discover -s shell_bridge/tests -p 'test_finish_v6.py' -k finish_publishes_validated_commit_and_immutable_receipt -q
+        run: python3 -m unittest discover -s shell_bridge/tests -q
       - name: Typecheck native approval application
         run: xcrun swiftc -typecheck -framework AppKit shell_bridge/approval_gui.swift
