@@ -18,6 +18,7 @@ final class ApprovalController: NSObject, NSApplicationDelegate {
     private let approvalRoot: URL
     private let helperPath: String
     private let pythonPath: String
+    private let instanceLabel: String
     private var statusItem: NSStatusItem!
     private var lastDecisionError: String?
     // A summary cannot authorize. Exact payload must be inspected in this app session.
@@ -33,6 +34,7 @@ final class ApprovalController: NSObject, NSApplicationDelegate {
         let root = info["ApprovalRoot"] as? String ?? ""
         helperPath = info["ApprovalHelperPath"] as? String ?? ""
         pythonPath = info["ApprovalPythonPath"] as? String ?? ""
+        instanceLabel = info["ApprovalInstanceLabel"] as? String ?? "unidentified"
         approvalRoot = URL(fileURLWithPath: root, isDirectory: true)
         super.init()
     }
@@ -50,7 +52,7 @@ final class ApprovalController: NSObject, NSApplicationDelegate {
         } else {
             statusItem.button?.title = "Bridge"
         }
-        statusItem.button?.toolTip = "Local Executor Bridge approvals"
+        statusItem.button?.toolTip = "Bridge approvals: " + instanceLabel
         statusItem.menu = menu
         refresh()
         timer = Timer.scheduledTimer(withTimeInterval: 1.0, repeats: true) { [weak self] _ in
@@ -124,6 +126,7 @@ final class ApprovalController: NSObject, NSApplicationDelegate {
             refresh()
         }
         let detail = """
+        Bridge instance: \(instanceLabel)
         Request: \(req.request_id)
         Scope / reason: \(req.category)
         Directory: \(req.cwd)
@@ -153,7 +156,7 @@ final class ApprovalController: NSObject, NSApplicationDelegate {
         scroll.documentView = contents
         let alert = NSAlert()
         alert.alertStyle = .warning
-        alert.messageText = "Review high-impact action"
+        alert.messageText = "Review high-impact action: " + instanceLabel
         alert.informativeText = riskDescription(req.category) + " Inspect the exact command below before choosing Allow once."
         alert.accessoryView = scroll
         // The safest option is the default. No approval is recorded without an explicit click.
