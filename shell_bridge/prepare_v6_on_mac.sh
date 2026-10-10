@@ -23,23 +23,24 @@ for script in shell_bridge/install.sh shell_bridge/cutover.sh shell_bridge/migra
   bash -n "$script"
 done
 PYTHONDONTWRITEBYTECODE=1 python3 -m unittest discover -s shell_bridge/tests -p 'test_*.py'
-printf '\n=== Read-only mailbox inventory ===\n'
+printf '\n=== Loaded LaunchAgent and mailbox ownership inventory ===\n'
 report="$(mktemp)"
-PYTHONDONTWRITEBYTECODE=1 python3 shell_bridge/bridge_mailbox_inspector.py > "$report"
-python3 - "$report" <<'PY'
-import json, sys
-data=json.load(open(sys.argv[1],encoding='utf-8'))
-for record in data['records']:
-    print(record['label'],record.get('service_state'),record.get('config_status'),
-          record.get('drive_root_folder_id','unknown'))
-duplicates=data.get('shared_drive_roots',{})
-if duplicates:
-    print('HOLD: shared mailbox roots:',json.dumps(duplicates,sort_keys=True))
-    raise SystemExit(5)
-if any(record.get('config_status')!='readable' for record in data['records']):
-    raise SystemExit('HOLD: mailbox identities are incomplete; preserve all running services')
-print('MAILBOX_OWNERSHIP_PREFLIGHT=PASS')
-PY
+if ! PYTHONDONTWRITEBYTECODE=1 python3 shell_bridge/bridge_service_ownership.py > "$report"; then
+  # The inventory is redacted and contains only bridge identifiers.
+  cat "$report"
+  echo "HOLD: at least one loaded bridge is unverifiable or shares a mailbox." >&2
+  exit 5
+fi
+python3 - "$report" <<'PYOWN'
+import json,sys
+report=json.load(open(sys.argv[1],encoding="utf-8"))
+if not report.get("safe_to_stage") or report.get("problems"):
+    raise SystemExit("HOLD: loaded bridge inventory is not safe")
+for item in report["loaded"]:
+    print(item["label"], "PID", item.get("pid"), "mailbox",
+          item["drive_root_folder_id"])
+print("LOADED_BRIDGE_OWNERSHIP_VERIFIED=1")
+PYOWN
 printf '\n=== Stage new candidate; never use production mailbox ===\n'
 source_commit="$(git rev-parse HEAD)"
 # Atomic per-build lock prevents two invocations from racing to create the

@@ -153,3 +153,32 @@ This section supersedes older staging-source and approval-timeout descriptions a
 - One fresh missing-delta attempt `v6-create-qualification-workspace-20261010-r09` returned **completed with exit code -15 (SIGTERM)** after 0.18 seconds; not a command timeout and not a daemon shutdown flag. Its execution plan reported a filesystem sandbox despite identifying the trusted coordinator. Exact GitHub branch/search, local coordinator read `v6-reconcile-workspace-b1-20261010-r10`, and local ref query `-r11` found no corresponding job or branch/worktree.
 - Subsequent read-only local main-ref query `v6-read-local-main-20261010-r12` also became **indeterminate** (STARTED without FINISHED). No mutation is expected from its intended command, but the repeated journal interruption is a runtime-control-plane incident. Preserve the exact request IDs and result files. Do not blindly replay requests or submit further Mac mutations through the unstable consumer until its process/launchd and journal ownership are independently audited.
 - **Production cutover is blocked.** Required next steps: restore stable and exclusively owned Mac executor control; identify loaded bridge/approval processes out-of-band with a trusted local operator; validate clean source staging at exact integrated SHA; test live negative approval, trusted helper operation, process containment, lost-result replay/recovery, and production mailbox ownership; only then perform provisional cutover, production smoke, acceptance and legacy retirement. No laurenzo.net deployment has been attempted by this work.
+
+## One-invocation guarded Mac release implementation (2026-10-10)
+
+- Source includes `shell_bridge/v6_release_once.sh`, a single local entrypoint
+  that orchestrates full direct Mac qualification, dynamic ownership inventory,
+  isolated staging, exact-SHA and read-only smoke, one deliberate native Deny
+  and Approve, production-only staging against the original v5 mailbox and
+  durable state, explicit critical MIGRATE authorization, provisional cutover,
+  independent production approval, post-cutover exclusive mailbox audit, and
+  archiving of stopped production v5 LaunchAgents for reboot safety.
+- The controller never resets an existing checkout, assumes unconfirmed work
+  finished, restarts v5 after v6 might have admitted work, adopts an existing
+  candidate mailbox, or retires unrelated staging sessions based on labels.
+  All ambiguous request/upload/results and release effects remain explicit
+  reconciliation holds. A validated production handover preserves rollback and
+  v5 journal evidence.
+- Trusted read-only inspector installation is opt-in via the local installer;
+  it is SHA-pinned outside the agent-writable repository root and every remote
+  helper invocation independently requires native human confirmation.
+- Added offline tests for real installer-embedded registration and release
+  acceptance receipts, plus negative and positive native approval result
+  verification and Mac launchd ownership collision detection. Mac CI runs both
+  ordinary and full unsandboxed-*wrapper* / directly sandboxed regression suites.
+- **Operational status: v5 production has not yet been replaced through this
+  release controller.** Source and CI validation do not prove compatibility
+  of this particular host, OAuth remote, native menu-bar UI, or third-party
+  provider bindings. The local one-time operator run remains the release gate.
+  Full live crash/replay fault injection is recorded as **not verified**; old
+  staging instances stay preserved until their mailbox queues are reconciled.
