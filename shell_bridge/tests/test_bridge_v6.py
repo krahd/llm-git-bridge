@@ -312,6 +312,9 @@ class RemoteExecutionApprovalFatigueTests(unittest.TestCase):
                 query("service-restart"), cfg, plan))
             self.assertFalse(bridge.pinned_ssh_readonly_preapproved(
                 query("service-restart"), cfg, plan))
+            self.assertFalse(bridge.pinned_ssh_material_unchanged(
+                query("service-restart"),
+                {**cfg, "preapproved_pinned_ssh_readonly": False}, plan))
             for action in ("delete", "ssh", "status --anything"):
                 self.assertFalse(bridge.pinned_ssh_readonly_preapproved(
                     query(action), cfg, plan))
