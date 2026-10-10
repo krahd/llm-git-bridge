@@ -71,7 +71,7 @@ class BridgeMailboxInspectorTests(unittest.TestCase):
             home = pathlib.Path(td)
             first = home / next(iter(LABELS.values()))
             first.parent.mkdir(parents=True)
-            first.write_text(json.dumps({"drive_root_folder_id": "secret\\ncredential"}))
+            first.write_text(json.dumps({"drive_root_folder_id": "secret\ncredential"}))
             answer = inspect(home, launchctl=lambda label: "loaded")
             self.assertNotIn("secret", json.dumps(answer))
 
