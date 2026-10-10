@@ -174,3 +174,35 @@ verification and automatic host-key updates. The installed-build manifest,
 daemon integrity identity and cutover manifest now include the SSH helper
 SHA-256. These are source-level corrections; live Mac acceptance is still
 required before declaring either direction of remote SSH operational.
+
+## One Mac invocation from an existing dirty checkout
+
+The currently known Mac checkout contains unpublished work on a non-main
+branch. Running the prior release script there would fail its clean-source
+check, and resetting, cleaning, or force-checking out main would be unsafe.
+Use the operator-only source launcher added in
+`shell_bridge/v6_launch_once.sh`, **without modifying the existing checkout**.
+
+After reviewing the canonical remote `main`, execute one interactive command
+in a Mac Terminal:
+
+```bash
+git -C /Users/tom/tom-repos/projects/llm-git-bridge fetch origin refs/heads/main:refs/remotes/origin/main && /bin/bash -c "$(git -C /Users/tom/tom-repos/projects/llm-git-bridge show origin/main:shell_bridge/v6_launch_once.sh)" -- /Users/tom/tom-repos/projects/llm-git-bridge
+```
+
+The launcher validates the canonical GitHub origin and exact fetched commit,
+creates a private detached worktree under
+`~/.local/state/bridge-v6-release-sources/<source-sha>`, checks the source
+is clean and identical to fetched `origin/main`, then hands off to the existing
+one-run guarded release controller. It never resets, cleans, stashes, checks
+out, commits or overwrites the original Mac checkout.
+
+A partial or interrupted release source remains for reconciliation; the
+launcher refuses to reuse an existing source directory. A successful source
+preparation **does not** mean a successful cutover. Native approvals, any
+operator-required SSH enrollment and separate-device inbound SSH witness
+remain unavoidable live checks. Do not automate these approvals.
+
+For source qualification only, `V6_RELEASE_DRY_RUN=1` exercises creation
+of an isolated source worktree without launching the release controller.
+No dry-run output claims production acceptance.
