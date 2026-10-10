@@ -69,7 +69,19 @@ PYREMOTE
 )"
 fi
 export RCLONE_REMOTE
-ALLOWED_ROOT="${ALLOWED_ROOT:-$HOME/tom-repos}" \
+allowed_root="${ALLOWED_ROOT:-$HOME/tom-repos}"
+python3 - "$ROOT" "$allowed_root" <<'PYALLOWED'
+import pathlib,sys
+repo=pathlib.Path(sys.argv[1]).resolve()
+allowed=pathlib.Path(sys.argv[2]).expanduser().resolve()
+try:
+    repo.relative_to(allowed)
+except ValueError:
+    raise SystemExit('HOLD: source checkout is outside the selected allowed root')
+if not allowed.is_dir():
+    raise SystemExit('HOLD: allowed root is not a directory')
+PYALLOWED
+ALLOWED_ROOT="$allowed_root" \
 BASE_PATH="Local Executor Bridge v6 Candidate ${source_commit:0:12}" \
 LOCAL_EXECUTOR_LABEL="$label" \
 INSTALL_DIR="$install" CONFIG_DIR="$(dirname "$config")" STATE_DIR="$state" PLIST="$plist" \
@@ -110,5 +122,49 @@ if [ "$qualified" -ne 1 ]; then
 fi
 PYTHONDONTWRITEBYTECODE=1 python3 shell_bridge/verify_v6_candidate_health.py \
   "$config" "$health_json" "$source_commit" "$label"
+printf '\n=== Read-only end-to-end staging smoke ===\n'
+smoke_id="v6-smoke-$(date -u +%Y%m%d%H%M%S)-$$"
+smoke_request="$(mktemp)"
+smoke_result="$(mktemp)"
+trap 'rm -f "$report" "$health_json" "$smoke_request" "$smoke_result"' EXIT
+python3 - "$smoke_request" "$smoke_id" "$ROOT" <<'PYREQUEST'
+import json,sys
+path,rid,cwd=sys.argv[1:]
+request={
+    "protocol":1,
+    "id":rid,
+    "cwd":cwd,
+    "command":"printf 'ISOLATED_V6_SMOKE_OK\\n'",
+    "explanation":"Non-mutating local v6 staging acceptance canary",
+    "timeout_seconds":20,
+    "write_scope":"read_only",
+}
+with open(path,"w",encoding="utf-8") as f:
+    json.dump(request,f,separators=(",",":"),sort_keys=True)
+PYREQUEST
+# Submit once. A failed acknowledgement is ambiguous, so never resubmit
+# this request ID; preserve its identifier in the failure message.
+if ! rclone --drive-root-folder-id "$root_id" --timeout 20s copyto \
+  "$smoke_request" "${RCLONE_REMOTE}requests/${smoke_id}.json"; then
+  echo "HOLD: smoke submission ambiguous, id=$smoke_id; do not replay it" >&2
+  exit 10
+fi
+smoke_ok=0
+for attempt in 1 2 3 4 5 6 7 8 9 10 11 12 13 14 15 16 17 18 19 20; do
+  if rclone --drive-root-folder-id "$root_id" --timeout 20s copyto \
+    "${RCLONE_REMOTE}results/${smoke_id}.json" "$smoke_result" >/dev/null 2>&1 &&
+    PYTHONDONTWRITEBYTECODE=1 python3 shell_bridge/verify_v6_candidate_smoke.py \
+      "$smoke_request" "$smoke_result" "$smoke_id" >/dev/null 2>&1; then
+    smoke_ok=1
+    break
+  fi
+  sleep 2
+done
+if [ "$smoke_ok" -ne 1 ]; then
+  echo "HOLD: isolated read-only request not verified, id=$smoke_id; preserve journal/result" >&2
+  exit 11
+fi
+PYTHONDONTWRITEBYTECODE=1 python3 shell_bridge/verify_v6_candidate_smoke.py \
+  "$smoke_request" "$smoke_result" "$smoke_id"
 printf '\nISOLATED_V6_RUNNING=1\nLABEL=%s\nCONFIG=%s\nSOURCE=%s\n' "$label" "$config" "$source_commit"
 printf 'Production v5 unchanged. Cutover still requires live approval, replay and recovery acceptance.\n'
