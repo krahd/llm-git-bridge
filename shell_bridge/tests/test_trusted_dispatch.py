@@ -16,7 +16,7 @@ class TrustedDispatchTests(unittest.TestCase):
             root = base / "repo"
             root.mkdir()
             executable = base / "helper"
-            executable.write_text("#!/bin/sh\\nprintf 'SAFE:%s\\n' \"$1\"\\n", encoding="utf-8")
+            executable.write_text("#!/bin/sh\nprintf 'SAFE:%s\n' \"$1\"\n", encoding="utf-8")
             executable.chmod(0o700)
             digest = hashlib.sha256(executable.read_bytes()).hexdigest()
             cfg = {
