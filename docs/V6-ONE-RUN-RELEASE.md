@@ -133,3 +133,44 @@ If previous production workflows depend on arbitrary outbound SSH or transfers,
 **do not authorize the cutover**; keep v5 running until corresponding bounded
 SSH capabilities and live tests are available. This is a business-functionality
 and safety gate, not a request to weaken the sandbox.
+
+## Inbound SSH requirement and limits
+
+Inbound SSH is macOS Remote Login, not the bridge transport. Before v6
+production staging, the one-run controller reads Remote Login status and checks
+that the current account belongs to the restricted SSH access group. If this
+is not yet configured, the operator can use macOS System Settings > General >
+Sharing > Remote Login, restrict access to specific authorized users, and
+recheck from the same running script. No script enables Remote Login, installs
+a service, opens a firewall port or weakens host authentication.
+
+Before production switching, a fresh 48-hex-digit challenge is generated in
+a private local state directory. An operator must establish a genuine SSH login
+to the Mac **from a separate device**, execute the displayed witness command
+in that authenticated session, and let the running controller verify its
+identity, peer address and freshness. A missing or expired witness blocks
+production handover. This is a separate-client SSH session diagnostic; it does
+not independently establish public-internet routing, nor can local source
+tests prove access through an off-site firewall/VPN.
+
+The SSH login account can operate through ordinary macOS SSH authorization;
+it does not gain additional arbitrary command authority inside the AI bridge.
+The existing outbound pinned SSH helper still permits only previously
+approved fixed read-only actions without repeated bridge prompts.
+
+The operator should use key-based SSH authentication, restrict Remote Login
+to necessary users and private/VPN network paths where practicable, and verify
+host keys independently. Remote Login should never be automatically exposed to
+the public internet by a migration script.
+
+## Latest source audit findings
+
+A fresh pass identified two broken release canaries that prior tests missed:
+native approval omitted the bridge-required durable operation ID, and outbound
+SSH smoke generated a request ID with a literal trailing dollar sign.
+Both were corrected and tested against the actual bridge admission rules.
+The pinned OpenSSH helper now excludes system-wide host-key trust, DNS host-key
+verification and automatic host-key updates. The installed-build manifest,
+daemon integrity identity and cutover manifest now include the SSH helper
+SHA-256. These are source-level corrections; live Mac acceptance is still
+required before declaring either direction of remote SSH operational.
