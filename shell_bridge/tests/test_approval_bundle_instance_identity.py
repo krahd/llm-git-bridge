@@ -43,6 +43,10 @@ class UniqueApprovalBundleIdentityTests(unittest.TestCase):
                 "net.laurenzo.local-executor-approval."))
             self.assertEqual(staging["ApprovalRoot"], str(base / "staging-approvals"))
             self.assertEqual(production["ApprovalRoot"], str(base / "production-approvals"))
+            self.assertIn("v6-candidate", staging["ApprovalInstanceLabel"])
+            self.assertIn("v6-production", production["ApprovalInstanceLabel"])
+            self.assertNotEqual(staging["ApprovalInstanceLabel"],
+                                production["ApprovalInstanceLabel"])
             self.assertTrue(staging["LSUIElement"])
             self.assertTrue(production["LSUIElement"])
 
