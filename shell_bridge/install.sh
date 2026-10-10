@@ -210,7 +210,7 @@ PYMAN
 chmod 600 "$INSTALL_DIR/install-manifest.json"
 
 python3 - "$CONFIG_DIR/config.json" "$REMOTE" "$BASE_PATH" "$ROOT_ID" "$REQUESTS_ID" "$RESULTS_ID" "$INSTANCE_ID" "$ALLOWED_ROOT" "$STATE_DIR" "$SHELL_BIN" "$INSTALL_DIR" <<'PY'
-import json,sys
+import hashlib,json,os,sys
 from pathlib import Path
 path,remote,base,root_id,req_id,res_id,instance,allowed,state,shell,install_dir=sys.argv[1:]
 try:
@@ -234,6 +234,31 @@ cfg.update({
  'wake_lease_enabled':cfg.get('wake_lease_enabled',True),
  'wake_grace_seconds':cfg.get('wake_grace_seconds',3600.0),
 })
+# Only an out-of-band installer may opt into the fixed, read-only
+# inspector. Its executable is outside the agent-writable repository roots,
+# pinned to a SHA-256, and every invocation still requires operator approval.
+if os.environ.get("REGISTER_MAILBOX_INSPECTOR") == "1":
+    executable=Path(install_dir)/"bridge_mailbox_inspector.py"
+    root=Path(allowed).resolve()
+    try:
+        executable.resolve().relative_to(root)
+    except ValueError:
+        pass
+    else:
+        raise SystemExit("refusing agent-writable inspector registration")
+    if executable.is_symlink() or not executable.is_file():
+        raise SystemExit("inspector install is missing or symlinked")
+    ops=cfg.get("trusted_operations",{})
+    if not isinstance(ops,dict) or "bridge-mailbox-inspect" in ops:
+        raise SystemExit("existing or malformed trusted helper registry; manual reconciliation required")
+    ops=dict(ops)
+    ops["bridge-mailbox-inspect"]={
+        "executable":str(executable),
+        "executable_sha256":hashlib.sha256(executable.read_bytes()).hexdigest(),
+        "permitted_roots":[str(Path.home())],
+        "permitted_actions":["inspect"],
+    }
+    cfg["trusted_operations"]=ops
 with open(path,'w',encoding='utf-8') as f: json.dump(cfg,f,indent=2,sort_keys=True); f.write('\n')
 PY
 chmod 600 "$CONFIG_DIR/config.json"
