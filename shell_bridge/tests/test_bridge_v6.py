@@ -267,6 +267,29 @@ class RemoteExecutionApprovalFatigueTests(unittest.TestCase):
                     "remote_shell_or_copy",
                 )
 
+    def test_installer_consent_only_exempts_fixed_ssh_read_actions(self):
+        cfg = {"preapproved_pinned_ssh_readonly": True}
+        plan = {"effective": "trusted_operation"}
+        for action in ("status", "identity"):
+            self.assertTrue(bridge.pinned_ssh_readonly_preapproved(
+                {"trusted_operation": {"name": "ssh-pinned-readonly",
+                                        "action": action}}, cfg, plan))
+        for op in (
+            {"name": "ssh-pinned-readonly", "action": "delete"},
+            {"name": "bridge-mailbox-inspect", "action": "inspect"},
+            {"name": "ssh-pinned-readonly", "action": "ssh"},
+        ):
+            self.assertFalse(bridge.pinned_ssh_readonly_preapproved(
+                {"trusted_operation": op}, cfg, plan))
+        self.assertFalse(bridge.pinned_ssh_readonly_preapproved(
+            {"trusted_operation": {"name": "ssh-pinned-readonly",
+                                    "action": "status"}},
+            {"preapproved_pinned_ssh_readonly": "true"}, plan))
+        self.assertFalse(bridge.pinned_ssh_readonly_preapproved(
+            {"trusted_operation": {"name": "ssh-pinned-readonly",
+                                    "action": "status"}},
+            cfg, {"effective": "system"}))
+
     def test_raw_remote_shell_rejected_before_approval_popup(self):
         from pathlib import Path
         source = Path(bridge.__file__).read_text(encoding="utf-8")
