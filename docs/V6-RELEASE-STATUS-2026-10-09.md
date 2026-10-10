@@ -253,3 +253,69 @@ Known limitations deliberately persist:
   retired-staging inventory has been independently verified by remote CI.
 - v5 remains the protected production consumer; this audit changed GitHub
   source only and did not touch the website or Mac runtime.
+
+## Post-adversarial v6 stabilization checkpoint (2026-10-10; base 970c1ad)
+
+Canonical GitHub source integrates the following independent hardening:
+
+- PR #18: streaming limits on outgoing pinned SSH stdout/stderr; timeout or
+  oversized output terminates the local SSH process group. Fixed-status SSH
+  actions remain narrow and never auto-replay ambiguous remote effects.
+  Qualified on macOS: 247 tests in each of two sandbox configurations.
+- PR #19: high-impact approval classification for Git operations that discard
+  worktree/index history (`restore`, forced checkout/switch, `git rm -f`,
+  stash deletion and force branch deletion), while routine Git status/diff
+  and index-only unstaging remain approval-free. Qualified on macOS:
+  250 tests in each sandbox configuration.
+- PR #20: an operator-only, single-invocation source launcher creates an
+  isolated exact-`origin/main` release worktree; the local dirty/unpublished
+  Mac checkout is not reset, cleaned, stashed, checked out, or overwritten.
+  It refuses duplicate or ambiguous release sources. Qualified on macOS:
+  254 tests in each sandbox configuration.
+- PR #21: installation-time SSH consent also pins the selected private
+  identity's SHA-256; rotating or replacing it invalidates approval-free
+  status/identity operations. The private key is not committed or printed.
+  Qualified on macOS: 250 tests in each sandbox configuration.
+- PR #22: the isolated release launcher disables untracked local Git
+  `post-checkout` hooks while preparing canonical source; regression tests
+  create a deliberately side-effecting hook and assert it never runs.
+  Qualified on macOS: 255 tests in each sandbox configuration.
+
+A final **combined** CI run after these integrations is still required to
+qualify their interaction; per-PR CI on divergent bases is not sufficient.
+
+### Exact current release decision
+
+**v5 remains protected production. No live cutover or v5 retirement has been
+executed.** Local production-state truth requires inspection on the Mac.
+Source tests cannot verify current LaunchAgents, native approval interaction,
+Drive mailbox ownership, installed SSH credentials, private-network routing,
+active requests, or replay/recovery behavior. Preserve unresolved operations
+and historical staging services until independently reconciled.
+
+The implemented SSH scope remains deliberately limited:
+- **Inbound to the Mac:** operator-configured Remote Login for explicitly
+  permitted accounts, plus a nonlocal-client acceptance witness. The witness
+  uses client-provided `SSH_CONNECTION` metadata, which is not independent
+  cryptographic attestation; the operator must personally perform the login
+  from their intended remote device and verify connectivity and host identity.
+- **Outbound from the Mac through v6:** operator-pinned, read-only SSH
+  `status` and `identity` actions with no per-call prompt after enrollment.
+  General SSH/SCP/SFTP/rsync and arbitrary remote administration are still
+  not qualified, and raw system-shell escalation remains forbidden to agents.
+- **Mac shell via v6 mailbox:** bounded sandboxed read/repository work is
+  supported; potentially irreversible direct operations use native warnings
+  when recognized. Static text analysis cannot prove arbitrary scripts safe.
+
+The operator must decide whether limited outbound SSH functionality meets
+their actual v5 parity requirements. The release script explicitly requires
+`MIGRATE LIMITED SSH` before consequential production handover. Do not
+enter that phrase if other SSH/terminal workflows remain required.
+
+When the operator returns to the Mac, use the canonical documented one-line
+bootstrap (not the old bare `v6_release_once.sh` from the dirty checkout).
+Its first phase remains source checks and isolated staging. The real migration
+must halt if SSH enrollment, native approval denial/allow tests, the external
+client witness, production mailbox exclusivity, or live exact-build health
+cannot be proven. No staging, website or existing dirty checkout should be
+destroyed to make acceptance pass.
