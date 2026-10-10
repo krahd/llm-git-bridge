@@ -15,7 +15,15 @@ from pathlib import Path
 
 IDENTITY = ("bridge_instance_id", "drive_root_folder_id",
             "requests_folder_id", "results_folder_id", "state_dir")
-KEYWORDS = ("bridge", "local-executor")
+def _belongs_to_bridge_ecosystem(label: str) -> bool:
+    value = label.lower()
+    return (
+        value.startswith("io.llm-git-bridge.")
+        or value.startswith("com.tom.chatgpt-shell-bridge")
+        or value.startswith("bridge-")  # diagnostic test labels
+        or (value.startswith("net.laurenzo.") and
+            ("bridge" in value or "local-executor" in value))
+    )
 
 
 def _safe_child(path: Path, home: Path) -> bool:
@@ -39,7 +47,7 @@ def inspect_services(home: Path, launchctl_listing: str) -> dict:
         if len(fields) != 3:
             continue
         pid, status, label = fields
-        if not any(word in label.lower() for word in KEYWORDS):
+        if not _belongs_to_bridge_ecosystem(label):
             continue
         # A loaded KeepAlive service without a PID may launch at any time.
         record = {"label": label, "pid": pid if pid.isdecimal() else None,
