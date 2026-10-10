@@ -296,6 +296,7 @@ if ssh_dir:
         "permitted_actions":["status","identity"],
     }
     cfg["trusted_operations"]=ops
+    cfg["preapproved_pinned_ssh_readonly"]=True
 with open(path,'w',encoding='utf-8') as f: json.dump(cfg,f,indent=2,sort_keys=True); f.write('\n')
 PY
 chmod 600 "$CONFIG_DIR/config.json"
