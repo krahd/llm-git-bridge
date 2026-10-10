@@ -49,3 +49,25 @@ class BridgeMailboxInspectorTests(unittest.TestCase):
         self.assertNotIn("remote", FIELDS)
         self.assertNotIn("token", FIELDS)
         self.assertEqual(len(LABELS), 4)
+
+    def test_symlinked_config_directory_is_rejected(self):
+        with tempfile.TemporaryDirectory() as td:
+            home = pathlib.Path(td) / "home"
+            other = pathlib.Path(td) / "other"
+            other.mkdir()
+            (other / "config.json").write_text('{"drive_root_folder_id":"hidden"}')
+            link_dir = home / ".config" / "chatgpt-shell-bridge"
+            link_dir.parent.mkdir(parents=True)
+            link_dir.symlink_to(other, target_is_directory=True)
+            answer = inspect(home, launchctl=lambda label: "loaded")
+            self.assertEqual(answer["records"][0]["config_status"], "unreadable_or_invalid")
+            self.assertNotIn("hidden", json.dumps(answer))
+
+    def test_control_characters_not_exposed(self):
+        with tempfile.TemporaryDirectory() as td:
+            home = pathlib.Path(td)
+            first = home / next(iter(LABELS.values()))
+            first.parent.mkdir(parents=True)
+            first.write_text(json.dumps({"drive_root_folder_id": "secret\\ncredential"}))
+            answer = inspect(home, launchctl=lambda label: "loaded")
+            self.assertNotIn("secret", json.dumps(answer))
