@@ -182,3 +182,37 @@ This section supersedes older staging-source and approval-timeout descriptions a
   provider bindings. The local one-time operator run remains the release gate.
   Full live crash/replay fault injection is recorded as **not verified**; old
   staging instances stay preserved until their mailbox queues are reconciled.
+
+## SSH and terminal readiness checkpoint (2026-10-10; GitHub main a833c2b)
+
+- PR #13 integrated the no-prompt, operator-installed SSH read-only
+  capability (ssh-pinned-readonly, actions status and identity) with
+  host, user, port, identity, known-host and action restrictions. Install-time
+  consent pins policy and known-host hashes; policy/key changes fail
+  closed and require local operator re-provisioning. Raw arbitrary SSH/SCP/
+  SFTP/rsync is rejected without a meaningless approval popup.
+  Unrestricted Mac system shell remains unavailable to remote agents.
+- PR #14 added interactive SSH enrollment within the same one-run release
+  invocation if V6_SSH_POLICY_DIR is absent. It uses only existing trusted
+  OpenSSH host keys, displays fingerprints, requires PIN SSH and refuses
+  insecure SSH credentials and policy paths. Unknown keys are never
+  automatically fetched or trusted.
+- The one-run flow tests SSH status through isolated and provisional
+  production v6. Before stopping v5 it expressly warns that only fixed
+  SSH status/identity are qualified and requires the consequential response
+  MIGRATE LIMITED SSH to accept limited SSH parity.
+- Source qualification for PR #14: 219 tests passed in each of standard
+  and direct macOS sandbox suites, shell syntax validated and Swift approval
+  GUI typechecked. Canonical GitHub main independently matched
+  a833c2b2e5f4e3719c15be368e18a233f8157c5e.
+- Do not declare v5 sunset ready for general-purpose Mac administration.
+  Source tests cannot verify this Mac's credentials, launchd services,
+  Google Drive authorization, approval popups, exact mailbox ownership,
+  live recovery semantics, or third-party provider behavior.
+  Actual SSH intent needs clarification: SSH from the Mac to pinned hosts
+  versus SSH into the Mac. The existing bridge transports commands to the
+  Mac but policy restricts arbitrary system shell and outbound network.
+- Production state: v5 remains production. No local cutover, v5 retirement,
+  deletion, workspace reset, or website deployment occurred during this
+  source-only remote pass. Preserve all staging instances and unresolved
+  operations until locally reconciled.
