@@ -78,7 +78,7 @@ class OneRunDirtyCheckoutLauncherTests(unittest.TestCase):
         base = Path(self.temp.name)
         updated = base / "updated"
         git("clone", "-q", str(self.origin), str(updated))
-        (updated / "updated-note.txt").write_text("remote update\\n")
+        (updated / "updated-note.txt").write_text("remote update\n")
         git("add", ".", cwd=updated)
         git("-c", "user.email=test@example.invalid",
             "-c", "user.name=Release Test", "commit", "-qm", "advance remote",
@@ -86,8 +86,11 @@ class OneRunDirtyCheckoutLauncherTests(unittest.TestCase):
         git("push", "origin", "main", cwd=updated)
         marker = self.home / "unexpected-fetch-hook-effect"
         hook = self.original / ".git" / "hooks" / "reference-transaction"
-        hook.write_text('#!/bin/sh\\nprintf triggered > "' + str(marker) + '"\\n')
+        hook.write_text('#!/bin/sh\nprintf triggered > "' + str(marker) + '"\n')
         hook.chmod(0o755)
+        git("update-ref", "refs/heads/local-hook-proof", "HEAD", cwd=self.original)
+        self.assertTrue(marker.exists(), "fixture hook did not execute during ref update")
+        marker.unlink()
         before = git("status", "--porcelain", cwd=self.original)
         result = self.run_launcher()
         self.assertEqual(result.returncode, 0, result.stderr)
