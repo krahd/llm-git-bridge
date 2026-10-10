@@ -25,6 +25,8 @@ class LocalPreparationContractTests(unittest.TestCase):
         self.assertIn("RCLONE_REMOTE", SCRIPT)
         self.assertIn("never adopt an unknown consumer mailbox", SCRIPT)
         self.assertIn("verify_v6_candidate_smoke.py", SCRIPT)
+        self.assertIn('if ! mkdir "$lockdir"', SCRIPT)
+        self.assertIn('rmdir "$lockdir"', SCRIPT)
         self.assertIn("read_only", SCRIPT)
         self.assertIn("verify_v6_candidate_health.py", SCRIPT)
         self.assertIn("ISOLATED_V6_RUNNING=1", SCRIPT)
