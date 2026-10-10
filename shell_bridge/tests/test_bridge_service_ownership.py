@@ -80,6 +80,24 @@ class LoadedBridgeOwnershipTests(unittest.TestCase):
         report = self.check("bridge-a")
         self.assertFalse(report["safe_to_stage"])
 
+    def test_unmanaged_manual_daemon_is_rejected(self):
+        self.service("bridge-a", "one")
+        launchd = "PID\\tStatus\\tLabel\\n101\\t0\\tbridge-a\\n"
+        processes = ("101 /usr/bin/python3 /opt/bridge.py daemon --config /a\\n"
+                     "333 /usr/bin/python3 /tmp/manual/bridge.py daemon --config /b\\n")
+        report = inspect_services(self.home, launchd, processes)
+        self.assertFalse(report["safe_to_stage"])
+        self.assertTrue(any("unmanaged bridge daemon PID=333" == p
+                            for p in report["problems"]))
+
+    def test_known_launchd_daemon_process_is_not_rejected(self):
+        self.service("bridge-a", "one")
+        report = inspect_services(
+            self.home, "PID\\tStatus\\tLabel\\n101\\t0\\tbridge-a\\n",
+            "101 /usr/bin/python3 /opt/bridge.py daemon --config /a\\n",
+        )
+        self.assertTrue(report["safe_to_stage"])
+
     def test_unrelated_macos_bridge_named_daemon_is_ignored(self):
         listing = "PID\\tStatus\\tLabel\\n123\\t0\\tcom.apple.SystemBridge\\n"
         report = inspect_services(self.home, listing)
