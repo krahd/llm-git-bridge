@@ -67,6 +67,19 @@ class LoadedBridgeOwnershipTests(unittest.TestCase):
         self.assertTrue(any("shared requests_folder_id" in p
                             for p in result["problems"]))
 
+    def test_shared_state_directory_alias_is_rejected(self):
+        common = self.home / "durable" / "state"
+        self.service("bridge-a", "one", state=str(common))
+        self.service("bridge-b", "two", state=str(common.parent / "x" / ".." / "state"))
+        report = self.check("bridge-a", "bridge-b")
+        self.assertFalse(report["safe_to_stage"])
+        self.assertTrue(any("shared state_dir" in p for p in report["problems"]))
+
+    def test_relative_state_directory_is_rejected(self):
+        self.service("bridge-a", "one", state="relative-state")
+        report = self.check("bridge-a")
+        self.assertFalse(report["safe_to_stage"])
+
     def test_unknown_loaded_bridge_blocks(self):
         result = self.check("net.laurenzo.unexpected-bridge")
         self.assertFalse(result["safe_to_stage"])
