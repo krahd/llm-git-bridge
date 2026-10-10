@@ -119,7 +119,9 @@ policy out of band. All profile actions are registered only at installation,
 and the policy, known-hosts file, and private identity are hashed and pinned.
 **Custom actions always require native approval per invocation**, even when
 the two built-in read-only probes are preapproved. Changed pins cause rejection,
-not silent reauthorization. A remote service restart is consequential; the
+not silent reauthorization. The native approval summary shows the exact pinned
+remote destination and shell-quoted command; profiles whose command preview is
+too long to inspect are rejected instead of truncating a consequential action. A remote service restart is consequential; the
 agent cannot promote it into an approval-free operation by naming it a read.
 
 These profiles add targeted remote maintenance capability but **do not**
