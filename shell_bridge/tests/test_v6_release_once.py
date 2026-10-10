@@ -37,8 +37,10 @@ class SingleRunReleaseContractTests(unittest.TestCase):
 
     def test_retirement_occurs_only_after_production_approval(self):
         approval = SCRIPT.index('approval_canary "$PROD_ROOT" "$PROD_ALLOWED" allow production')
-        archive = SCRIPT.index('echo "Phase 7: archive stopped production v5')
+        archive = SCRIPT.index('echo "Phase 8: archive stopped production v5')
         self.assertLess(approval, archive)
+        self.assertLess(SCRIPT.index("PYEXCLUSIVE"), archive)
+        self.assertIn("PRODUCTION_MAILBOX_EXCLUSIVE_OWNER_VERIFIED=1", SCRIPT)
         self.assertIn('cutover-rollback-services.tsv', SCRIPT)
         self.assertIn('legacy archive postcondition failed', SCRIPT)
         self.assertIn('recovery_fault_injection_live_verified":False', SCRIPT)
