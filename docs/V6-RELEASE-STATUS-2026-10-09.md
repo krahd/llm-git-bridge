@@ -127,3 +127,10 @@ This section supersedes older staging-source and approval-timeout descriptions a
 - PR #2 head `bfc9ace394edd8b55d957ad18f24165b6b087996` passed GitHub Actions Bridge v6 qualification run `38019038446`; squash merge produced canonical `main` commit `6c8accac1eda773294a448fcd12709f55267836f`, independently verified via GitHub commit and `main` source readback.
 - The cutover now arms legacy rollback responsibility **before** potentially ambiguous `launchctl bootout`; a failure return is no longer assumed to mean the old service remained loaded. Regression ordering assertion was updated.
 - This is source-only safety hardening, not Mac staging qualification. Installed production v5 must remain running until a new exact-main candidate, rollback/journal tests, real negative GUI decisions, and exclusive-consumer handover pass. The existing staged candidate is older than canonical `main`.
+
+
+## Additional rollback qualification (2026-10-10 UTC)
+
+- PR #3 head `48607dd96d62818e806550f5908f4657607cbdb9` passed `Bridge v6 qualification` GitHub Actions run `38020571321`; squash-merged to canonical main at `bb0c159d1553aed263e3a17dec9451f4c0bead9a` (GitHub commit and source independently verified). Rollback from a pre-v6 cutover failure now checks each legacy LaunchAgent was restored, and if not, retains durable hold plus service recovery evidence.
+- PR #4 `ai/v6-rollback-new-consumer-verification-20261009`, head `2a6e3271eb85f4a5be9979d69bffd68e2e594348`, adds explicit detection/reporting if v6 remains loaded after attempted rollback bootout, with an assertion that v5 is never restarted in that branch. Await CI qualification before integrating.
+- None of these source changes has been installed as the staged production candidate. v5 remains authoritative production. Live staging approval negative controls, crash/lost-result cross-version handover, and Mac install identity are still unverified for latest source. Source-only progress is not a cutover authorization.
