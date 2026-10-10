@@ -120,3 +120,10 @@ This section supersedes older staging-source and approval-timeout descriptions a
 - `shell_bridge/cutover.sh` now fails closed when either pre-stop or post-stop rclone mailbox listing fails rather than treating a failed listing as an empty queue. The cutover marks v6 as potentially started *before* invoking `launchctl bootstrap`, so an ambiguous bootstrap failure holds for journal reconciliation instead of blindly resuming v5. Focused regression assertions were added to `shell_bridge/tests/test_cutover.py`.
 - The GitHub main file and integration commit were independently re-read after merge. **Source integration does not update the already staged Mac executable or prove live migration**; the staged candidate remains pinned to `0b84b2f...` until reinstalled and requalified against a fresh exact source commit.
 - Remaining release blockers: deliberate observed human Reject/Review-later/expiry controls, lost-result-after-v6-mutation rollback reconciliation, descendant containment and mailbox exclusivity, up-to-date staged artifact/runtime verification and connector-first client acceptance. Do not cut over or retire v5 until these live gates have actual acceptance evidence. No new Mac mutation was issued by this source-only change.
+
+
+## PR #2 cutover rollback guard qualified and integrated (2026-10-10 UTC)
+
+- PR #2 head `bfc9ace394edd8b55d957ad18f24165b6b087996` passed GitHub Actions Bridge v6 qualification run `38019038446`; squash merge produced canonical `main` commit `6c8accac1eda773294a448fcd12709f55267836f`, independently verified via GitHub commit and `main` source readback.
+- The cutover now arms legacy rollback responsibility **before** potentially ambiguous `launchctl bootout`; a failure return is no longer assumed to mean the old service remained loaded. Regression ordering assertion was updated.
+- This is source-only safety hardening, not Mac staging qualification. Installed production v5 must remain running until a new exact-main candidate, rollback/journal tests, real negative GUI decisions, and exclusive-consumer handover pass. The existing staged candidate is older than canonical `main`.
