@@ -11,6 +11,7 @@ class AtomicMigratorTests(unittest.TestCase):
         (install/'bridge.py').write_text('import sys\nraise SystemExit(0) if len(sys.argv)>1 and sys.argv[1]=="doctor" else None\n')
         (install/'approval_helper.py').write_text('Allow once Reject menu only')
         (install/'trusted_operations.py').write_text('registered policy')
+        (install/'bridge_mailbox_inspector.py').write_text('inspector')
         app=install/'Local Executor Approval.app'; app.mkdir()
         cfgdir=home/f'.config/local-executor-bridge-v6-{suffix}'; cfgdir.mkdir(parents=True)
         (cfgdir/'config.json').write_text(json.dumps({'operator_approval_app':str(app),'operator_confirmation_mode':'auto','bridge_instance_id':'iid','remote':'r:','drive_root_folder_id':'root','state_dir':str(home/'state')}))
