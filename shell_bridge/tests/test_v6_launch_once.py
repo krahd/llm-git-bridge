@@ -23,8 +23,7 @@ class OneRunDirtyCheckoutLauncherTests(unittest.TestCase):
         self.home.mkdir()
         self.original = base / "original"
         self.original.mkdir()
-        git("init", "-q", self.original.as_posix())
-        git("checkout", "-qb", "main", cwd=self.original)
+        git("init", "-q", "-b", "main", self.original.as_posix())
         (self.original / "shell_bridge").mkdir()
         (self.original / "shell_bridge" / "v6_release_once.sh").write_text(
             "#!/bin/bash\nexit 99\n", encoding="utf-8")
