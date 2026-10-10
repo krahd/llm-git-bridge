@@ -263,6 +263,34 @@ def high_impact_command_category(command: str) -> str | None:
         command,
     ):
         return "git_destructive_local"
+    # Git commands that can discard local edits, force-remove modified
+    # tracked files, or delete unmerged refs need consequences-specific review.
+    # Plain staging/unstaging, checkout of an existing branch, and git status
+    # remain approval-free. This is a warning heuristic, not a shell parser.
+    for match in re.finditer(
+        r"(?im)(?<![\w-])git(?:\s+-C\s+\S+)*\s+(restore|checkout|switch|rm|stash|branch)\b([^\n;|&]*)",
+        command,
+    ):
+        sub, args = match.group(1).lower(), match.group(2)
+        if re.search(r"(^|\s)--(?:help|version)\b", args):
+            continue
+        if sub == "restore":
+            # --staged-only changes the index but preserves working files.
+            if (re.search(r"(?<!\S)(?:--staged|-S)\b", args)
+                    and not re.search(r"(?<!\S)(?:--worktree|-W|--source(?:=|\s))", args)):
+                continue
+            if args.strip():
+                return "git_destructive_local"
+        elif sub == "checkout" and re.search(r"(^|\s)(?:--\s+\S|(?:-f|--force|--discard-changes)\b)", args):
+            return "git_destructive_local"
+        elif sub == "switch" and re.search(r"(^|\s)(?:-f\b|--force\b|--discard-changes\b)", args):
+            return "git_destructive_local"
+        elif sub == "rm" and re.search(r"(^|\s)(?:--force\b|-[a-zA-Z]*f[a-zA-Z]*\b)", args):
+            return "git_destructive_local"
+        elif sub == "stash" and re.search(r"^\s+(?:drop|clear)\b", args):
+            return "git_destructive_local"
+        elif sub == "branch" and re.search(r"(^|\s)-[A-Za-z]*D[A-Za-z]*\b", args):
+            return "git_destructive_local"
     if re.search(
         r"(?im)(?:^|[;&|]\s*|\n)\s*(?:sudo\s+)?rm\b[^\n;]*\s+(?:--recursive\b|-[A-Za-z]*[rR][A-Za-z]*\b)",
         command,
