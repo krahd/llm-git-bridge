@@ -11,6 +11,7 @@ import json
 import os
 from pathlib import Path
 import re
+import shlex
 import selectors
 import signal
 import stat
@@ -40,6 +41,15 @@ def _regular_owner_file(path: Path, parent: Path) -> None:
         raise SSHPolicyError("SSH policy file ownership or mode invalid")
 
 
+def _no_duplicate_json_keys(pairs: list[tuple[str, object]]) -> dict:
+    result = {}
+    for key, value in pairs:
+        if key in result:
+            raise SSHPolicyError("duplicate SSH policy key")
+        result[key] = value
+    return result
+
+
 def load_policy(directory: Path, action: str) -> tuple[list[str], int]:
     if not directory.is_absolute() or directory.is_symlink():
         raise SSHPolicyError("policy directory must be absolute and not a symlink")
@@ -49,20 +59,25 @@ def load_policy(directory: Path, action: str) -> tuple[list[str], int]:
         raise SSHPolicyError("SSH policy directory unavailable") from exc
     if not stat.S_ISDIR(info.st_mode) or info.st_uid != os.getuid() or info.st_mode & 0o022:
         raise SSHPolicyError("SSH policy directory ownership or mode invalid")
-    if not _ACTION.fullmatch(action) or action not in _COMMANDS:
-        raise SSHPolicyError("unregistered or non-read-only SSH action")
+    if not _ACTION.fullmatch(action):
+        raise SSHPolicyError("invalid SSH action token")
     path = directory / "ssh-policy.json"
     known_hosts = directory / "known_hosts"
     _regular_owner_file(path, directory)
     _regular_owner_file(known_hosts, directory)
     try:
-        data = json.loads(path.read_text(encoding="utf-8"))
+        data = json.loads(path.read_text(encoding="utf-8"), object_pairs_hook=_no_duplicate_json_keys)
     except (OSError, ValueError) as exc:
         raise SSHPolicyError("invalid SSH policy") from exc
-    if not isinstance(data, dict) or set(data) != {"schema", "host", "user", "port", "identity_file"}:
+    required = {"schema", "host", "user", "port", "identity_file"}
+    if not isinstance(data, dict) or type(data.get("schema")) is not int or (
+        data.get("schema") == 1 and set(data) != required
+    ) or (
+        data.get("schema") == 2 and set(data) != required | {"commands"}
+    ) or data.get("schema") not in (1, 2):
         raise SSHPolicyError("SSH policy fields are not pinned")
     host, user, port, identity = (data[key] for key in ("host", "user", "port", "identity_file"))
-    if data["schema"] != 1 or not isinstance(host, str) or not _HOST.fullmatch(host):
+    if not isinstance(host, str) or not _HOST.fullmatch(host):
         raise SSHPolicyError("invalid pinned hostname")
     if not isinstance(user, str) or not _USER.fullmatch(user):
         raise SSHPolicyError("invalid pinned SSH account")
@@ -76,7 +91,29 @@ def load_policy(directory: Path, action: str) -> tuple[list[str], int]:
     key_info = key.stat()
     if key_info.st_uid != os.getuid() or key_info.st_mode & 0o077:
         raise SSHPolicyError("SSH private identity ownership or permissions invalid")
-    # This helper invokes exactly one pinned, read-only remote program.
+    commands = data.get("commands", {})
+    if not isinstance(commands, dict) or len(commands) > 32:
+        raise SSHPolicyError("invalid registered SSH commands")
+    for name, tokens in commands.items():
+        if not isinstance(name, str) or not _ACTION.fullmatch(name) or name in _COMMANDS:
+            raise SSHPolicyError("invalid or reserved SSH action")
+        if not isinstance(tokens, list) or not 1 <= len(tokens) <= 24:
+            raise SSHPolicyError("invalid pinned remote argv")
+        if any(not isinstance(token, str) or not token or len(token) > 512
+               or any(ord(ch) < 32 or ord(ch) == 127 for ch in token)
+               for token in tokens):
+            raise SSHPolicyError("unsafe pinned remote argv")
+        if not tokens[0].startswith("/") or "//" in tokens[0] or ".." in tokens[0].split("/"):
+            raise SSHPolicyError("remote executable must have a normalized absolute path")
+    if action in _COMMANDS:
+        remote_command = _COMMANDS[action]
+    elif action in commands:
+        # This is a fixed operator-installed command, not provider shell text.
+        # Quoting prevents an argument from changing remote shell structure.
+        remote_command = shlex.join(commands[action])
+    else:
+        raise SSHPolicyError("unregistered SSH action")
+    # This helper invokes one operator-pinned remote command.
     # Disable user SSH configuration, arbitrary options, proxy helpers, shell
     # interactivity and forwarding even when the Mac user's dotfiles differ.
     argv = [
@@ -91,7 +128,7 @@ def load_policy(directory: Path, action: str) -> tuple[list[str], int]:
         "-o", "UpdateHostKeys=no",
         "-o", "VerifyHostKeyDNS=no",
         "-i", str(key), "-p", str(port),
-        user + "@" + host, _COMMANDS[action],
+        user + "@" + host, remote_command,
     ]
     return argv, 25
 

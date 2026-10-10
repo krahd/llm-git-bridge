@@ -90,6 +90,46 @@ that broad SSH work is accepted or that the previous v5 workflows have been
 replaced. Configuration and a live known-host and identity acceptance test
 remain necessary on the owner's Mac.
 
+## Operator-pinned SSH command profiles (schema 2)
+
+The host-pinned SSH helper also supports **explicit operator-installed command
+profiles** without allowing a provider to supply shell text, SSH flags, host
+names, or arguments. An owner-controlled `ssh-policy.json` may use schema 2
+and add a `commands` map. Each key is a registered action name; its value is
+a fixed array of remote argv tokens. The first token must be an absolute remote
+executable. Arguments are shell-quoted individually before passing the fixed
+command to OpenSSH. The policy limits action count, argument count, size, and
+control characters; action names cannot replace built-in `status` or
+`identity`.
+
+For example, the following is the additional field in a schema-2 policy:
+
+```json
+{
+  "commands": {
+    "repo-status": ["/usr/bin/git", "-C", "/srv/example", "status", "--short"],
+    "restart-example": ["/bin/systemctl", "restart", "example.service"]
+  }
+}
+```
+
+This example is not a complete policy and does not install anything. An
+operator must select the correct remote programs and explicitly enroll the
+policy out of band. All profile actions are registered only at installation,
+and the policy, known-hosts file, and private identity are hashed and pinned.
+**Custom actions always require native approval per invocation**, even when
+the two built-in read-only probes are preapproved. Changed pins cause rejection,
+not silent reauthorization. The native approval summary shows the exact pinned
+remote destination and shell-quoted command; profiles whose command preview is
+too long to inspect are rejected instead of truncating a consequential action. A remote service restart is consequential; the
+agent cannot promote it into an approval-free operation by naming it a read.
+
+These profiles add targeted remote maintenance capability but **do not**
+implement arbitrary interactive SSH sessions, dynamic remote shell programs,
+SCP/SFTP/rsync, or unreviewed file transfers. Their real endpoint execution,
+denial, timeout/replay behavior, and operator-visible approval still require
+Mac-local acceptance before v5 sunset.
+
 ## Second independent command-risk review
 
 An adversarial review of the shell-command classifier found that repository

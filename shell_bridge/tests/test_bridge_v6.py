@@ -308,12 +308,21 @@ class RemoteExecutionApprovalFatigueTests(unittest.TestCase):
             for action in ("status", "identity"):
                 self.assertTrue(bridge.pinned_ssh_readonly_preapproved(
                     query(action), cfg, plan))
+            self.assertTrue(bridge.pinned_ssh_material_unchanged(
+                query("service-restart"), cfg, plan))
+            self.assertFalse(bridge.pinned_ssh_readonly_preapproved(
+                query("service-restart"), cfg, plan))
+            self.assertFalse(bridge.pinned_ssh_material_unchanged(
+                query("service-restart"),
+                {**cfg, "preapproved_pinned_ssh_readonly": False}, plan))
             for action in ("delete", "ssh", "status --anything"):
                 self.assertFalse(bridge.pinned_ssh_readonly_preapproved(
                     query(action), cfg, plan))
             self.assertFalse(bridge.pinned_ssh_readonly_preapproved(
                 query("status"), cfg, {"effective": "system"}))
             known.write_text("CHANGED HOST KEY")
+            self.assertFalse(bridge.pinned_ssh_material_unchanged(
+                query("service-restart"), cfg, plan))
             self.assertFalse(bridge.pinned_ssh_readonly_preapproved(
                 query("status"), cfg, plan))
             known.write_text("example.invalid ssh-ed25519 pinned")
@@ -326,6 +335,13 @@ class RemoteExecutionApprovalFatigueTests(unittest.TestCase):
                 query("status"), cfg, plan))
             self.assertFalse(bridge.pinned_ssh_readonly_preapproved(
                 query("status"), {"preapproved_pinned_ssh_readonly": True}, plan))
+
+    def test_native_ssh_approval_displays_exact_pinned_remote_effect(self):
+        source = Path(bridge.__file__).read_text(encoding="utf-8")
+        self.assertIn('Remote destination: {ssh_argv[-2]}', source)
+        self.assertIn('Exact reviewed remote command: {ssh_argv[-1]}', source)
+        self.assertIn('SSH profile command too long for meaningful operator review', source)
+        self.assertIn('load_pinned_ssh_policy(', source)
 
     def test_raw_remote_shell_rejected_before_approval_popup(self):
         from pathlib import Path
