@@ -5,7 +5,6 @@ import subprocess
 import sys
 import tempfile
 import unittest
-from unittest import mock
 
 ROOT = pathlib.Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT))
@@ -36,9 +35,11 @@ class InspectorInstallerRegistrationTests(unittest.TestCase):
                      "req-1", "res-1", "instance-1", str(self.agent_root),
                      str(self.home / ".local/state/bridge"), "/bin/zsh", str(self.install)]
 
-    def run_config(self, enabled):
+    def run_config(self, enabled, ssh_policy=None):
         env = os.environ.copy()
         env.pop("REGISTER_PINNED_SSH_POLICY_DIR", None)
+        if ssh_policy is not None:
+            env["REGISTER_PINNED_SSH_POLICY_DIR"] = ssh_policy
         env.update(HOME=str(self.home),
                    REGISTER_MAILBOX_INSPECTOR="1" if enabled else "0")
         return subprocess.run([sys.executable, "-c", CONFIG_SCRIPT, *self.args],
@@ -79,15 +80,7 @@ class InspectorInstallerRegistrationTests(unittest.TestCase):
         executable = self.install / "ssh_pinned_helper.py"
         executable.write_text((ROOT / "ssh_pinned_helper.py").read_text())
         executable.chmod(0o700)
-        old = os.environ.get("REGISTER_PINNED_SSH_POLICY_DIR")
-        os.environ["REGISTER_PINNED_SSH_POLICY_DIR"] = str(policy_dir)
-        try:
-            result = self.run_config(False)
-        finally:
-            if old is None:
-                os.environ.pop("REGISTER_PINNED_SSH_POLICY_DIR", None)
-            else:
-                os.environ["REGISTER_PINNED_SSH_POLICY_DIR"] = old
+        result = self.run_config(False, ssh_policy=str(policy_dir))
         self.assertEqual(result.returncode, 0, result.stderr)
         cfg = json.loads(self.cfg.read_text())
         op = registered_operation_from_config(
@@ -116,10 +109,7 @@ class InspectorInstallerRegistrationTests(unittest.TestCase):
         program = self.install / "ssh_pinned_helper.py"
         program.write_text((ROOT / "ssh_pinned_helper.py").read_text())
         program.chmod(0o700)
-        with mock.patch.dict(os.environ, {
-            "REGISTER_PINNED_SSH_POLICY_DIR": str(policy_dir),
-        }):
-            result = self.run_config(False)
+        result = self.run_config(False, ssh_policy=str(policy_dir))
         self.assertNotEqual(result.returncode, 0)
         self.assertIn("agent-writable SSH private identity", result.stderr)
 
