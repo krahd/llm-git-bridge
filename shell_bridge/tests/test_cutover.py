@@ -100,6 +100,19 @@ class CutoverIdentityTests(unittest.TestCase):
         self.assertIn("Contents/MacOS/local-executor-approval", text)
         self.assertNotIn("Contents/MacOS/approval-helper", text)
 
+    def test_mailbox_listing_errors_fail_closed(self):
+        text = (pathlib.Path(__file__).parents[1] / "cutover.sh").read_text()
+        self.assertIn('cannot list production request mailbox before cutover', text)
+        self.assertIn('cannot list production request mailbox after stopping legacy consumers', text)
+        self.assertNotIn('head -n 1 || true', text)
+        self.assertIn('PENDING="$("${R[@]}" lsf "${REMOTE}requests" --files-only)" || fail', text)
+        self.assertIn('PENDING_AFTER_STOP="$("${R[@]}" lsf "${REMOTE}requests" --files-only)" || fail', text)
+
+    def test_ambiguous_bootstrap_enters_hold_not_legacy_restart(self):
+        text = (pathlib.Path(__file__).parents[1] / "cutover.sh").read_text()
+        self.assertLess(text.index('STARTED_NEW=1'), text.index('launchctl bootstrap "gui/${UID_NOW}" "$NEW_PLIST"'))
+        self.assertIn('cutover-reconciliation-required', text)
+
     def test_cutover_preserves_legacy_workspace_state_on_upgrade(self):
         text = (pathlib.Path(__file__).parents[1] / "cutover.sh").read_text()
         self.assertIn("LEGACY_STATE_DIR", text)
