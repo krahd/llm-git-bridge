@@ -34,6 +34,15 @@ class ApprovalAcceptanceTests(unittest.TestCase):
             self.assertEqual(admitted["operation_id"], rid)
             self.assertEqual(admitted["trusted_operation"]["action"], "inspect")
 
+    def test_cli_rejects_invalid_request_id_before_upload(self):
+        import tempfile
+        from verify_v6_approval import main
+        with tempfile.TemporaryDirectory() as td:
+            outfile = str(pathlib.Path(td) / "request.json")
+            self.assertEqual(main(["canary", "create", outfile, "v6-approval-$",
+                                   td, "deny"]), 1)
+            self.assertFalse(pathlib.Path(outfile).exists())
+
     def test_real_denial(self):
         verify(self.raw, self.base, self.rid, "deny")
 
