@@ -216,3 +216,40 @@ This section supersedes older staging-source and approval-timeout descriptions a
   deletion, workspace reset, or website deployment occurred during this
   source-only remote pass. Preserve all staging instances and unresolved
   operations until locally reconciled.
+
+## Fresh adversarial release audit (2026-10-10, pending qualified integration)
+
+The previous single-run migration was **not actually release-ready** despite
+passing its then-current suite. Source review found an invalid SSH status
+canary ID (literal trailing dollar character) and a missing mandatory
+operation_id in the native approval canary; both defects prevented the
+corresponding live acceptance tests from reaching the intended operation.
+Both are repaired with regression tests against the bridge's actual request
+admission rules and the shell-expanded SSH canary ID.
+
+The pinned outbound SSH helper now disables global OpenSSH known-host trust,
+SSHFP host-key DNS verification and automatic host-key updates. Its executable
+SHA-256 is part of the installed-build manifest, daemon integrity reporting,
+staging prerequisites and production cutover manifest check. Python compilation
+now runs explicitly before the costly full regression suite.
+
+For **inbound SSH**, the Mac's Remote Login configuration remains an
+operator-controlled OS service. The source adds a non-mutating access-group
+and Remote Login preflight, with a read-only launchd fallback on macOS versions
+where systemsetup requires administrator permission. A distinct SSH session
+from a second device must supply a one-time nonce and non-loopback peer
+metadata before the release can proceed to production. This is not a proof
+of internet routing or a substitute for a genuine off-site connectivity test.
+No code enables Remote Login, changes host access controls, modifies firewall
+settings or retrieves untrusted keys.
+
+Known limitations deliberately persist:
+- Generic SSH/SCP/SFTP/rsync from the Mac are not authorized by the narrow
+  pinned read-only status capability; general outbound command parity remains
+  an operator-specific host/action design decision and must not be inferred.
+- A nonlocal SSH session witness does not independently prove external
+  internet or VPN reachability, which must be checked from the intended client.
+- No live Mac cutover, native approval GUI, live recovery fault injection, or
+  retired-staging inventory has been independently verified by remote CI.
+- v5 remains the protected production consumer; this audit changed GitHub
+  source only and did not touch the website or Mac runtime.
