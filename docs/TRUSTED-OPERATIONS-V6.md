@@ -1,6 +1,6 @@
 # Trusted operations for Local Executor Bridge v6
 
-Status: **policy and integrity contract only** (not yet a dispatcher, deployment helper, or release acceptance).
+Status: **source dispatcher candidate under qualification**. The request path exists on the feature branch, but is neither installed nor accepted on the user's Mac. No trusted helper is enabled without an administrator-installed registry entry.
 
 ## Intent
 
@@ -27,3 +27,20 @@ A trusted operation is an administrator-installed, named, narrowly scoped execut
 - After verified production acceptance, retire old consumers and staging, retain rollback evidence, and independently verify one production executor.
 
 Deployment-specific logic and credentials do not belong in this bridge repository. The website release itself remains outside this work.
+
+
+## Source interface (not a raw shell)
+
+A trusted request contains `protocol`, `id`, a repository `cwd`, non-empty `explanation`, stable `operation_id`, and:
+
+```json
+"trusted_operation": {"name": "registered-helper-name", "action": "inspect"}
+```
+
+Do not include `command`, `stdin_b64`, or elevated `write_scope`. The bridge rejects any such mixture. An unregistered name is rejected before STARTED; no agent may supply an executable or override a resource root.
+
+In the trusted local bridge configuration, the administrator registers `trusted_operations.<name>` with exactly `executable`, `executable_sha256`, `permitted_roots`, and `permitted_actions`. The helper must be outside the agent-writable repository root. The bridge checks its bytes before approval and again before executing.
+
+After a positive operator decision, the direct process argv contract is `[pinned-executable, action, *registered-roots]`, never an agent-supplied command string. The registered helper must separately enforce its own target and credential restrictions.
+
+The source-level integrity and approval logic does not prove TOCTOU-safe launch or secure installation ownership. Both remain live release acceptance requirements. No production credentials or website deployment operations are registered by this change.
