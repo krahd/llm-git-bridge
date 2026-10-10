@@ -324,10 +324,13 @@ SWIFT_SDK="$DEVELOPER_DIR_VALUE/Platforms/MacOSX.platform/Developer/SDKs/MacOSX.
 mkdir -p "$APP_BUNDLE/Contents/MacOS" "$APP_BUNDLE/Contents/Resources"
 install -m 644 "$SCRIPT_DIR/assets/bridge-menubar.png" "$APP_BUNDLE/Contents/Resources/bridge-menubar.png"
 APPROVAL_ROOT="$STATE_DIR/approvals"
-python3 - "$APP_BUNDLE/Contents/Info.plist" "$APPROVAL_ROOT" "$INSTALL_DIR/approval_helper.py" "$PYTHON_BIN" <<'PYAPPPLIST'
-import plistlib,sys
-path,approval_root,helper_path,python_path=sys.argv[1:]
-obj={'CFBundleIdentifier':'net.laurenzo.local-executor-approval','CFBundleName':'Local Executor Approval','CFBundleDisplayName':'Local Executor Approval','CFBundlePackageType':'APPL','CFBundleExecutable':'local-executor-approval','CFBundleVersion':'1','CFBundleShortVersionString':'1.0','LSUIElement':True,'NSHighResolutionCapable':True,'ApprovalRoot':approval_root,'ApprovalHelperPath':helper_path,'ApprovalPythonPath':python_path}
+python3 - "$APP_BUNDLE/Contents/Info.plist" "$APPROVAL_ROOT" "$INSTALL_DIR/approval_helper.py" "$PYTHON_BIN" "$LABEL" <<'PYAPPPLIST'
+import hashlib,plistlib,sys
+path,approval_root,helper_path,python_path,label=sys.argv[1:]
+# Each installed LaunchAgent must have a distinct native approval app identity.
+# Otherwise Launch Services can activate an older staging app for production.
+bundle_id='net.laurenzo.local-executor-approval.'+hashlib.sha256(label.encode('utf-8')).hexdigest()[:16]
+obj={'CFBundleIdentifier':bundle_id,'CFBundleName':'Local Executor Approval','CFBundleDisplayName':'Local Executor Approval','CFBundlePackageType':'APPL','CFBundleExecutable':'local-executor-approval','CFBundleVersion':'1','CFBundleShortVersionString':'1.0','LSUIElement':True,'NSHighResolutionCapable':True,'ApprovalRoot':approval_root,'ApprovalHelperPath':helper_path,'ApprovalPythonPath':python_path}
 with open(path,'wb') as f: plistlib.dump(obj,f,fmt=plistlib.FMT_XML,sort_keys=True)
 PYAPPPLIST
 "$SWIFTC_BIN" -sdk "$SWIFT_SDK" "$SCRIPT_DIR/approval_gui.swift" -framework AppKit -framework Foundation -o "$APP_BUNDLE/Contents/MacOS/local-executor-approval"
