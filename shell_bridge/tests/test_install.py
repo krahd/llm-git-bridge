@@ -83,13 +83,10 @@ class InstallScriptTests(unittest.TestCase):
         self.assertIn("cfg.pop('operator_approval_public_key', None)", self.text)
         self.assertIn("cfg.pop('operator_approval_public_key_sha256', None)", self.text)
 
-if __name__ == "__main__":
-    unittest.main()
-
-    def test_mailbox_inspector_installed_and_registered_for_approval(self):
+    def test_mailbox_inspector_is_packaged_but_not_privileged_by_default(self):
         self.assertIn('cp "$SCRIPT_DIR/bridge_mailbox_inspector.py"', self.text)
         self.assertIn("'bridge_mailbox_inspector_sha256':sha256(inspector_path)", self.text)
-        self.assertIn("registered['bridge-mailbox-inspect'] = {", self.text)
-        self.assertIn("'permitted_actions': ['inspect']", self.text)
-        self.assertIn("'permitted_roots': [str(Path.home())]", self.text)
-        self.assertNotIn("'requires_confirmation': False", self.text)
+        self.assertNotIn("registered['bridge-mailbox-inspect']", self.text)
+        self.assertIn('"$INSTALL_DIR/bridge_mailbox_inspector.py"', self.text)
+\nif __name__ == "__main__":
+    unittest.main()
