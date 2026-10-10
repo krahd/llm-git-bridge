@@ -123,3 +123,13 @@ policy on a later safe run.
 This keeps the release at one shell invocation, with one-time host consent,
 two deliberate native approval tests, and a separate consequential `MIGRATE`
 authorization. No routine SSH status call requires another popup.
+
+## Deliberate limited-SSH release decision
+
+Passing the pinned `status` probe does not imply general SSH/SCP/SFTP/RSYNC
+support. Before stopping v5, the release controller states this limitation and
+requires the explicit one-time phrase `MIGRATE LIMITED SSH` to accept it.
+If previous production workflows depend on arbitrary outbound SSH or transfers,
+**do not authorize the cutover**; keep v5 running until corresponding bounded
+SSH capabilities and live tests are available. This is a business-functionality
+and safety gate, not a request to weaken the sandbox.
