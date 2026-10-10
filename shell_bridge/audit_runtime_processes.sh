@@ -12,6 +12,8 @@ for label in com.tom.chatgpt-shell-bridge io.llm-git-bridge.daemon net.laurenzo.
     echo "not_loaded ${label}"
   fi
 done
+echo "other_bridge_launchagents:"
+launchctl list | awk '/net\\.laurenzo\\.local-executor-bridge-v6|local-executor-bridge-v6-candidate/ { if (count++ < 16) print $1, $3 }'
 echo "bridge_processes:"
 # Deliberately omit command arguments (which might include secrets).
 ps -axo pid=,ppid=,comm= | awk '
