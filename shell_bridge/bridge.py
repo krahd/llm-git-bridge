@@ -457,6 +457,41 @@ def resolve_write_plan(request: dict, cfg: dict) -> dict:
         "read_roots": [allowed_root], "deny_home_reads": True, "allow_network": False,
     }
 
+def pinned_ssh_readonly_preapproved(request: dict, cfg: dict, plan: dict) -> bool:
+    """Only exact operator-installed read actions with unchanged host pins."""
+    operation = request.get("trusted_operation")
+    if not (
+        isinstance(operation, dict)
+        and operation.get("name") == "ssh-pinned-readonly"
+        and operation.get("action") in {"status", "identity"}
+        and cfg.get("preapproved_pinned_ssh_readonly") is True
+        and plan.get("effective") == "trusted_operation"
+    ):
+        return False
+    desc = cfg.get("trusted_operations", {}).get("ssh-pinned-readonly", {})
+    roots = desc.get("permitted_roots") if isinstance(desc, dict) else None
+    if not isinstance(roots, list) or len(roots) != 1 or not isinstance(roots[0], str):
+        return False
+    policy_root = Path(roots[0])
+    if not policy_root.is_absolute() or policy_root.is_symlink():
+        return False
+    for name, field in (
+        ("ssh-policy.json", "pinned_ssh_policy_sha256"),
+        ("known_hosts", "pinned_ssh_known_hosts_sha256"),
+    ):
+        expected = cfg.get(field)
+        path = policy_root / name
+        if not isinstance(expected, str) or len(expected) != 64 or path.is_symlink():
+            return False
+        try:
+            actual = hashlib.sha256(path.read_bytes()).hexdigest()
+        except OSError:
+            return False
+        if not secrets.compare_digest(actual, expected):
+            return False
+    return True
+
+
 def public_write_plan(plan: dict) -> dict:
     return {k: v for k, v in plan.items() if k not in {"write_roots", "read_roots"}}
 
@@ -1143,6 +1178,19 @@ def _process_one_request(name: str, cfg: dict, preloaded_raw: bytes | None = Non
         _persist_then_publish(result, local_result, finished_marker, name, cfg)
         return
 
+    # Raw SSH/network copy is not an approved capability: the ordinary shell
+    # has network denied, while broad system-shell authority is prohibited.
+    # Reject before the native approval UI so operators are not asked to
+    # approve an operation that could never execute under this policy.
+    if high_impact_command_category(v["command"]) == "remote_shell_or_copy" and v.get("trusted_operation") is None:
+        result = result_envelope(v["id"], request_sha, "rejected", {
+            "cwd": str(v["cwd"]),
+            "message": "raw SSH/SCP/SFTP/rsync cannot be authorized by a popup; use a separately installed, host- and action-pinned trusted operation",
+            "policy_reason": "remote_shell_requires_pinned_capability",
+        })
+        _persist_then_publish(result, local_result, finished_marker, name, cfg)
+        return
+
     try:
         write_plan = resolve_write_plan(v, cfg)
     except Exception as exc:
@@ -1181,6 +1229,26 @@ def _process_one_request(name: str, cfg: dict, preloaded_raw: bytes | None = Non
             f"SHA-256: {approved_op.executable_sha256}\\n"
             f"Permitted roots: {', '.join(str(root) for root in approved_op.permitted_roots)}"
         )
+    # Installation-time consent applies only to these exact pinned,
+    # read-only SSH helper actions. Every other trusted operation must still
+    # pass the independent native operator approval gate.
+    if (v.get("trusted_operation") is not None
+            and v["trusted_operation"]["name"] == "ssh-pinned-readonly"
+            and cfg.get("preapproved_pinned_ssh_readonly") is True
+            and not pinned_ssh_readonly_preapproved(v, cfg, write_plan)):
+        result = result_envelope(v["id"], request_sha, "rejected", {
+            "message": "pinned SSH policy or known-host material changed since operator installation; re-provision locally",
+            "policy_reason": "ssh_policy_pin_mismatch",
+        })
+        _persist_then_publish(result, local_result, finished_marker, name, cfg)
+        return
+    if pinned_ssh_readonly_preapproved(v, cfg, write_plan):
+        category = None
+        confirmation = {
+            "required": False, "category": "pinned_ssh_readonly",
+            "mode": "operator_installed_capability", "approved": True,
+            "message": "fixed read-only action preapproved at installation",
+        }
     if category is not None:
         confirmation = request_operator_confirmation(
             request_id=v["id"], cwd=v["cwd"], command=approval_command, category=category, cfg=cfg,

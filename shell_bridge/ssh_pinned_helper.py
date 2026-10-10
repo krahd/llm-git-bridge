@@ -1,0 +1,122 @@
+#!/usr/bin/env python3
+"""Pinned remote SSH action runner; no arbitrary provider-supplied command.
+
+An operator must provision the policy directory and explicitly register this
+exact helper SHA in the trusted operation registry. Neither host, identity,
+command, nor SSH option is accepted from the agent's request.
+"""
+from __future__ import annotations
+
+import json
+import os
+from pathlib import Path
+import re
+import stat
+import subprocess
+import sys
+
+_ACTION = re.compile(r"[a-z][a-z0-9-]{2,63}\Z")
+_HOST = re.compile(r"[a-z0-9][a-z0-9.-]{0,252}\Z")
+_USER = re.compile(r"[a-z_][a-z0-9_-]{0,31}\Z")
+_COMMANDS = {"status": "/usr/bin/uptime", "identity": "/usr/bin/id -un"}
+_MAX_BYTES = 65536
+
+
+class SSHPolicyError(ValueError):
+    pass
+
+
+def _regular_owner_file(path: Path, parent: Path) -> None:
+    if not path.is_absolute() or path.parent != parent or path.is_symlink():
+        raise SSHPolicyError("unsafe SSH policy file path")
+    try:
+        info = path.stat()
+    except OSError as exc:
+        raise SSHPolicyError("SSH policy file unavailable") from exc
+    if not stat.S_ISREG(info.st_mode) or info.st_uid != os.getuid() or info.st_mode & 0o022:
+        raise SSHPolicyError("SSH policy file ownership or mode invalid")
+
+
+def load_policy(directory: Path, action: str) -> tuple[list[str], int]:
+    if not directory.is_absolute() or directory.is_symlink():
+        raise SSHPolicyError("policy directory must be absolute and not a symlink")
+    try:
+        info = directory.stat()
+    except OSError as exc:
+        raise SSHPolicyError("SSH policy directory unavailable") from exc
+    if not stat.S_ISDIR(info.st_mode) or info.st_uid != os.getuid() or info.st_mode & 0o022:
+        raise SSHPolicyError("SSH policy directory ownership or mode invalid")
+    if not _ACTION.fullmatch(action) or action not in _COMMANDS:
+        raise SSHPolicyError("unregistered or non-read-only SSH action")
+    path = directory / "ssh-policy.json"
+    known_hosts = directory / "known_hosts"
+    _regular_owner_file(path, directory)
+    _regular_owner_file(known_hosts, directory)
+    try:
+        data = json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, ValueError) as exc:
+        raise SSHPolicyError("invalid SSH policy") from exc
+    if not isinstance(data, dict) or set(data) != {"schema", "host", "user", "port", "identity_file"}:
+        raise SSHPolicyError("SSH policy fields are not pinned")
+    host, user, port, identity = (data[key] for key in ("host", "user", "port", "identity_file"))
+    if data["schema"] != 1 or not isinstance(host, str) or not _HOST.fullmatch(host):
+        raise SSHPolicyError("invalid pinned hostname")
+    if not isinstance(user, str) or not _USER.fullmatch(user):
+        raise SSHPolicyError("invalid pinned SSH account")
+    if isinstance(port, bool) or not isinstance(port, int) or not 1 <= port <= 65535:
+        raise SSHPolicyError("invalid pinned SSH port")
+    if not isinstance(identity, str):
+        raise SSHPolicyError("invalid SSH identity")
+    key = Path(identity)
+    if not key.is_absolute() or key.is_symlink() or not key.is_file():
+        raise SSHPolicyError("SSH identity file unavailable or symlinked")
+    key_info = key.stat()
+    if key_info.st_uid != os.getuid() or key_info.st_mode & 0o077:
+        raise SSHPolicyError("SSH private identity ownership or permissions invalid")
+    # This helper invokes exactly one pinned, read-only remote program.
+    # Disable user SSH configuration, arbitrary options, proxy helpers, shell
+    # interactivity and forwarding even when the Mac user's dotfiles differ.
+    argv = [
+        "/usr/bin/ssh", "-F", "/dev/null", "-T", "-n",
+        "-o", "BatchMode=yes", "-o", "StrictHostKeyChecking=yes",
+        "-o", "IdentitiesOnly=yes", "-o", "ClearAllForwardings=yes",
+        "-o", "ForwardAgent=no", "-o", "PermitLocalCommand=no",
+        "-o", "ControlMaster=no", "-o", "ProxyCommand=none",
+        "-o", "ConnectTimeout=8",
+        "-o", "UserKnownHostsFile=" + str(known_hosts),
+        "-i", str(key), "-p", str(port),
+        user + "@" + host, _COMMANDS[action],
+    ]
+    return argv, 25
+
+
+def execute(action: str, directory: str) -> int:
+    argv, timeout = load_policy(Path(directory), action)
+    try:
+        p = subprocess.run(argv, capture_output=True, timeout=timeout, check=False)
+    except (OSError, subprocess.TimeoutExpired):
+        print("PINNED_SSH_INDETERMINATE_OR_UNAVAILABLE", file=sys.stderr)
+        return 76
+    if p.returncode != 0:
+        print("PINNED_SSH_FAILED; CHECK HOST KEY, NETWORK AND REMOTE ACCOUNT", file=sys.stderr)
+        return 1
+    if len(p.stdout) > _MAX_BYTES or len(p.stderr) > _MAX_BYTES:
+        print("PINNED_SSH_OUTPUT_LIMIT", file=sys.stderr)
+        return 1
+    sys.stdout.buffer.write(p.stdout)
+    return 0
+
+
+def main(args: list[str]) -> int:
+    if len(args) != 3:
+        print("usage: ssh_pinned_helper.py ACTION PINNED_POLICY_DIRECTORY", file=sys.stderr)
+        return 2
+    try:
+        return execute(args[1], args[2])
+    except SSHPolicyError as exc:
+        print("PINNED_SSH_DENIED: " + str(exc), file=sys.stderr)
+        return 2
+
+
+if __name__ == "__main__":
+    raise SystemExit(main(sys.argv))

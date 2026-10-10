@@ -186,7 +186,8 @@ cp "$SCRIPT_DIR/workspace.py" "$INSTALL_DIR/workspace.py"
 cp "$SCRIPT_DIR/approval_helper.py" "$INSTALL_DIR/approval_helper.py"
 cp "$SCRIPT_DIR/trusted_operations.py" "$INSTALL_DIR/trusted_operations.py"
 cp "$SCRIPT_DIR/bridge_mailbox_inspector.py" "$INSTALL_DIR/bridge_mailbox_inspector.py"
-chmod 700 "$INSTALL_DIR/bridge.py" "$INSTALL_DIR/workspace.py" "$INSTALL_DIR/approval_helper.py" "$INSTALL_DIR/trusted_operations.py" "$INSTALL_DIR/bridge_mailbox_inspector.py"
+cp "$SCRIPT_DIR/ssh_pinned_helper.py" "$INSTALL_DIR/ssh_pinned_helper.py"
+chmod 700 "$INSTALL_DIR/bridge.py" "$INSTALL_DIR/workspace.py" "$INSTALL_DIR/approval_helper.py" "$INSTALL_DIR/trusted_operations.py" "$INSTALL_DIR/bridge_mailbox_inspector.py" "$INSTALL_DIR/ssh_pinned_helper.py"
 SOURCE_COMMIT="$(git -C "$SCRIPT_DIR/.." rev-parse HEAD)"
 python3 - "$INSTALL_DIR/install-manifest.json" "$SOURCE_COMMIT" "$INSTALL_DIR/bridge.py" "$INSTALL_DIR/workspace.py" "$INSTALL_DIR/approval_helper.py" "$INSTALL_DIR/trusted_operations.py" "$INSTALL_DIR/bridge_mailbox_inspector.py" <<'PYMAN'
 import hashlib,json,sys
@@ -259,6 +260,52 @@ if os.environ.get("REGISTER_MAILBOX_INSPECTOR") == "1":
         "permitted_actions":["inspect"],
     }
     cfg["trusted_operations"]=ops
+# An opt-in operator-owned, host-pinned SSH policy may register a fixed,
+# no-arbitrary-command remote status helper. No host or command is chosen by
+# the agent's request.
+ssh_dir=os.environ.get("REGISTER_PINNED_SSH_POLICY_DIR")
+if ssh_dir:
+    import importlib.util
+    directory=Path(ssh_dir)
+    executable=Path(install_dir)/"ssh_pinned_helper.py"
+    if not directory.is_absolute() or directory.is_symlink():
+        raise SystemExit("SSH policy directory must be absolute and non-symlinked")
+    root=Path(allowed).resolve()
+    for item in (directory.resolve(),executable.resolve()):
+        try:
+            item.relative_to(root)
+        except ValueError:
+            pass
+        else:
+            raise SystemExit("refusing agent-writable SSH capability")
+    if executable.is_symlink() or not executable.is_file():
+        raise SystemExit("pinned SSH helper unavailable")
+    module=importlib.util.spec_from_file_location("pinned_ssh_helper",str(executable))
+    helper=importlib.util.module_from_spec(module)
+    module.loader.exec_module(helper)
+    for action in ("status","identity"):
+        helper.load_policy(directory,action)
+    ssh_identity=Path(json.loads((directory/"ssh-policy.json").read_text(encoding="utf-8"))["identity_file"])
+    try:
+        ssh_identity.resolve().relative_to(root)
+    except ValueError:
+        pass
+    else:
+        raise SystemExit("refusing agent-writable SSH private identity")
+    ops=cfg.get("trusted_operations",{})
+    if not isinstance(ops,dict) or "ssh-pinned-readonly" in ops:
+        raise SystemExit("existing or malformed SSH trusted helper registration")
+    ops=dict(ops)
+    ops["ssh-pinned-readonly"]={
+        "executable":str(executable),
+        "executable_sha256":hashlib.sha256(executable.read_bytes()).hexdigest(),
+        "permitted_roots":[str(directory)],
+        "permitted_actions":["status","identity"],
+    }
+    cfg["trusted_operations"]=ops
+    cfg["preapproved_pinned_ssh_readonly"]=True
+    cfg["pinned_ssh_policy_sha256"]=hashlib.sha256((directory/"ssh-policy.json").read_bytes()).hexdigest()
+    cfg["pinned_ssh_known_hosts_sha256"]=hashlib.sha256((directory/"known_hosts").read_bytes()).hexdigest()
 with open(path,'w',encoding='utf-8') as f: json.dump(cfg,f,indent=2,sort_keys=True); f.write('\n')
 PY
 chmod 600 "$CONFIG_DIR/config.json"

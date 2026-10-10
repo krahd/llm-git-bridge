@@ -83,3 +83,23 @@ release worktree and invokes `bash shell_bridge/v6_release_once.sh`.
 
 Do not claim full ecosystem migration or retire other staging instances until
 their independent mailbox/journal ownership and provider routing are reconciled.
+
+## Required pinned SSH acceptance (added before v5 sunset)
+
+The operator must provide `V6_SSH_POLICY_DIR` in the same terminal invocation.
+This is an explicit prerequisite for retirement, not a request for additional
+privileges. The directory must already contain a secure operator-owned
+`ssh-policy.json` declaring a host, user, port and owner-only private key,
+plus its corresponding pinned `known_hosts`. The installer receives that
+directory via `REGISTER_PINNED_SSH_POLICY_DIR`, SHA-pins the helper and
+host-key material, and preauthorizes only fixed read-only `status` and
+`identity` actions. The full one-run controller then sends a *single* status
+request through isolated v6 and production v6, using exact request hashes
+and no-prompt authorization. A missing profile, altered key, unavailable host,
+or ambiguous remote result holds rather than retiring v5.
+
+This is an intentionally minimal first SSH capability. It does not claim
+arbitrary interactive remote shell access or unrestricted SSH deployment.
+Additional host/operation profiles require explicit policy design and
+installation before v5 parity can be asserted. Do not run the older
+unqualified release command; it lacks the operator-pinned SSH profile.

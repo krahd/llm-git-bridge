@@ -48,6 +48,19 @@ class SingleRunReleaseContractTests(unittest.TestCase):
         self.assertIn('recovery_fault_injection_live_verified":False', SCRIPT)
         self.assertIn('legacy_state_preserved":True', SCRIPT)
 
+    def test_ssh_requires_operator_policy_and_live_dual_smoke(self):
+        self.assertIn('V6_SSH_POLICY_DIR', SCRIPT)
+        self.assertIn('REGISTER_PINNED_SSH_POLICY_DIR="$V6_SSH_POLICY_DIR"', SCRIPT)
+        stage = SCRIPT.index('ssh_status_canary "$CANDIDATE_ROOT" "$CANDIDATE_ALLOWED" staging')
+        cutover = SCRIPT.index('bash shell_bridge/cutover.sh')
+        prod = SCRIPT.index('ssh_status_canary "$PROD_ROOT" "$PROD_ALLOWED" production')
+        retirement = SCRIPT.index('echo "Phase 8: archive stopped production v5')
+        self.assertLess(stage, cutover)
+        self.assertLess(cutover, prod)
+        self.assertLess(prod, retirement)
+        self.assertIn("verify_v6_pinned_ssh.py", SCRIPT)
+        self.assertIn("ambiguous SSH smoke submission", SCRIPT)
+
     def test_register_read_only_inspector_only_opt_in(self):
         self.assertIn('REGISTER_MAILBOX_INSPECTOR=1', SCRIPT)
         self.assertIn('if os.environ.get("REGISTER_MAILBOX_INSPECTOR") == "1":', INSTALL)

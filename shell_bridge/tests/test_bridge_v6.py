@@ -252,6 +252,69 @@ class V6ApprovalHelperSourceTests(unittest.TestCase):
         self.assertIn("NSApplication.shared", gui)
         self.assertIn("NSStatusBar.system.statusItem", gui)
 
+
+class RemoteExecutionApprovalFatigueTests(unittest.TestCase):
+    def test_raw_ssh_commands_are_classified_as_remote_effects(self):
+        for command in (
+            "ssh server.example.org uptime",
+            "scp report.txt server.example.org:/tmp/report.txt",
+            "sftp server.example.org",
+            "rsync -av directory/ server.example.org:/srv/",
+        ):
+            with self.subTest(command=command):
+                self.assertEqual(
+                    bridge.high_impact_command_category(command),
+                    "remote_shell_or_copy",
+                )
+
+    def test_installer_consent_only_exempts_unchanged_fixed_ssh_reads(self):
+        import hashlib
+        import tempfile
+        from pathlib import Path
+        with tempfile.TemporaryDirectory(dir=Path.cwd()) as temporary:
+            directory = Path(temporary)
+            policy = directory / "ssh-policy.json"
+            known = directory / "known_hosts"
+            policy.write_text('{"host":"example.invalid"}')
+            known.write_text("example.invalid ssh-ed25519 pinned")
+            cfg = {
+                "preapproved_pinned_ssh_readonly": True,
+                "trusted_operations": {
+                    "ssh-pinned-readonly": {"permitted_roots": [str(directory)]}
+                },
+                "pinned_ssh_policy_sha256": hashlib.sha256(policy.read_bytes()).hexdigest(),
+                "pinned_ssh_known_hosts_sha256": hashlib.sha256(known.read_bytes()).hexdigest(),
+            }
+            plan = {"effective": "trusted_operation"}
+            query = lambda action: {
+                "trusted_operation": {"name": "ssh-pinned-readonly", "action": action}
+            }
+            for action in ("status", "identity"):
+                self.assertTrue(bridge.pinned_ssh_readonly_preapproved(
+                    query(action), cfg, plan))
+            for action in ("delete", "ssh", "status --anything"):
+                self.assertFalse(bridge.pinned_ssh_readonly_preapproved(
+                    query(action), cfg, plan))
+            self.assertFalse(bridge.pinned_ssh_readonly_preapproved(
+                query("status"), cfg, {"effective": "system"}))
+            known.write_text("CHANGED HOST KEY")
+            self.assertFalse(bridge.pinned_ssh_readonly_preapproved(
+                query("status"), cfg, plan))
+            known.write_text("example.invalid ssh-ed25519 pinned")
+            policy.write_text("CHANGED TARGET")
+            self.assertFalse(bridge.pinned_ssh_readonly_preapproved(
+                query("status"), cfg, plan))
+            self.assertFalse(bridge.pinned_ssh_readonly_preapproved(
+                query("status"), {"preapproved_pinned_ssh_readonly": True}, plan))
+
+    def test_raw_remote_shell_rejected_before_approval_popup(self):
+        from pathlib import Path
+        source = Path(bridge.__file__).read_text(encoding="utf-8")
+        preflight = source.index('remote_shell_requires_pinned_capability')
+        approval = source.index('confirmation = request_operator_confirmation(')
+        self.assertLess(preflight, approval)
+        self.assertIn("raw SSH/SCP/SFTP/rsync cannot be authorized by a popup", source)
+
 if __name__ == "__main__": unittest.main()
 
 class BridgeMenuIconAssetTests(unittest.TestCase):
