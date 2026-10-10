@@ -297,6 +297,8 @@ if ssh_dir:
     }
     cfg["trusted_operations"]=ops
     cfg["preapproved_pinned_ssh_readonly"]=True
+    cfg["pinned_ssh_policy_sha256"]=hashlib.sha256((directory/"ssh-policy.json").read_bytes()).hexdigest()
+    cfg["pinned_ssh_known_hosts_sha256"]=hashlib.sha256((directory/"known_hosts").read_bytes()).hexdigest()
 with open(path,'w',encoding='utf-8') as f: json.dump(cfg,f,indent=2,sort_keys=True); f.write('\n')
 PY
 chmod 600 "$CONFIG_DIR/config.json"
