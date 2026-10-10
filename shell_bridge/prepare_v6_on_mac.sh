@@ -54,9 +54,19 @@ if [ -e "$config" ] || [ -e "$plist" ] || [ -e "$install" ] || [ -e "$state" ]; 
   echo "HOLD: candidate installation already exists. Reconcile before reuse; nothing overwritten." >&2; exit 6
 fi
 if [ -z "${RCLONE_REMOTE:-}" ]; then
-  echo "HOLD: RCLONE_REMOTE must explicitly name your existing configured Drive remote (e.g. chatgpt-git-bridge:)." >&2
-  exit 7
+  RCLONE_REMOTE="$(python3 - "$HOME/.config/chatgpt-shell-bridge/config.json" <<'PYREMOTE'
+import json,sys
+try:
+    value=json.load(open(sys.argv[1],encoding='utf-8')).get('remote')
+except (OSError, ValueError):
+    raise SystemExit('HOLD: legacy bridge config unavailable; specify RCLONE_REMOTE explicitly')
+if not isinstance(value,str) or not value.endswith(':'):
+    raise SystemExit('HOLD: legacy remote invalid; specify RCLONE_REMOTE explicitly')
+print(value)
+PYREMOTE
+)"
 fi
+export RCLONE_REMOTE
 ALLOWED_ROOT="${ALLOWED_ROOT:-$HOME/tom-repos}" \
 BASE_PATH="Local Executor Bridge v6 Candidate ${source_commit:0:12}" \
 LOCAL_EXECUTOR_LABEL="$label" \
