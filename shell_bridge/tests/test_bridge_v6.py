@@ -158,6 +158,17 @@ class BridgeV6SecurityTests(unittest.TestCase):
             self.assertEqual(plan["effective"], "system")
             self.assertIn("confirmation_category", plan)
 
+    def test_native_approval_explains_irreversible_changes(self):
+        swift = (ROOT / "approval_gui.swift").read_text(encoding="utf-8")
+        self.assertIn("Review high-impact action", swift)
+        self.assertIn("A file may be deleted permanently", swift)
+        self.assertIn("Untracked content may be unrecoverable", swift)
+        self.assertIn("Git reset or clean may permanently discard", swift)
+        self.assertIn("riskDescription(req.category)", swift)
+        self.assertIn('alert.addButton(withTitle: "Reject")', swift)
+        self.assertIn('alert.addButton(withTitle: "Review later")', swift)
+        self.assertIn('alert.addButton(withTitle: "Allow once")', swift)
+
     def test_operator_approval_path_has_no_authentication_primitives(self):
         approval_sources = [ROOT / "approval_helper.py", ROOT / "approval_gui.swift", ROOT / "bridge.py"]
         forbidden = (

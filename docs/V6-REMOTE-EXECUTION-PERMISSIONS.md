@@ -89,3 +89,23 @@ or privilege escalation. Do not treat the optional status helper as evidence
 that broad SSH work is accepted or that the previous v5 workflows have been
 replaced. Configuration and a live known-host and identity acceptance test
 remain necessary on the owner's Mac.
+
+## Second independent command-risk review
+
+An adversarial review of the shell-command classifier found that repository
+scope does not imply reversibility: deleting an untracked file with plain
+`rm` or `unlink` may be irreversible despite the Git sandbox. The direct
+command-risk classifier now requests explicit confirmation for such deletions
+(including without `-r` or `-f`). It also recognizes common split-flag
+`git clean -d -f`, `git -C ... reset --hard`, and recursive delete variants.
+Routine `git status`, `git diff`, `git clean -n` and tracked `git rm`
+remain distinct.
+
+**This is a heuristic and cannot fully classify arbitrary shell programs.**
+A wrapper program, dynamic shell construction, Python script or build tool
+can perform an effect that is not syntactically visible in the submitted
+command. Filesystem and network sandboxing, coordinator isolation, worktree
+checkpoints and external-side-effect restrictions remain essential; an agent
+must not describe high-impact classification alone as an irreversible-action
+security boundary. Do not treat local source tests as a substitute for live
+recovery and final operator acceptance.

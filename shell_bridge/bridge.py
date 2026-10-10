@@ -255,6 +255,29 @@ def prohibited_command_reason(command: str) -> str | None:
 
 
 def high_impact_command_category(command: str) -> str | None:
+    # Avoid obvious shell option-splitting omissions in the direct-command
+    # classifier. This is a high-impact alert heuristic, NOT a proof that
+    # arbitrary shell text is reversible or safe.
+    if re.search(
+        r"(?im)(?<![\w-])git(?:\s+-C\s+\S+)*\s+(?:reset\b[^\n;|&]*--hard\b|clean\b[^\n;|&]*(?:--force\b|\s-[A-Za-z]*f[A-Za-z]*\b))",
+        command,
+    ):
+        return "git_destructive_local"
+    if re.search(
+        r"(?im)(?:^|[;&|]\s*|\n)\s*(?:sudo\s+)?rm\b[^\n;]*\s+(?:--recursive\b|-[A-Za-z]*[rR][A-Za-z]*\b)",
+        command,
+    ):
+        return "filesystem_recursive_delete"
+    # Pure help/version queries are inert; don't fatigue the operator.
+    if re.fullmatch(r"(?is)\s*(?:rm|unlink)\s+(?:--help|--version|-h)\s*", command):
+        return None
+    # Even a single rm/unlink can irreversibly remove an untracked file.
+    # Git containment does not make this operation automatically undoable.
+    if re.search(
+        r"(?im)(?:^|[;&|]\s*|\n)\s*(?:sudo\s+)?(?:rm|unlink)\b",
+        command,
+    ):
+        return "filesystem_delete"
     # Network/control-plane effects cannot be made read-only by a filesystem sandbox.
     # These rules are therefore an additional approval gate, not the primary sandbox.
     for category, pattern in HIGH_IMPACT_COMMAND_RULES:
