@@ -25,6 +25,10 @@ if [ -z "${V6_SSH_POLICY_DIR:-}" ]; then
 fi
 REGISTER_PINNED_SSH_POLICY_DIR="$V6_SSH_POLICY_DIR"
 export REGISTER_PINNED_SSH_POLICY_DIR
+case "${V6_REQUIRE_INBOUND_SSH:-0}" in
+  0|1) ;;
+  *) fail "V6_REQUIRE_INBOUND_SSH must be exactly 0 or 1; no SSH gate silently skipped" ;;
+esac
 if [ "${V6_REQUIRE_INBOUND_SSH:-0}" = 1 ]; then
   echo "Optional inbound SSH acceptance enabled: Remote Login must be restricted to the current account."
   inbound_ready=0
