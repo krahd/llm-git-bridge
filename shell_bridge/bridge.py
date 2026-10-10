@@ -20,6 +20,7 @@ import time
 from pathlib import Path
 
 from trusted_operations import registered_operation_from_config, TrustedOperationPolicyError
+from ssh_pinned_helper import load_policy as load_pinned_ssh_policy, SSHPolicyError
 
 PROTOCOL = 1
 VERSION = "6"
@@ -1307,6 +1308,22 @@ def _process_one_request(name: str, cfg: dict, preloaded_raw: bytes | None = Non
             f"SHA-256: {approved_op.executable_sha256}\\n"
             f"Permitted roots: {', '.join(str(root) for root in approved_op.permitted_roots)}"
         )
+        if approved_op.name == "ssh-pinned-readonly":
+            try:
+                ssh_argv, _ = load_pinned_ssh_policy(
+                    approved_op.permitted_roots[0],
+                    v["trusted_operation"]["action"],
+                )
+            except (SSHPolicyError, OSError, IndexError) as exc:
+                result = result_envelope(v["id"], request_sha, "rejected", {
+                    "message": "pinned SSH action cannot be reviewed: " + str(exc),
+                })
+                _persist_then_publish(result, local_result, finished_marker, name, cfg)
+                return
+            approval_command += (
+                f"\\nRemote destination: {ssh_argv[-2]}"
+                f"\\nExact reviewed remote command: {ssh_argv[-1]}"
+            )
     # Installation-time consent applies only to these exact pinned,
     # read-only SSH helper actions. Every other trusted operation must still
     # pass the independent native operator approval gate.
