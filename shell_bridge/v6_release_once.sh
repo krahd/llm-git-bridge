@@ -15,7 +15,7 @@ done
 [ -z "$(git status --porcelain)" ] || fail "release worktree is dirty"
 SOURCE="$(git rev-parse HEAD)"
 [ "${#SOURCE}" -eq 40 ] || fail "invalid source identity"
-[ "$(git rev-parse refs/remotes/origin/main 2>/dev/null)" = "$SOURCE" ] ||\n  fail "this worktree is not the freshly fetched canonical origin/main release"
+[ "$(git rev-parse refs/remotes/origin/main 2>/dev/null)" = "$SOURCE" ] || fail "this worktree is not the freshly fetched canonical origin/main release"
 echo "RELEASE_SOURCE=$SOURCE"
 echo "Phase 1: macOS regressions, live owner inventory, isolated v6 startup and smoke"
 REGISTER_MAILBOX_INSPECTOR=1 bash shell_bridge/prepare_v6_on_mac.sh
