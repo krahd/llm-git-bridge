@@ -189,9 +189,9 @@ cp "$SCRIPT_DIR/bridge_mailbox_inspector.py" "$INSTALL_DIR/bridge_mailbox_inspec
 cp "$SCRIPT_DIR/ssh_pinned_helper.py" "$INSTALL_DIR/ssh_pinned_helper.py"
 chmod 700 "$INSTALL_DIR/bridge.py" "$INSTALL_DIR/workspace.py" "$INSTALL_DIR/approval_helper.py" "$INSTALL_DIR/trusted_operations.py" "$INSTALL_DIR/bridge_mailbox_inspector.py" "$INSTALL_DIR/ssh_pinned_helper.py"
 SOURCE_COMMIT="$(git -C "$SCRIPT_DIR/.." rev-parse HEAD)"
-python3 - "$INSTALL_DIR/install-manifest.json" "$SOURCE_COMMIT" "$INSTALL_DIR/bridge.py" "$INSTALL_DIR/workspace.py" "$INSTALL_DIR/approval_helper.py" "$INSTALL_DIR/trusted_operations.py" "$INSTALL_DIR/bridge_mailbox_inspector.py" <<'PYMAN'
+python3 - "$INSTALL_DIR/install-manifest.json" "$SOURCE_COMMIT" "$INSTALL_DIR/bridge.py" "$INSTALL_DIR/workspace.py" "$INSTALL_DIR/approval_helper.py" "$INSTALL_DIR/trusted_operations.py" "$INSTALL_DIR/bridge_mailbox_inspector.py" "$INSTALL_DIR/ssh_pinned_helper.py" <<'PYMAN'
 import hashlib,json,sys
-manifest_path,source_commit,bridge_path,workspace_path,approval_helper_path,trusted_path,inspector_path=sys.argv[1:]
+manifest_path,source_commit,bridge_path,workspace_path,approval_helper_path,trusted_path,inspector_path,ssh_path=sys.argv[1:]
 def sha256(path):
     with open(path,'rb') as f:
         return hashlib.sha256(f.read()).hexdigest()
@@ -203,6 +203,7 @@ manifest={
     'approval_helper_sha256':sha256(approval_helper_path),
     'trusted_operations_sha256':sha256(trusted_path),
     'bridge_mailbox_inspector_sha256':sha256(inspector_path),
+    'ssh_pinned_helper_sha256':sha256(ssh_path),
 }
 with open(manifest_path,'w',encoding='utf-8') as f:
     json.dump(manifest,f,indent=2,sort_keys=True)
