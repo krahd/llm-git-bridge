@@ -41,6 +41,15 @@ def _regular_owner_file(path: Path, parent: Path) -> None:
         raise SSHPolicyError("SSH policy file ownership or mode invalid")
 
 
+def _no_duplicate_json_keys(pairs: list[tuple[str, object]]) -> dict:
+    result = {}
+    for key, value in pairs:
+        if key in result:
+            raise SSHPolicyError("duplicate SSH policy key")
+        result[key] = value
+    return result
+
+
 def load_policy(directory: Path, action: str) -> tuple[list[str], int]:
     if not directory.is_absolute() or directory.is_symlink():
         raise SSHPolicyError("policy directory must be absolute and not a symlink")
@@ -57,7 +66,7 @@ def load_policy(directory: Path, action: str) -> tuple[list[str], int]:
     _regular_owner_file(path, directory)
     _regular_owner_file(known_hosts, directory)
     try:
-        data = json.loads(path.read_text(encoding="utf-8"))
+        data = json.loads(path.read_text(encoding="utf-8"), object_pairs_hook=_no_duplicate_json_keys)
     except (OSError, ValueError) as exc:
         raise SSHPolicyError("invalid SSH policy") from exc
     required = {"schema", "host", "user", "port", "identity_file"}
