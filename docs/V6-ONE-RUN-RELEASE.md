@@ -206,3 +206,18 @@ remain unavoidable live checks. Do not automate these approvals.
 For source qualification only, `V6_RELEASE_DRY_RUN=1` exercises creation
 of an isolated source worktree without launching the release controller.
 No dry-run output claims production acceptance.
+
+## Local Git hook isolation during source preparation
+
+A Git checkout's `.git/hooks/post-checkout` directory is local-only state,
+not controlled by canonical GitHub `main`. Preparing a new detached worktree
+can otherwise execute a stale, unpublished local hook before any migration
+approval. The isolated source launcher forces `core.hooksPath=/dev/null` for
+its `git worktree add` invocation so the release source does not execute
+those local checkout hooks. Mac regression coverage installs a deliberately
+side-effecting local test hook and confirms it was not invoked.
+
+This prevents one known local code-execution path during source preparation.
+It does not claim that arbitrary Git filters, system-wide executable
+configuration or third-party credential helpers have been audited or that
+a GitHub checkout is a sandbox. Production activation remains guarded.

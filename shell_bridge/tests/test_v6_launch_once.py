@@ -63,6 +63,15 @@ class OneRunDirtyCheckoutLauncherTests(unittest.TestCase):
         self.assertEqual(git("status", "--porcelain", cwd=release), "")
         self.assertEqual(git("rev-parse", "--abbrev-ref", "HEAD", cwd=release), "HEAD")
 
+    def test_unpublished_local_git_checkout_hook_cannot_run_in_release(self):
+        marker = self.home / "unexpected-post-checkout-effect"
+        hook = self.original / ".git" / "hooks" / "post-checkout"
+        hook.write_text('#!/bin/sh\\nprintf triggered > "' + str(marker) + '"\\n')
+        hook.chmod(0o755)
+        result = self.run_launcher()
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertFalse(marker.exists(), "local untracked checkout hook executed")
+
     def test_existing_release_worktree_is_not_replayed_or_overwritten(self):
         first = self.run_launcher()
         self.assertEqual(first.returncode, 0, first.stderr)
