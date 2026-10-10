@@ -88,5 +88,5 @@ class InstallScriptTests(unittest.TestCase):
         self.assertIn("'bridge_mailbox_inspector_sha256':sha256(inspector_path)", self.text)
         self.assertNotIn("registered['bridge-mailbox-inspect']", self.text)
         self.assertIn('"$INSTALL_DIR/bridge_mailbox_inspector.py"', self.text)
-\nif __name__ == "__main__":
+if __name__ == "__main__":
     unittest.main()
