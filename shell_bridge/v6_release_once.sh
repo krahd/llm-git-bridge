@@ -204,7 +204,7 @@ fd,tmp=tempfile.mkstemp(prefix=".v6-acceptance-",dir=os.path.dirname(path))
 try:
     with os.fdopen(fd,"w",encoding="utf-8") as f:
         json.dump(receipt,f,sort_keys=True,indent=2)
-        f.write("\\n");f.flush();os.fsync(f.fileno())
+        f.write(chr(10));f.flush();os.fsync(f.fileno())
     os.chmod(tmp,0o600)
     os.replace(tmp,path)
 finally:
