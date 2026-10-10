@@ -59,6 +59,8 @@ class SingleRunReleaseContractTests(unittest.TestCase):
         self.assertLess(cutover, prod)
         self.assertLess(prod, retirement)
         self.assertIn("verify_v6_pinned_ssh.py", SCRIPT)
+        self.assertIn("setup_v6_pinned_ssh.py", SCRIPT)
+        self.assertIn("SSH enrollment incomplete; production v5 has not been modified", SCRIPT)
         self.assertIn("ambiguous SSH smoke submission", SCRIPT)
 
     def test_register_read_only_inspector_only_opt_in(self):
