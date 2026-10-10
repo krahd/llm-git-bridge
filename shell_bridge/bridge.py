@@ -512,7 +512,8 @@ def pinned_ssh_readonly_preapproved(request: dict, cfg: dict, plan: dict) -> boo
     """Only built-in read actions may skip a popup after enrollment."""
     operation = request.get("trusted_operation")
     return (isinstance(operation, dict)
-                and pinned_ssh_material_unchanged(request, cfg, plan))
+            and operation.get("action") in {"status", "identity"}
+            and pinned_ssh_material_unchanged(request, cfg, plan))
 
 
 def pinned_ssh_material_unchanged(request: dict, cfg: dict, plan: dict) -> bool:
@@ -521,7 +522,6 @@ def pinned_ssh_material_unchanged(request: dict, cfg: dict, plan: dict) -> bool:
     if not (
         isinstance(operation, dict)
         and operation.get("name") == "ssh-pinned-readonly"
-        and operation.get("action") in {"status", "identity"}
         and cfg.get("preapproved_pinned_ssh_readonly") is True
         and plan.get("effective") == "trusted_operation"
     ):
