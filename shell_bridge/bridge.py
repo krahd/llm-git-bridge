@@ -1320,6 +1320,12 @@ def _process_one_request(name: str, cfg: dict, preloaded_raw: bytes | None = Non
                 })
                 _persist_then_publish(result, local_result, finished_marker, name, cfg)
                 return
+            if len(ssh_argv[-1]) > 1024:
+                result = result_envelope(v["id"], request_sha, "rejected", {
+                    "message": "SSH profile command too long for meaningful operator review",
+                })
+                _persist_then_publish(result, local_result, finished_marker, name, cfg)
+                return
             approval_command += (
                 f"\\nRemote destination: {ssh_argv[-2]}"
                 f"\\nExact reviewed remote command: {ssh_argv[-1]}"
