@@ -188,7 +188,10 @@ if [ -d "$LEGACY_STATE_DIR/approvals/pending" ]; then
   [ "${#LEGACY_PENDING_APPROVALS[@]}" -eq 0 ] || fail "legacy production state has pending approval records; reconcile them before cutover"
 fi
 
-PENDING="$("${R[@]}" lsf "${REMOTE}requests" --files-only 2>/dev/null | sed '/^[[:space:]]*$/d' | head -n 1 || true)"
+# An unreadable mailbox is not an empty mailbox. Never cut over on an
+# rclone failure, including a broken pipe from truncating its output.
+PENDING="$("${R[@]}" lsf "${REMOTE}requests" --files-only)" || fail "cannot list production request mailbox before cutover"
+PENDING="$(printf '%s\n' "$PENDING" | sed '/^[[:space:]]*$/d')"
 [ -z "$PENDING" ] || fail "production request mailbox is not empty; finish or reconcile pending requests first"
 
 ROLLBACK_FILE="$(mktemp)"
@@ -216,11 +219,14 @@ done
 # Close the drain race: after legacy consumers are stopped, refuse to attach v6
 # if a request arrived while the stop sequence was in progress. Rollback will
 # restore any legacy consumers that were actually stopped.
-PENDING_AFTER_STOP="$("${R[@]}" lsf "${REMOTE}requests" --files-only 2>/dev/null | sed '/^[[:space:]]*$/d' | head -n 1 || true)"
+PENDING_AFTER_STOP="$("${R[@]}" lsf "${REMOTE}requests" --files-only)" || fail "cannot list production request mailbox after stopping legacy consumers"
+PENDING_AFTER_STOP="$(printf '%s\n' "$PENDING_AFTER_STOP" | sed '/^[[:space:]]*$/d')"
 [ -z "$PENDING_AFTER_STOP" ] || fail "a request arrived during cutover drain; restoring legacy consumers before retry"
 
-launchctl bootstrap "gui/${UID_NOW}" "$NEW_PLIST"
+# From here a partially successful bootstrap may already have started v6,
+# even when launchctl reports failure. Fail closed and require journal review.
 STARTED_NEW=1
+launchctl bootstrap "gui/${UID_NOW}" "$NEW_PLIST"
 launchctl kickstart -k "gui/${UID_NOW}/${NEW_LABEL}"
 launchctl print "gui/${UID_NOW}/${NEW_LABEL}" >/dev/null || fail "v6 LaunchAgent did not start"
 python3 "$NEW_INSTALL_DIR/bridge.py" doctor --config "$NEW_CONFIG" >/dev/null || fail "v6 doctor failed after service switch"
