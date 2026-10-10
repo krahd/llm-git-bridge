@@ -32,7 +32,7 @@ Mac. The entrypoint holds on real uncertainty instead of coercing migration.
    only recognized consumers of the target production mailbox and starts v6.
 6. Require hash-bound production read-only smoke and an additional native
    production approval before accepting the provisional handover.
-7. Archive only the production v5 LaunchAgent plists that were actually stopped,
+7. Re-audit loaded LaunchAgents after cutover and require exactly one owner\n   of the production mailbox; any reloaded legacy or unknown consumer holds.\n8. Archive only the production v5 LaunchAgent plists that were actually stopped,
    after verifying v6 remains loaded. Keep v5 journals, configs, Git worktrees,
    rollback evidence and all unrelated staging services intact. The archive
    prevents those specific legacy production plists being auto-loaded at the
