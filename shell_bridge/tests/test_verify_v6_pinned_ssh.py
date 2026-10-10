@@ -26,6 +26,24 @@ class PinnedSSHAcceptanceTests(unittest.TestCase):
             },
         }
 
+    def test_builder_matches_real_bridge_request_admission(self):
+        import tempfile
+        import bridge
+        with tempfile.TemporaryDirectory() as td:
+            req = make_request(self.rid, td)
+            admitted = bridge.validate_request(
+                req, self.rid + ".json", pathlib.Path(td), max_timeout=300)
+            self.assertEqual(admitted["operation_id"], self.rid)
+            self.assertEqual(admitted["trusted_operation"]["action"], "status")
+
+    def test_invalid_shell_id_is_rejected_before_remote_upload(self):
+        import tempfile
+        from verify_v6_pinned_ssh import main
+        with tempfile.TemporaryDirectory() as td:
+            path = pathlib.Path(td) / "request.json"
+            self.assertEqual(main(["canary", "create", str(path), "v6-ssh-abc-$", td]), 1)
+            self.assertFalse(path.exists())
+
     def test_exact_installed_ssh_status(self):
         verify(self.raw, self.result, self.rid)
         self.assertEqual(make_request(self.rid, "/tmp")["operation_id"], self.rid)
