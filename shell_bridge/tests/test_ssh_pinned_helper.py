@@ -107,6 +107,12 @@ class PinnedSSHHelperTests(unittest.TestCase):
         with self.assertRaises(helper.SSHPolicyError):
             helper.load_policy(self.root, "status")
 
+    def test_refuses_boolean_schema_version(self):
+        self.data["schema"] = True
+        self.write_policy()
+        with self.assertRaises(helper.SSHPolicyError):
+            helper.load_policy(self.root, "status")
+
     def test_refuses_unexpected_policy_fields(self):
         self.data["command"] = "rm -rf /"
         self.write_policy()
