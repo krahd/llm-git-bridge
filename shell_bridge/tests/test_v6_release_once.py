@@ -62,6 +62,19 @@ class SingleRunReleaseContractTests(unittest.TestCase):
         self.assertRegex(value, r"\\Av6-ssh-staging-[0-9]{14}-[0-9]+\\Z")
         self.assertNotIn("$", value)
 
+    def test_inbound_ssh_requires_real_separate_device_witness_before_cutover(self):
+        local_switch = SCRIPT.index('inbound_ssh_preflight.py')
+        challenge = SCRIPT.index('inbound_ssh_witness.py verify')
+        cutover = SCRIPT.index('bash shell_bridge/cutover.sh')
+        retirement = SCRIPT.index('echo "Phase 8: archive stopped production v5')
+        self.assertLess(local_switch, challenge)
+        self.assertLess(challenge, cutover)
+        self.assertLess(cutover, retirement)
+        self.assertIn('SSH_WITNESS_NONCE=', SCRIPT)
+        self.assertIn('From a DIFFERENT computer', SCRIPT)
+        self.assertIn('external-device SSH login witness missing', SCRIPT)
+        self.assertNotIn('systemsetup -setremotelogin', SCRIPT)
+
     def test_ssh_requires_operator_policy_and_live_dual_smoke(self):
         self.assertIn('V6_SSH_POLICY_DIR', SCRIPT)
         self.assertIn('REGISTER_PINNED_SSH_POLICY_DIR="$V6_SSH_POLICY_DIR"', SCRIPT)
