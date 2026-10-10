@@ -255,6 +255,19 @@ def prohibited_command_reason(command: str) -> str | None:
 
 
 def high_impact_command_category(command: str) -> str | None:
+    # Avoid obvious shell option-splitting omissions in the direct-command
+    # classifier. This is a high-impact alert heuristic, NOT a proof that
+    # arbitrary shell text is reversible or safe.
+    if re.search(
+        r"(?im)(?<![\w-])git(?:\s+-C\s+\S+)*\s+(?:reset\s+--hard\b|clean\s+(?:-[A-Za-z]*f[A-Za-z]*\b|--force\b))",
+        command,
+    ):
+        return "git_destructive_local"
+    if re.search(
+        r"(?im)(?:^|[;&|]\s*|\n)\s*(?:sudo\s+)?rm\b[^\n;]*\s+(?:--recursive\b|--force\b|-[A-Za-z]*[rRfF][A-Za-z]*\b)",
+        command,
+    ):
+        return "filesystem_recursive_delete"
     # Network/control-plane effects cannot be made read-only by a filesystem sandbox.
     # These rules are therefore an additional approval gate, not the primary sandbox.
     for category, pattern in HIGH_IMPACT_COMMAND_RULES:
