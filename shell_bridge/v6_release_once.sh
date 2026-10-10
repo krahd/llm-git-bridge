@@ -185,9 +185,13 @@ PYMATCH
 python3 "$PROD_INSTALL/bridge.py" doctor --config "$PROD_CONFIG" >/dev/null
 # Only a local operator may authorize transferring the production mailbox.
 echo "Phase 4: consequential cutover authorization"
-printf 'Ready to stop v5 and provisionally activate v6. Type MIGRATE to proceed: '
+echo "IMPORTANT: v6 currently supports only pinned SSH status/identity actions."
+echo "Arbitrary SSH, SCP, SFTP and RSYNC are NOT yet qualified as v5 replacement capabilities."
+echo "If those workflows are required, STOP here and keep v5 as production."
+printf 'To deliberately accept this limited SSH scope and switch production, type MIGRATE LIMITED SSH: '
 IFS= read -r authorization
-[ "$authorization" = MIGRATE ] || fail "operator did not authorize production handover"
+[ "$authorization" = "MIGRATE LIMITED SSH" ] ||
+  fail "operator did not accept limited SSH capability and authorize production handover"
 echo "Phase 5: guarded production cutover with no automatic legacy retirement"
 EXPECTED_SOURCE_COMMIT="$SOURCE" \
 LOCAL_EXECUTOR_LABEL="$PROD_LABEL" NEW_PLIST="$PROD_PLIST" \
