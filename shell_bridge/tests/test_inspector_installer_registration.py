@@ -37,6 +37,7 @@ class InspectorInstallerRegistrationTests(unittest.TestCase):
 
     def run_config(self, enabled):
         env = os.environ.copy()
+        env.pop("REGISTER_PINNED_SSH_POLICY_DIR", None)
         env.update(HOME=str(self.home),
                    REGISTER_MAILBOX_INSPECTOR="1" if enabled else "0")
         return subprocess.run([sys.executable, "-c", CONFIG_SCRIPT, *self.args],
@@ -57,6 +58,43 @@ class InspectorInstallerRegistrationTests(unittest.TestCase):
         self.assertEqual(result.returncode, 0, result.stderr)
         self.assertNotIn("bridge-mailbox-inspect",
                          json.loads(self.cfg.read_text()).get("trusted_operations", {}))
+
+    def test_opt_in_pinned_ssh_registers_only_fixed_actions(self):
+        policy_dir = self.home / ".config" / "bridge-ssh-policy"
+        policy_dir.mkdir(parents=True)
+        policy_dir.chmod(0o700)
+        identity = policy_dir / "private-key"
+        identity.write_text("test fixture")
+        identity.chmod(0o600)
+        known = policy_dir / "known_hosts"
+        known.write_text("example.invalid ssh-ed25519 FAKE_FIXTURE\\n")
+        known.chmod(0o600)
+        policy = policy_dir / "ssh-policy.json"
+        policy.write_text(json.dumps({
+            "schema": 1, "host": "example.invalid", "user": "deploy",
+            "port": 22, "identity_file": str(identity),
+        }))
+        policy.chmod(0o600)
+        executable = self.install / "ssh_pinned_helper.py"
+        executable.write_text((ROOT / "ssh_pinned_helper.py").read_text())
+        executable.chmod(0o700)
+        old = os.environ.get("REGISTER_PINNED_SSH_POLICY_DIR")
+        os.environ["REGISTER_PINNED_SSH_POLICY_DIR"] = str(policy_dir)
+        try:
+            result = self.run_config(False)
+        finally:
+            if old is None:
+                os.environ.pop("REGISTER_PINNED_SSH_POLICY_DIR", None)
+            else:
+                os.environ["REGISTER_PINNED_SSH_POLICY_DIR"] = old
+        self.assertEqual(result.returncode, 0, result.stderr)
+        cfg = json.loads(self.cfg.read_text())
+        op = registered_operation_from_config(
+            cfg, "ssh-pinned-readonly", "status", self.agent_root)
+        self.assertEqual(op.executable, executable)
+        self.assertEqual(op.permitted_roots, (policy_dir,))
+        self.assertEqual(op.permitted_actions, ("status", "identity"))
+        self.assertTrue(op.requires_confirmation)
 
     def test_installer_refuses_escapable_agent_writable_helper(self):
         self.agent_root = self.home
