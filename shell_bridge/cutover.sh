@@ -92,11 +92,12 @@ need python3; need rclone; need launchctl
 [ -f "$NEW_INSTALL_DIR/bridge.py" ] || fail "staged v6 bridge missing: $NEW_INSTALL_DIR/bridge.py"
 [ -f "$NEW_INSTALL_DIR/workspace.py" ] || fail "staged v6 coordinator missing: $NEW_INSTALL_DIR/workspace.py"
 [ -f "$NEW_INSTALL_DIR/approval_helper.py" ] || fail "staged v6 approval helper missing: $NEW_INSTALL_DIR/approval_helper.py"
+[ -f "$NEW_INSTALL_DIR/trusted_operations.py" ] || fail "staged v6 trusted operations module missing: $NEW_INSTALL_DIR/trusted_operations.py"
 [ -f "$NEW_INSTALL_DIR/install-manifest.json" ] || fail "staged v6 install manifest missing: $NEW_INSTALL_DIR/install-manifest.json"
 
-python3 - "$NEW_INSTALL_DIR/install-manifest.json" "$NEW_INSTALL_DIR/bridge.py" "$NEW_INSTALL_DIR/workspace.py" "$NEW_INSTALL_DIR/approval_helper.py" "$NEW_CONFIG" "$NEW_PLIST" "$NEW_INSTALL_DIR/Local Executor Approval.app/Contents/Info.plist" "$NEW_INSTALL_DIR/Local Executor Approval.app/Contents/MacOS/local-executor-approval" <<'PYMANIFEST' || fail "staged v6 install manifest integrity check failed"
+python3 - "$NEW_INSTALL_DIR/install-manifest.json" "$NEW_INSTALL_DIR/bridge.py" "$NEW_INSTALL_DIR/workspace.py" "$NEW_INSTALL_DIR/approval_helper.py" "$NEW_INSTALL_DIR/trusted_operations.py" "$NEW_CONFIG" "$NEW_PLIST" "$NEW_INSTALL_DIR/Local Executor Approval.app/Contents/Info.plist" "$NEW_INSTALL_DIR/Local Executor Approval.app/Contents/MacOS/local-executor-approval" <<'PYMANIFEST' || fail "staged v6 install manifest integrity check failed"
 import hashlib,json,sys
-manifest_path,bridge_path,workspace_path,approval_helper_path,config_path,plist_path,app_info_path,app_exec_path=sys.argv[1:]
+manifest_path,bridge_path,workspace_path,approval_helper_path,trusted_path,config_path,plist_path,app_info_path,app_exec_path=sys.argv[1:]
 def sha256(path):
     with open(path,'rb') as f: return hashlib.sha256(f.read()).hexdigest()
 try:
@@ -110,6 +111,7 @@ expected={
     'bridge_sha256':sha256(bridge_path),
     'workspace_sha256':sha256(workspace_path),
     'approval_helper_sha256':sha256(approval_helper_path),
+    'trusted_operations_sha256':sha256(trusted_path),
     'config_sha256':sha256(config_path),
     'launchagent_plist_sha256':sha256(plist_path),
     'approval_app_info_sha256':sha256(app_info_path),
