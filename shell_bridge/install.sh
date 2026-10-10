@@ -284,7 +284,12 @@ if ssh_dir:
     module=importlib.util.spec_from_file_location("pinned_ssh_helper",str(executable))
     helper=importlib.util.module_from_spec(module)
     module.loader.exec_module(helper)
-    for action in ("status","identity"):
+    policy=json.loads((directory/"ssh-policy.json").read_text(encoding="utf-8"))
+    commands=policy.get("commands",{})
+    if not isinstance(commands,dict):
+        raise SystemExit("invalid pinned SSH command map")
+    registered_actions=["status","identity",*sorted(commands)]
+    for action in registered_actions:
         helper.load_policy(directory,action)
     ssh_identity=Path(json.loads((directory/"ssh-policy.json").read_text(encoding="utf-8"))["identity_file"])
     try:
@@ -301,7 +306,7 @@ if ssh_dir:
         "executable":str(executable),
         "executable_sha256":hashlib.sha256(executable.read_bytes()).hexdigest(),
         "permitted_roots":[str(directory)],
-        "permitted_actions":["status","identity"],
+        "permitted_actions":registered_actions,
     }
     cfg["trusted_operations"]=ops
     cfg["preapproved_pinned_ssh_readonly"]=True
