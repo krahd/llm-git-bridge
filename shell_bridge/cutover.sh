@@ -43,6 +43,7 @@ rollback() {
       # No v6 admission was possible; restoring the original consumer does
       # not introduce a v6/v5 duplicate-execution race.
       echo "Cutover failed after stopping legacy consumers; restoring previously active bridge service(s)." >&2
+      restore_failed=0
       if [ -n "$ROLLBACK_FILE" ] && [ -f "$ROLLBACK_FILE" ]; then
         while IFS='|' read -r label plist; do
           [ -n "$label" ] || continue
@@ -50,7 +51,24 @@ rollback() {
             launchctl bootstrap "gui/${UID_NOW}" "$plist" >/dev/null 2>&1 || true
             launchctl kickstart -k "gui/${UID_NOW}/${label}" >/dev/null 2>&1 || true
           fi
+          if ! launchctl print "gui/${UID_NOW}/${label}" >/dev/null 2>&1; then
+            printf 'ERROR: legacy rollback service did not restore: %s\n' "$label" >&2
+            restore_failed=1
+          fi
         done < "$ROLLBACK_FILE"
+      else
+        restore_failed=1
+      fi
+      if [ "$restore_failed" -ne 0 ]; then
+        # Never report restoration success or discard recovery instructions
+        # when a service remains absent after a pre-v6 failure.
+        mkdir -p "$STATE_DIR"; chmod 700 "$STATE_DIR" || true
+        printf 'HOLD: legacy service restoration incomplete; inspect LaunchAgents before resuming the mailbox.\n' >&2
+        printf '%s\n' "legacy_rollback_incomplete $(date -u +%Y-%m-%dT%H:%M:%SZ)" > "$STATE_DIR/cutover-reconciliation-required"
+        if [ -n "$ROLLBACK_FILE" ] && [ -s "$ROLLBACK_FILE" ]; then
+          cp -p "$ROLLBACK_FILE" "$STATE_DIR/cutover-rollback-services.tsv"
+          chmod 600 "$STATE_DIR/cutover-rollback-services.tsv"
+        fi
       fi
     fi
   fi
