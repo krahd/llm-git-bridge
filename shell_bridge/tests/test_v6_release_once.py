@@ -35,6 +35,15 @@ class SingleRunReleaseContractTests(unittest.TestCase):
         self.assertNotIn("git clean -", SCRIPT)
         self.assertNotIn("launchctl bootout", SCRIPT)
 
+    def test_retirement_occurs_only_after_production_approval(self):
+        approval = SCRIPT.index('approval_canary "$PROD_ROOT" "$PROD_ALLOWED" allow production')
+        archive = SCRIPT.index('echo "Phase 7: archive stopped production v5')
+        self.assertLess(approval, archive)
+        self.assertIn('cutover-rollback-services.tsv', SCRIPT)
+        self.assertIn('legacy archive postcondition failed', SCRIPT)
+        self.assertIn('recovery_fault_injection_live_verified":False', SCRIPT)
+        self.assertIn('legacy_state_preserved":True', SCRIPT)
+
     def test_register_read_only_inspector_only_opt_in(self):
         self.assertIn('REGISTER_MAILBOX_INSPECTOR=1', SCRIPT)
         self.assertIn('if os.environ.get("REGISTER_MAILBOX_INSPECTOR") == "1":', INSTALL)
