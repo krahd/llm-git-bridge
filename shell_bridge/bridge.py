@@ -1162,9 +1162,16 @@ def _process_one_request(name: str, cfg: dict, preloaded_raw: bytes | None = Non
     category = high_impact_category or write_plan.get("confirmation_category")
     approval_command = v["command"]
     if v.get("trusted_operation") is not None:
-        approved_op = registered_operation_from_config(
-            cfg, v["trusted_operation"]["name"], v["trusted_operation"]["action"], allowed_root
-        )
+        try:
+            approved_op = registered_operation_from_config(
+                cfg, v["trusted_operation"]["name"], v["trusted_operation"]["action"], allowed_root
+            )
+        except (TrustedOperationPolicyError, OSError, ValueError) as exc:
+            result = result_envelope(v["id"], request_sha, "rejected", {
+                "message": f"trusted operation pre-approval verification failed: {exc}",
+            })
+            _persist_then_publish(result, local_result, finished_marker, name, cfg)
+            return
         approval_command = (
             f"Trusted helper: {approved_op.executable}\\n"
             f"Action: {v['trusted_operation']['action']}\\n"
@@ -1199,7 +1206,7 @@ def _process_one_request(name: str, cfg: dict, preloaded_raw: bytes | None = Non
                 str(installed_op.executable), v["trusted_operation"]["action"],
                 *(str(root) for root in installed_op.permitted_roots),
             ]
-        except TrustedOperationPolicyError as exc:
+        except (TrustedOperationPolicyError, OSError, ValueError) as exc:
             result = result_envelope(v["id"], request_sha, "rejected", {
                 "message": f"trusted helper integrity changed before execution: {exc}",
                 "operator_confirmation": confirmation,
