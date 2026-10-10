@@ -76,6 +76,14 @@ def inspect_services(home: Path, launchctl_listing: str) -> dict:
                 field = value.get(key)
                 if not isinstance(field, str) or not 0 < len(field) <= 512 or not field.isprintable():
                     raise ValueError("missing or unsafe identity field")
+                if key == "state_dir":
+                    location = Path(field).expanduser()
+                    if not location.is_absolute():
+                        raise ValueError("state directory must be absolute")
+                    # Canonicalise alias paths before comparing shared journals.
+                    # A pair of distinct mailbox IDs sharing durable state is
+                    # just as unsafe as duplicate mailbox consumers.
+                    field = str(location.resolve(strict=False))
                 record[key] = field
             record["state"] = "verified"
         except (OSError, ValueError, TypeError, plistlib.InvalidFileException):
