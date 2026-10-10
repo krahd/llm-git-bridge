@@ -71,7 +71,7 @@ def enroll(directory: Path, identity: Path, host: str,
     if isinstance(port, bool) or not isinstance(port, int) or not 1 <= port <= 65535:
         raise EnrollmentError("invalid SSH port")
     _safe_existing(identity, private=True)
-    if not trusted_lines or not trusted_lines.endswith("\\n"):
+    if not trusted_lines or not trusted_lines.endswith(chr(10)):
         raise EnrollmentError("verified SSH host keys are missing")
     if directory.exists() or directory.is_symlink():
         raise EnrollmentError("SSH enrollment already exists; do not overwrite")
