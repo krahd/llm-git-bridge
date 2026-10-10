@@ -107,6 +107,12 @@ class PinnedSSHHelperTests(unittest.TestCase):
         with self.assertRaises(helper.SSHPolicyError):
             helper.load_policy(self.root, "status")
 
+    def test_refuses_duplicate_policy_keys(self):
+        original = json.dumps(self.data)
+        self.profile.write_text(original[:-1] + ', "host": "other.invalid"}')
+        with self.assertRaises(helper.SSHPolicyError):
+            helper.load_policy(self.root, "status")
+
     def test_refuses_boolean_schema_version(self):
         self.data["schema"] = True
         self.write_policy()
