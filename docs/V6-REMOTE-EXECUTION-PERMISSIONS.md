@@ -24,7 +24,7 @@ pretending confirmation would make them work.
 | Destructive or irreversible local operation | Explicit consequence-specific confirmation; never rely on a broad allow-all |
 | Credential/secrets access, external side effects | Separate narrow installed capability; independent confirmation if high impact |
 | Raw arbitrary SSH command or arbitrary remote target | Deny, no cosmetic popup |
-| Host- and action-pinned SSH maintenance/read-only inspection | **To implement and qualify** as a separate trusted helper |
+| Host- and action-pinned SSH maintenance/read-only inspection | **Implemented for fixed `status` and `identity` actions, but not provisioned or live-qualified** as an opt-in trusted helper |
 | Remote irreversible SSH mutations (deployment, deletion, restart) | Require exact host/operation/scope approval, durable ID and visible rollback plan |
 
 ## Host-pinned SSH helper requirements before v5 retirement
@@ -64,3 +64,28 @@ as a deferred non-critical feature with the operator's consent.
 The one-invocation local release script proves isolated mailbox transport,
 read-only terminal execution and critical local approvals, but it is not
 sufficient evidence that remote SSH maintenance is qualified.
+
+## Implemented optional pinned SSH status capability
+
+The repository includes `shell_bridge/ssh_pinned_helper.py`. It takes only
+`status` or `identity` and an administrator-provisioned policy directory,
+running fixed `uptime` or `id -un` against one pinned host. Unknown
+commands, host names, options, unsafe policy permissions, missing host keys,
+and network errors fail closed. SSH is noninteractive, no tunnels/forwarding,
+no user SSH configuration, strict pinned known-host verification, no arbitrary
+provider-controlled command and bounded time/output.
+
+An operator may set `REGISTER_PINNED_SSH_POLICY_DIR` while performing an
+**out-of-band installation**. The directory must contain an owner-controlled
+`ssh-policy.json`, a matching dedicated `known_hosts`, and a configured
+identity file. The installed descriptor pins the helper executable's SHA-256,
+policy directory and just those two action names. The installer records explicit
+consent so those two low-impact, immutable read-only actions no longer prompt
+per call. Unrelated trusted helpers and consequential commands still require
+their native approval. Default installations do **not** enable SSH.
+
+This is **not** general remote terminal SSH, remote deployment, file transfer,
+or privilege escalation. Do not treat the optional status helper as evidence
+that broad SSH work is accepted or that the previous v5 workflows have been
+replaced. Configuration and a live known-host and identity acceptance test
+remain necessary on the owner's Mac.
