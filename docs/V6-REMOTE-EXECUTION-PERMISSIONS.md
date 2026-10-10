@@ -122,3 +122,16 @@ local SSH process group on timeout or excess output. Both outcomes are
 non-successful and must never cause automatic replay. Regression tests exercise
 large real child-process stdout/stderr streams and a sleeping child without
 opening any remote network connection.
+
+## Private SSH identity rotation revokes operator-installed consent
+
+The fixed SSH read-only capability previously pinned its helper program,
+host configuration and known-host key database, but did not bind the selected
+SSH private identity's contents. An operator could rotate or replace that
+identity without invalidating the prior no-prompt approval. The installer now
+records its SHA-256 at enrollment, with an upper size bound, and the bridge
+rechecks that identity before accepting any approval-free SSH request.
+Changed, missing, symlinked or oversized identity files fail closed and
+require out-of-band re-provisioning. The private key is never printed or
+copied into the bridge's Git repository; only its digest is retained in
+the operator-controlled local bridge configuration.

@@ -288,7 +288,9 @@ class RemoteExecutionApprovalFatigueTests(unittest.TestCase):
             directory = Path(temporary)
             policy = directory / "ssh-policy.json"
             known = directory / "known_hosts"
-            policy.write_text('{"host":"example.invalid"}')
+            identity = directory / "id_ed25519"
+            identity.write_text("private-key-fixture")
+            policy.write_text(json.dumps({"host": "example.invalid", "identity_file": str(identity)}))
             known.write_text("example.invalid ssh-ed25519 pinned")
             cfg = {
                 "preapproved_pinned_ssh_readonly": True,
@@ -297,6 +299,7 @@ class RemoteExecutionApprovalFatigueTests(unittest.TestCase):
                 },
                 "pinned_ssh_policy_sha256": hashlib.sha256(policy.read_bytes()).hexdigest(),
                 "pinned_ssh_known_hosts_sha256": hashlib.sha256(known.read_bytes()).hexdigest(),
+                "pinned_ssh_identity_sha256": hashlib.sha256(identity.read_bytes()).hexdigest(),
             }
             plan = {"effective": "trusted_operation"}
             query = lambda action: {
@@ -315,6 +318,10 @@ class RemoteExecutionApprovalFatigueTests(unittest.TestCase):
                 query("status"), cfg, plan))
             known.write_text("example.invalid ssh-ed25519 pinned")
             policy.write_text("CHANGED TARGET")
+            self.assertFalse(bridge.pinned_ssh_readonly_preapproved(
+                query("status"), cfg, plan))
+            policy.write_text(json.dumps({"host": "example.invalid", "identity_file": str(identity)}))
+            identity.write_text("ROTATED-KEY")
             self.assertFalse(bridge.pinned_ssh_readonly_preapproved(
                 query("status"), cfg, plan))
             self.assertFalse(bridge.pinned_ssh_readonly_preapproved(
