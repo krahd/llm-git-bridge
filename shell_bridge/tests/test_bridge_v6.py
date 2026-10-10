@@ -267,28 +267,45 @@ class RemoteExecutionApprovalFatigueTests(unittest.TestCase):
                     "remote_shell_or_copy",
                 )
 
-    def test_installer_consent_only_exempts_fixed_ssh_read_actions(self):
-        cfg = {"preapproved_pinned_ssh_readonly": True}
-        plan = {"effective": "trusted_operation"}
-        for action in ("status", "identity"):
-            self.assertTrue(bridge.pinned_ssh_readonly_preapproved(
-                {"trusted_operation": {"name": "ssh-pinned-readonly",
-                                        "action": action}}, cfg, plan))
-        for op in (
-            {"name": "ssh-pinned-readonly", "action": "delete"},
-            {"name": "bridge-mailbox-inspect", "action": "inspect"},
-            {"name": "ssh-pinned-readonly", "action": "ssh"},
-        ):
+    def test_installer_consent_only_exempts_unchanged_fixed_ssh_reads(self):
+        import hashlib
+        import tempfile
+        from pathlib import Path
+        with tempfile.TemporaryDirectory(dir=Path.cwd()) as temporary:
+            directory = Path(temporary)
+            policy = directory / "ssh-policy.json"
+            known = directory / "known_hosts"
+            policy.write_text('{"host":"example.invalid"}')
+            known.write_text("example.invalid ssh-ed25519 pinned")
+            cfg = {
+                "preapproved_pinned_ssh_readonly": True,
+                "trusted_operations": {
+                    "ssh-pinned-readonly": {"permitted_roots": [str(directory)]}
+                },
+                "pinned_ssh_policy_sha256": hashlib.sha256(policy.read_bytes()).hexdigest(),
+                "pinned_ssh_known_hosts_sha256": hashlib.sha256(known.read_bytes()).hexdigest(),
+            }
+            plan = {"effective": "trusted_operation"}
+            query = lambda action: {
+                "trusted_operation": {"name": "ssh-pinned-readonly", "action": action}
+            }
+            for action in ("status", "identity"):
+                self.assertTrue(bridge.pinned_ssh_readonly_preapproved(
+                    query(action), cfg, plan))
+            for action in ("delete", "ssh", "status --anything"):
+                self.assertFalse(bridge.pinned_ssh_readonly_preapproved(
+                    query(action), cfg, plan))
             self.assertFalse(bridge.pinned_ssh_readonly_preapproved(
-                {"trusted_operation": op}, cfg, plan))
-        self.assertFalse(bridge.pinned_ssh_readonly_preapproved(
-            {"trusted_operation": {"name": "ssh-pinned-readonly",
-                                    "action": "status"}},
-            {"preapproved_pinned_ssh_readonly": "true"}, plan))
-        self.assertFalse(bridge.pinned_ssh_readonly_preapproved(
-            {"trusted_operation": {"name": "ssh-pinned-readonly",
-                                    "action": "status"}},
-            cfg, {"effective": "system"}))
+                query("status"), cfg, {"effective": "system"}))
+            known.write_text("CHANGED HOST KEY")
+            self.assertFalse(bridge.pinned_ssh_readonly_preapproved(
+                query("status"), cfg, plan))
+            known.write_text("example.invalid ssh-ed25519 pinned")
+            policy.write_text("CHANGED TARGET")
+            self.assertFalse(bridge.pinned_ssh_readonly_preapproved(
+                query("status"), cfg, plan))
+            self.assertFalse(bridge.pinned_ssh_readonly_preapproved(
+                query("status"), {"preapproved_pinned_ssh_readonly": True}, plan))
 
     def test_raw_remote_shell_rejected_before_approval_popup(self):
         from pathlib import Path
