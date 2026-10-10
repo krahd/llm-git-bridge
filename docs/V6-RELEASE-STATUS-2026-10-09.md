@@ -319,3 +319,37 @@ must halt if SSH enrollment, native approval denial/allow tests, the external
 client witness, production mailbox exclusivity, or live exact-build health
 cannot be proven. No staging, website or existing dirty checkout should be
 destroyed to make acceptance pass.
+
+## Approval identity and final source qualification (2026-10-10)
+
+PR #24, merged at `881f4c31ef6935de72b1f0efd1afa96fb9e402c9`,
+resolved a further staging/production isolation risk: previously every
+installed v6 native approval app had the same CFBundleIdentifier, although
+its embedded approval directory differed. Each installed LaunchAgent now
+generates a stable unique bundle identifier, and each approval GUI displays
+its exact associated bridge-instance label in the popup and status tooltip.
+The macOS qualification passed 257 tests in each standard and direct
+sandbox suite; the Swift UI typecheck and installer shell syntax passed.
+The tests execute the actual Info.plist generator with distinct stage/prod
+labels, but **do not simulate macOS Launch Services or a human click**.
+
+This checkpoint's subsequent macOS CI must run all integrated tests
+**after** PR #24 merged, not merely the divergent individual PR branches.
+This is source validation only. It is **not** authorization to activate
+production v6 or retire v5.
+
+Mac-local acceptance remains a genuine external prerequisite. The one
+operator invocation described in V6-ONE-RUN-RELEASE.md starts from the
+existing dirty checkout but builds from a private exact-main worktree.
+The controller must prove staging execution, distinct native approval
+DENY/ALLOW, the pinned outbound SSH read status check, an actual inbound
+SSH session from the operator's second device, protected production mailbox
+handover, live exact-build health, production native approval and exclusive
+ownership. It must leave v5's journals, branches, workspaces and rollback
+evidence intact. Do not retire v5 on CI results alone.
+
+**General outbound SSH administration is not yet implemented.** The
+release controller explicitly requires one-time `MIGRATE LIMITED SSH`
+authorization before any v5 retirement; without a user-accepted restricted
+scope and live Mac acceptance, production must remain v5. Unrestricted
+agent system-shell execution also remains prohibited by design.
