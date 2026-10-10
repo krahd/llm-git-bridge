@@ -18,6 +18,18 @@ class InboundSSHPreflightTests(unittest.TestCase):
         self.assertFalse(result["host_authentication_verified"])
         self.assertFalse(result["mutations_performed"])
 
+    def test_unprivileged_launchctl_fallback_accepts_only_unambiguous_enabled(self):
+        parse = inbound.launchctl_remote_login_status
+        self.assertEqual(parse('"com.openssh.sshd" => enabled'), "Remote Login: On")
+        self.assertEqual(parse('"com.openssh.sshd" => false'), "Remote Login: On")
+        self.assertEqual(parse('"com.openssh.sshd" => disabled'), "Remote Login: Off")
+        self.assertEqual(parse('"com.openssh.sshd" => true'), "Remote Login: Off")
+        for text in ('', '"com.openssh.sshd" => unknown',
+                     '"com.openssh.sshd" => enabled\\n"com.openssh.sshd" => disabled'):
+            with self.subTest(output=text):
+                with self.assertRaises(ValueError):
+                    parse(text)
+
     def test_remote_login_off_or_ambiguous_is_rejected(self):
         for output in ("Remote Login: Off", "", "Remote Login: On\nRemote Login: Off"):
             with self.subTest(output=output):
