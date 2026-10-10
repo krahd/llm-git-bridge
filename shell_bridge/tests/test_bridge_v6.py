@@ -85,7 +85,19 @@ class BridgeV6SecurityTests(unittest.TestCase):
         self.assertIn(f'(literal "{home / ".gitignore_global"}")', p)
         self.assertIn(f'(literal "{home.parent}")', p)
         self.assertIn(f'(literal "{home}")', p)
-        self.assertIn(str(Path(tempfile.gettempdir()).resolve()), p)
+        # Read-only shell execution may write only to its own request scratch,
+        # never every unrelated file below the macOS system temp directory.
+        temp_root = Path(tempfile.gettempdir()).resolve()
+        self.assertNotIn(f'(allow file-write* (subpath "{temp_root}")', p)
+        self.assertNotIn(f'(subpath "{temp_root}")', p)
+
+    def test_explicit_scratch_is_allowed_but_global_temp_is_not(self):
+        with tempfile.TemporaryDirectory() as td:
+            scratch = Path(td)
+            profile = bridge.sandbox_profile([scratch], allow_network=False)
+            self.assertIn(f'(subpath "{scratch.resolve()}")', profile)
+            temp_root = Path(tempfile.gettempdir()).resolve()
+            self.assertNotIn(f'(subpath "{temp_root}")', profile)
 
     def test_workspace_trust_rejects_outer_shell_operator(self):
         with tempfile.TemporaryDirectory() as td:

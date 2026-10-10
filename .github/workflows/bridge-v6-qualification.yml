@@ -23,5 +23,9 @@ jobs:
           PYTHONDONTWRITEBYTECODE: '1'
           _LOCAL_EXECUTOR_NESTED_VALIDATION: '1'
         run: python3 -m unittest discover -s shell_bridge/tests -q
+      - name: Run complete direct macOS sandbox suite (no nested bypass)
+        env:
+          PYTHONDONTWRITEBYTECODE: '1'
+        run: python3 -m unittest discover -s shell_bridge/tests -q
       - name: Typecheck native approval application
         run: xcrun swiftc -typecheck -framework AppKit shell_bridge/approval_gui.swift

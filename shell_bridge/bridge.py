@@ -469,7 +469,10 @@ def sandbox_profile(write_roots: list[Path], *, allow_network: bool = True,
                     read_roots: list[Path] | None = None,
                     deny_home_reads: bool = False) -> str:
     roots: list[Path] = []
-    scratch_roots = [Path(tempfile.gettempdir()), *write_roots]
+    # Only caller-provisioned scratch directories may be writable. Granting
+    # tempfile.gettempdir() permits writes to unrelated caller-owned files and
+    # makes a read-only request writable whenever cwd is below macOS TMPDIR.
+    scratch_roots = list(write_roots)
     for root in scratch_roots:
         try:
             resolved = root.expanduser().resolve()

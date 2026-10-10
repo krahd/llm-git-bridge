@@ -40,6 +40,27 @@ class WorkspaceTests(unittest.TestCase):
     def integrate(self,jid):
         return w.integrate_job(argparse.Namespace(state_dir=str(self.state),job=jid,message=None,validate=None,timeout=30,shell='/bin/bash'))
 
+    @unittest.skipUnless(
+        sys.platform == "darwin" and w.SANDBOX_EXEC.is_file()
+        and os.environ.get("_LOCAL_EXECUTOR_NESTED_VALIDATION") != "1",
+        "direct macOS workspace sandbox required",
+    )
+    def test_validation_shell_uses_private_home_without_login_profile(self):
+        # The sandbox intentionally denies ~/ dotfiles. A login shell and
+        # default global Git config must not break canonical validation.
+        with tempfile.TemporaryDirectory() as td:
+            repo = Path(td) / "repo"
+            r("git", "init", "-q", "-b", "main", str(repo))
+            rc, stdout, stderr = w._run_job_shell(
+                "/bin/bash", "printf '%s\\n' \"$HOME\"; git rev-parse --show-toplevel",
+                repo, 15,
+            )
+            self.assertEqual(rc, 0, stderr)
+            lines = stdout.strip().splitlines()
+            self.assertEqual(len(lines), 2)
+            self.assertNotEqual(lines[0], str(Path.home()))
+            self.assertEqual(lines[1], str(repo.resolve()))
+
     def test_two_jobs_same_repo_checkpoint_and_integrate_independently(self):
         a=self.create('research:paper:a'); b=self.create('research:paper:b')
         oa=self.exec(a['job_id'],"printf 'a1\\n' > paper-a.txt")
