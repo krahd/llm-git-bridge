@@ -38,6 +38,58 @@ def verify(remote_login_stdout: str, membership_stdout: str, username: str) -> d
     }
 
 
+def launchctl_remote_login_status(output: str) -> str:
+    # macOS launchctl disabled output changes spelling between OS releases.
+    # An absent or duplicated sshd entry is not evidence of Remote Login.
+    statuses = re.findall(
+        r'^\\s*"?com\\.openssh\\.sshd"?\\s*=>\\s*(enabled|disabled|true|false)\\s*
+    if sys.platform != "darwin":
+        print("INBOUND_SSH_HOLD: macOS only", file=sys.stderr)
+        return 2
+    try:
+        user = pwd.getpwuid(os.getuid()).pw_name
+        # systemsetup -getremotelogin may require administrator privileges.
+        # First try that read-only query; fall back to the documented launchd
+        # disabled map rather than asking for elevated system changes.
+        query = subprocess.run(
+            ["/usr/sbin/systemsetup", "-getremotelogin"],
+            capture_output=True, text=True, timeout=10, check=False)
+        if query.returncode == 0 and query.stdout.strip() == "Remote Login: On":
+            status = query.stdout
+        elif query.returncode == 0 and query.stdout.strip() == "Remote Login: Off":
+            raise ValueError("Remote Login is off")
+        else:
+            alternate = subprocess.run(
+                ["/bin/launchctl", "print-disabled", "system"],
+                capture_output=True, text=True, timeout=10, check=False)
+            if alternate.returncode != 0:
+                raise ValueError("Remote Login settings could not be read")
+            status = launchctl_remote_login_status(alternate.stdout)
+        member = subprocess.run(
+            ["/usr/sbin/dseditgroup", "-o", "checkmember",
+             "-m", user, "com.apple.access_ssh"],
+            capture_output=True, text=True, timeout=10, check=False)
+        if member.returncode != 0:
+            raise ValueError("SSH allowed-user membership could not be read")
+        print(json.dumps(verify(status, member.stdout, username=user), sort_keys=True))
+    except (OSError, ValueError, subprocess.TimeoutExpired) as exc:
+        print("INBOUND_SSH_HOLD: " + str(exc), file=sys.stderr)
+        return 1
+    return 0
+
+
+if __name__ == "__main__":
+    raise SystemExit(main())
+,
+        output, re.IGNORECASE | re.MULTILINE,
+    )
+    if len(statuses) != 1:
+        raise ValueError("launchd SSH service state is ambiguous")
+    if statuses[0].lower() in ("enabled", "false"):
+        return "Remote Login: On"
+    return "Remote Login: Off"
+
+
 def main() -> int:
     if sys.platform != "darwin":
         print("INBOUND_SSH_HOLD: macOS only", file=sys.stderr)
