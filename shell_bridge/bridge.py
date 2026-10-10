@@ -268,6 +268,9 @@ def high_impact_command_category(command: str) -> str | None:
         command,
     ):
         return "filesystem_recursive_delete"
+    # Pure help/version queries are inert; don't fatigue the operator.
+    if re.fullmatch(r"(?is)\\s*(?:rm|unlink)\\s+(?:--help|--version|-h)\\s*", command):
+        return None
     # Even a single rm/unlink can irreversibly remove an untracked file.
     # Git containment does not make this operation automatically undoable.
     if re.search(
