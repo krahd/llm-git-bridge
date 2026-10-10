@@ -37,7 +37,7 @@ class PinnedSSHHelperTests(unittest.TestCase):
         args, timeout = helper.load_policy(self.root, "status")
         self.assertEqual(timeout, 25)
         self.assertIn("deploy@example.invalid", args)
-        self.assertEqual(args[-1], "uptime")
+        self.assertEqual(args[-1], "/usr/bin/uptime")
         self.assertIn("StrictHostKeyChecking=yes", args)
         self.assertIn("UserKnownHostsFile=" + str(self.hosts), args)
         self.assertIn("ProxyCommand=none", args)
