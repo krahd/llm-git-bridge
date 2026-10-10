@@ -25,6 +25,21 @@ if [ -z "${V6_SSH_POLICY_DIR:-}" ]; then
 fi
 REGISTER_PINNED_SSH_POLICY_DIR="$V6_SSH_POLICY_DIR"
 export REGISTER_PINNED_SSH_POLICY_DIR
+echo "SSH prerequisite: macOS Remote Login must be restricted to the current account."
+inbound_ready=0
+for attempt in 1 2 3; do
+  if PYTHONDONTWRITEBYTECODE=1 python3 shell_bridge/inbound_ssh_preflight.py; then
+    inbound_ready=1
+    break
+  fi
+  echo "Use System Settings > General > Sharing > Remote Login."
+  echo "Choose Only these users, restrict access to your authorized account,"
+  echo "and verify this Mac's SSH host key from a separate trusted device."
+  printf 'After configuring it yourself, type RECHECK SSH (or anything else to hold v5): '
+  IFS= read -r response || fail "Remote Login preflight interrupted; v5 unchanged"
+  [ "$response" = "RECHECK SSH" ] || fail "Remote Login not qualified; v5 unchanged"
+done
+[ "$inbound_ready" = 1 ] || fail "Remote Login remains unverified; v5 unchanged"
 echo "Phase 1: macOS regressions, live owner inventory, isolated v6 startup and smoke"
 REGISTER_MAILBOX_INSPECTOR=1 bash shell_bridge/prepare_v6_on_mac.sh
 # The preparation script created exactly this isolated and uniquely named build.
@@ -93,7 +108,7 @@ approval_canary(){
 ssh_status_canary(){
   local root="$1" allowed="$2" prefix="$3"
   local rid request_file result_file found=0 attempt
-  rid="v6-ssh-$prefix-$(date -u +%Y%m%d%H%M%S)-$"
+  rid="v6-ssh-$prefix-$(date -u +%Y%m%d%H%M%S)-$(python3 -c 'import secrets; print(secrets.token_hex(6))')"
   request_file="$(mktemp)"; result_file="$(mktemp)"
   if ! python3 shell_bridge/verify_v6_pinned_ssh.py create "$request_file" "$rid" "$allowed"; then
     rm -f "$request_file" "$result_file"; return 1
@@ -122,6 +137,30 @@ echo "Phase 2: two critical one-time native UI acceptance decisions"
 approval_canary "$CANDIDATE_ROOT" "$CANDIDATE_ALLOWED" deny staging
 approval_canary "$CANDIDATE_ROOT" "$CANDIDATE_ALLOWED" allow staging
 ssh_status_canary "$CANDIDATE_ROOT" "$CANDIDATE_ALLOWED" staging
+
+echo "Phase 2b: verify macOS inbound Remote Login and a real separate-device SSH session"
+[ -d "$HOME/.local/state" ] || fail "SSH witness state directory is missing"
+SSH_WITNESS_DIR="$(mktemp -d "$HOME/.local/state/v6-inbound-ssh.XXXXXXXX")" ||
+  fail "cannot reserve a private SSH witness directory"
+SSH_WITNESS_NONCE="$(python3 -c 'import secrets; print(secrets.token_hex(24))')"
+SSH_WITNESS_FILE="$SSH_WITNESS_DIR/verified.json"
+echo "From a DIFFERENT computer, establish an authenticated SSH login to this Mac."
+echo "Inside that inbound SSH session, run this exact read-only witness command:"
+printf 'python3 %q create %q %q\n' \
+  "$ROOT/shell_bridge/inbound_ssh_witness.py" "$SSH_WITNESS_FILE" "$SSH_WITNESS_NONCE"
+echo "The challenge expires after 3 minutes. No inbound SSH settings are changed."
+inbound_confirmed=0
+for attempt in {1..36}; do
+  if PYTHONDONTWRITEBYTECODE=1 python3 shell_bridge/inbound_ssh_witness.py verify \
+    "$SSH_WITNESS_FILE" "$SSH_WITNESS_NONCE" >/dev/null 2>&1; then
+    inbound_confirmed=1
+    break
+  fi
+  sleep 5
+done
+[ "$inbound_confirmed" = 1 ] ||
+  fail "external-device SSH login witness missing or invalid; v5 has not been stopped"
+echo "NONLOCAL_INBOUND_SSH_SESSION_WITNESS_VERIFIED=1"
 
 echo "Phase 3: stage immutable production v6 without starting it"
 LEGACY_CONFIG="$HOME/.config/chatgpt-shell-bridge/config.json"

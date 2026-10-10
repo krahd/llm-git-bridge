@@ -86,6 +86,7 @@ class InstallScriptTests(unittest.TestCase):
     def test_mailbox_inspector_is_packaged_but_not_privileged_by_default(self):
         self.assertIn('cp "$SCRIPT_DIR/bridge_mailbox_inspector.py"', self.text)
         self.assertIn("'bridge_mailbox_inspector_sha256':sha256(inspector_path)", self.text)
+        self.assertIn("'ssh_pinned_helper_sha256':sha256(ssh_path)", self.text)
         self.assertNotIn("registered['bridge-mailbox-inspect']", self.text)
         self.assertIn('"$INSTALL_DIR/bridge_mailbox_inspector.py"', self.text)
 if __name__ == "__main__":

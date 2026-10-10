@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import hashlib
 import json
+import re
 import sys
 from pathlib import Path
 
@@ -19,6 +20,7 @@ def request(rid: str, cwd: str) -> dict:
         "explanation": "Migration acceptance: verify a pinned, read-only trusted helper and native approval UI",
         "write_scope": "auto",
         "timeout_seconds": 60,
+        "operation_id": rid,
     }
 
 
@@ -62,7 +64,9 @@ def main(args: list[str]) -> int:
         return 2
     try:
         if cmd == "create":
-            if not rid.startswith("v6-approval-") or not Path(arg).is_dir():
+            if (not rid.startswith("v6-approval-") or
+                    re.fullmatch(r"[a-z0-9][a-z0-9._-]{0,127}", rid) is None or
+                    not Path(arg).is_dir()):
                 raise ValueError("invalid staging approval request")
             Path(path).write_text(json.dumps(request(rid, arg), sort_keys=True,
                                              separators=(",", ":")), encoding="utf-8")
