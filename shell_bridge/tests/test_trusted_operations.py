@@ -1,9 +1,12 @@
 import pathlib
+import hashlib
+import os
+import tempfile
 import sys
 import unittest
 
 sys.path.insert(0, str(pathlib.Path(__file__).resolve().parents[1]))
-from trusted_operations import TrustedOperation, TrustedOperationPolicyError, authorize_known_operation
+from trusted_operations import TrustedOperation, TrustedOperationPolicyError, authorize_known_operation, verify_installed_helper
 
 
 def descriptor(**overrides):
@@ -47,3 +50,31 @@ class TrustedOperationContractTests(unittest.TestCase):
         import trusted_operations
         self.assertFalse(hasattr(trusted_operations, "run"))
         self.assertFalse(hasattr(trusted_operations, "execute"))
+
+    def test_helper_integrity_and_modified_bytes(self):
+        with tempfile.TemporaryDirectory() as directory:
+            helper = pathlib.Path(directory) / "helper"
+            helper.write_bytes(b"safe helper")
+            helper.chmod(0o700)
+            operation = descriptor(
+                executable=helper,
+                executable_sha256=hashlib.sha256(b"safe helper").hexdigest(),
+            )
+            verify_installed_helper(operation)
+            helper.write_bytes(b"modified")
+            with self.assertRaises(TrustedOperationPolicyError):
+                verify_installed_helper(operation)
+
+    def test_symlink_and_group_writable_helper_denied(self):
+        with tempfile.TemporaryDirectory() as directory:
+            original = pathlib.Path(directory) / "original"
+            original.write_bytes(b"safe")
+            original.chmod(0o700)
+            linked = pathlib.Path(directory) / "linked"
+            linked.symlink_to(original)
+            digest = hashlib.sha256(b"safe").hexdigest()
+            with self.assertRaises(TrustedOperationPolicyError):
+                verify_installed_helper(descriptor(executable=linked, executable_sha256=digest))
+            original.chmod(0o770)
+            with self.assertRaises(TrustedOperationPolicyError):
+                verify_installed_helper(descriptor(executable=original, executable_sha256=digest))
