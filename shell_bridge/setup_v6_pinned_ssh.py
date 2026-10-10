@@ -77,6 +77,9 @@ def enroll(directory: Path, identity: Path, host: str,
         raise EnrollmentError("SSH enrollment already exists; do not overwrite")
     if not directory.parent.is_dir() or directory.parent.is_symlink():
         raise EnrollmentError("SSH policy parent path unsafe")
+    parent_info = directory.parent.stat()
+    if parent_info.st_uid != os.getuid() or parent_info.st_mode & 0o022:
+        raise EnrollmentError("SSH policy parent is not operator-owned and write-protected")
     directory.mkdir(mode=0o700)
     policy = {
         "schema": 1, "host": host, "user": account, "port": port,
