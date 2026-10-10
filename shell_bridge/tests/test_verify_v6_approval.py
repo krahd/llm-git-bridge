@@ -6,6 +6,7 @@ import unittest
 
 sys.path.insert(0, str(pathlib.Path(__file__).resolve().parents[1]))
 from verify_v6_approval import request, verify
+import bridge
 
 
 class ApprovalAcceptanceTests(unittest.TestCase):
@@ -19,6 +20,19 @@ class ApprovalAcceptanceTests(unittest.TestCase):
         self.base = {"protocol": 1, "id": self.rid,
                      "request_sha256": hashlib.sha256(self.raw).hexdigest(),
                      "status": "rejected", "operator_confirmation": self.confirm}
+
+    def test_generated_canary_is_admissible_under_actual_bridge_schema(self):
+        # A mock approval result is useless if request admission rejects the
+        # canary before the native popup can open.
+        import tempfile
+        with tempfile.TemporaryDirectory() as td:
+            workdir = pathlib.Path(td)
+            rid = self.rid
+            req = request(rid, str(workdir))
+            admitted = bridge.validate_request(
+                req, rid + ".json", workdir, max_timeout=300)
+            self.assertEqual(admitted["operation_id"], rid)
+            self.assertEqual(admitted["trusted_operation"]["action"], "inspect")
 
     def test_real_denial(self):
         verify(self.raw, self.base, self.rid, "deny")
