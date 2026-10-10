@@ -19,6 +19,8 @@ import threading
 import time
 from pathlib import Path
 
+from trusted_operations import registered_operation_from_config, TrustedOperationPolicyError
+
 PROTOCOL = 1
 VERSION = "6"
 DEFAULT_MAX_TIMEOUT = 300
@@ -192,9 +194,18 @@ def validate_request(req: dict, request_name: str, allowed_root: Path, max_timeo
         raise ValueError("cwd must resolve under allowed_root") from exc
     if not cwd.is_dir():
         raise ValueError("cwd does not exist or is not a directory")
+    trusted = req.get("trusted_operation")
     command = req.get("command")
-    if not isinstance(command, str) or not command:
-        raise ValueError("command is required")
+    if trusted is not None:
+        if command is not None:
+            raise ValueError("cannot combine trusted_operation with shell command")
+        if (not isinstance(trusted, dict) or set(trusted) != {"name", "action"} or
+            any(not isinstance(value, str) for value in trusted.values())):
+            raise ValueError("trusted_operation must specify only name and action")
+        # This is a human-readable descriptor, never interpreted as shell text.
+        command = f"trusted-operation {trusted['name']} action {trusted['action']}"
+    elif not isinstance(command, str) or not command:
+        raise ValueError("command is required" )
     if len(command.encode("utf-8")) > max_command_bytes:
         raise ValueError("command is too large")
     explanation = req.get("explanation")
@@ -219,6 +230,8 @@ def validate_request(req: dict, request_name: str, allowed_root: Path, max_timeo
     if len(stdin) > max_stdin_bytes:
         raise ValueError("stdin is too large")
     write_scope = req.get("write_scope", "auto")
+    if trusted is not None and (write_scope != "auto" or stdin):
+        raise ValueError("trusted operations require auto scope and no arbitrary stdin")
     if write_scope not in WRITE_SCOPES:
         raise ValueError("write_scope must be auto, read_only, repository, or system")
     operation_id = req.get("operation_id")
@@ -227,6 +240,7 @@ def validate_request(req: dict, request_name: str, allowed_root: Path, max_timeo
     return {
         "id": rid, "cwd": cwd, "command": command, "timeout": timeout, "stdin": stdin,
         "write_scope": write_scope, "explanation": explanation, "operation_id": operation_id,
+        "trusted_operation": trusted,
     }
 
 
@@ -359,6 +373,21 @@ def resolve_write_plan(request: dict, cfg: dict) -> dict:
     allowed_root = Path(cfg["allowed_root"]).expanduser().resolve()
     state_dir = Path(cfg["state_dir"]).expanduser().resolve()
     requested = request.get("write_scope", "auto")
+    if request.get("trusted_operation") is not None:
+        requested_op = request["trusted_operation"]
+        operation = registered_operation_from_config(
+            cfg, requested_op["name"], requested_op["action"], allowed_root
+        )
+        return {
+            "requested": requested, "effective": "trusted_operation",
+            "write_roots": None, "read_roots": None, "deny_home_reads": False,
+            "allow_network": True,
+            "confirmation_category": "trusted_operation",
+            "trusted_operation_name": operation.name,
+            "trusted_operation_action": requested_op["action"],
+            "trusted_operation_sha256": operation.executable_sha256,
+            "trusted_operation_roots": [str(root) for root in operation.permitted_roots],
+        }
     if requested not in WRITE_SCOPES:
         raise ValueError("write_scope must be auto, read_only, repository, or system")
 
@@ -692,7 +721,8 @@ def run_shell(cwd: Path, command: str, stdin: bytes, timeout: int, shell: str = 
               sandbox_write_roots: list[Path] | None = None,
               sandbox_allow_network: bool = True,
               sandbox_read_roots: list[Path] | None = None,
-              sandbox_deny_home_reads: bool = False) -> dict:
+              sandbox_deny_home_reads: bool = False,
+              argv_override: list[str] | None = None) -> dict:
     shell_path = Path(shell)
     if not shell_path.is_absolute() or not shell_path.is_file() or not os.access(shell_path, os.X_OK):
         raise ValueError("configured shell must be an existing absolute file")
@@ -701,7 +731,7 @@ def run_shell(cwd: Path, command: str, stdin: bytes, timeout: int, shell: str = 
 
     sandboxed = sandbox_write_roots is not None
     sandbox_temp: Path | None = None
-    argv = [str(shell_path), "-lc", command]
+    argv = list(argv_override) if argv_override is not None else [str(shell_path), "-lc", command]
     env = child_environment(
         request_id, sandboxed=sandboxed,
         caller_bridge_instance_id=caller_bridge_instance_id,
