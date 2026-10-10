@@ -27,6 +27,8 @@ class OneRunDirtyCheckoutLauncherTests(unittest.TestCase):
         (self.original / "shell_bridge").mkdir()
         (self.original / "shell_bridge" / "v6_release_once.sh").write_text(
             "#!/bin/bash\nexit 99\n", encoding="utf-8")
+        (self.original / "shell_bridge" / "v6_launch_once.sh").write_text(
+            LAUNCH.read_text(encoding="utf-8"), encoding="utf-8")
         git("add", ".", cwd=self.original)
         git("-c", "user.email=test@example.invalid",
             "-c", "user.name=Release Test", "commit", "-qm", "safe release fixture",
@@ -71,6 +73,20 @@ class OneRunDirtyCheckoutLauncherTests(unittest.TestCase):
         result = self.run_launcher()
         self.assertEqual(result.returncode, 0, result.stderr)
         self.assertFalse(marker.exists(), "local untracked checkout hook executed")
+
+    def test_bootstrap_executes_exact_fetched_launcher_without_touching_dirty_checkout(self):
+        before = git("status", "--porcelain", cwd=self.original)
+        git("fetch", "origin", "refs/heads/main:refs/remotes/origin/main",
+            cwd=self.original)
+        script = git("show", "origin/main:shell_bridge/v6_launch_once.sh",
+                     cwd=self.original)
+        result = subprocess.run(
+            ["/bin/bash", "-c", script, "--", str(self.original)],
+            env=self.env, text=True, capture_output=True, timeout=30)
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertIn("V6_RELEASE_SOURCE_PREPARED_ONLY=1", result.stdout)
+        self.assertEqual(git("status", "--porcelain", cwd=self.original), before)
+        self.assertTrue(self.local_dirty_file.exists())
 
     def test_existing_release_worktree_is_not_replayed_or_overwritten(self):
         first = self.run_launcher()
