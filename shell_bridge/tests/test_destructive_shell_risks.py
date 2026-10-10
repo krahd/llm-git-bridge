@@ -30,6 +30,18 @@ class DestructiveShellRiskTests(unittest.TestCase):
                 self.assertEqual(bridge.high_impact_command_category(command),
                                  "filesystem_recursive_delete")
 
+    def test_plain_rm_and_unlink_require_confirmation_even_inside_repository(self):
+        for command in ("rm untracked-paper-draft.txt",
+                        "rm -f rendered-output.png",
+                        "unlink old-worktree-log"):
+            with self.subTest(command=command):
+                self.assertEqual(bridge.high_impact_command_category(command),
+                                 "filesystem_delete")
+
+    def test_git_rm_stays_distinct_from_irreversible_direct_delete(self):
+        self.assertIsNone(bridge.high_impact_command_category(
+            "git rm tracked-file.txt"))
+
     def test_benign_commands_remain_unprompted(self):
         for command in ("git status", "git diff --stat", "git clean -n",
                         "printf ok", "rm --help"):
