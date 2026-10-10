@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import hashlib
 import json
+import re
 from pathlib import Path
 import sys
 
@@ -48,9 +49,12 @@ def main(argv: list[str]) -> int:
         return 2
     action, source, rid, arg = argv[1:]
     try:
-        if not rid.startswith("v6-ssh-"):
+        if (not rid.startswith("v6-ssh-") or
+                re.fullmatch(r"[a-z0-9][a-z0-9._-]{0,127}", rid) is None):
             raise ValueError("invalid SSH smoke request identity")
         if action == "create":
+            if not Path(arg).is_dir():
+                raise ValueError("SSH smoke cwd does not exist")
             Path(source).write_text(json.dumps(
                 make_request(rid, arg), sort_keys=True, separators=(",", ":")),
                 encoding="utf-8")
