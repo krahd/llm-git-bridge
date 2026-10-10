@@ -308,12 +308,18 @@ class RemoteExecutionApprovalFatigueTests(unittest.TestCase):
             for action in ("status", "identity"):
                 self.assertTrue(bridge.pinned_ssh_readonly_preapproved(
                     query(action), cfg, plan))
+            self.assertTrue(bridge.pinned_ssh_material_unchanged(
+                query("service-restart"), cfg, plan))
+            self.assertFalse(bridge.pinned_ssh_readonly_preapproved(
+                query("service-restart"), cfg, plan))
             for action in ("delete", "ssh", "status --anything"):
                 self.assertFalse(bridge.pinned_ssh_readonly_preapproved(
                     query(action), cfg, plan))
             self.assertFalse(bridge.pinned_ssh_readonly_preapproved(
                 query("status"), cfg, {"effective": "system"}))
             known.write_text("CHANGED HOST KEY")
+            self.assertFalse(bridge.pinned_ssh_material_unchanged(
+                query("service-restart"), cfg, plan))
             self.assertFalse(bridge.pinned_ssh_readonly_preapproved(
                 query("status"), cfg, plan))
             known.write_text("example.invalid ssh-ed25519 pinned")
