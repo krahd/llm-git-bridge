@@ -37,6 +37,17 @@ class CutoverIdentityTests(unittest.TestCase):
         self.assertIn('do not restart v5 until a journal/mailbox reconciliation', text)
 
 
+    def test_cutover_requires_fresh_exact_build_before_any_production_smoke(self):
+        text = (pathlib.Path(__file__).parents[1] / "cutover.sh").read_text()
+        start = text.index('launchctl bootstrap "gui/${UID_NOW}" "$NEW_PLIST"')
+        health = text.index('HEALTH_VERIFIER=', start)
+        smoke = text.index('# End-to-end production smoke:', start)
+        self.assertLess(start, health)
+        self.assertLess(health, smoke)
+        self.assertIn('verify_v6_candidate_health.py', text)
+        self.assertIn('"$EXPECTED_SOURCE_COMMIT" "$NEW_LABEL"', text)
+        self.assertIn('production daemon exact build, PID, or heartbeat not verified', text)
+
     def test_cutover_verifies_staged_manifest_and_approval_helper_before_service_switch(self):
         text = (pathlib.Path(__file__).parents[1] / "cutover.sh").read_text()
         manifest = text.index('install-manifest.json')
