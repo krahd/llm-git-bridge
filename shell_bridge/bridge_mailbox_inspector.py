@@ -8,6 +8,7 @@ arguments, tokens, or executable content. It does not change service state.
 from __future__ import annotations
 
 import json
+import re
 import subprocess
 from pathlib import Path
 
@@ -31,14 +32,14 @@ def inspect(home: Path, *, launchctl=None) -> dict:
         record = {"label": label}
         file = home / relative
         try:
-            if file.is_symlink():
-                raise ValueError("config symlink rejected")
+            if any(node.is_symlink() for node in (file, *file.parents) if node != home.parent):
+                raise ValueError("config path traverses symlink")
             value = json.loads(file.read_text("utf-8"))
             if not isinstance(value, dict):
                 raise ValueError("config is not an object")
             for key in FIELDS:
                 v = value.get(key)
-                if isinstance(v, str) and len(v) <= 512:
+                if isinstance(v, str) and len(v) <= 512 and not re.search(r"[\\x00-\\x1f\\x7f]", v):
                     record[key] = v
             record["config_status"] = "readable"
         except (OSError, ValueError, UnicodeError):
