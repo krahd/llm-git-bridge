@@ -32,6 +32,9 @@ rollback() {
       # successful process shutdown is not evidence that its journal is safe
       # for v5. Hold both consumers rather than blindly replaying requests.
       launchctl bootout "gui/${UID_NOW}/${NEW_LABEL}" >/dev/null 2>&1 || true
+      if launchctl print "gui/${UID_NOW}/${NEW_LABEL}" >/dev/null 2>&1; then
+        printf "CRITICAL: v6 remains loaded after rollback bootout; do not restart any legacy mailbox consumer.\n" >&2
+      fi
       mkdir -p "$STATE_DIR"; chmod 700 "$STATE_DIR" || true
       printf 'HOLD: v6 admitted a request or could have; do not restart v5 until a journal/mailbox reconciliation proves no duplicate effects.\n' >&2
       printf '%s\n' "cutover_holding_reconciliation $(date -u +%Y-%m-%dT%H:%M:%SZ)" > "$STATE_DIR/cutover-reconciliation-required"
