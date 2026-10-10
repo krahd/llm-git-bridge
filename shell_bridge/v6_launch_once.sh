@@ -59,7 +59,9 @@ chmod 700 "$BASE" || hold "cannot protect release source directory"
 DEST="$BASE/$SOURCE"
 [ ! -e "$DEST" ] && [ ! -L "$DEST" ] ||
   hold "this exact release worktree already exists; reconcile rather than rerun"
-git -C "$REPO" worktree add --detach "$DEST" "$SOURCE" ||
+# Prevent a pre-existing local checkout hook (which is not tracked in
+# canonical GitHub main) from executing during release source preparation.
+git -c core.hooksPath=/dev/null -C "$REPO" worktree add --detach "$DEST" "$SOURCE" ||
   hold "worktree creation was partial or failed; inspect before any retry"
 [ "$(git -C "$DEST" rev-parse HEAD)" = "$SOURCE" ] ||
   hold "detached release source HEAD differs from fetched main"
