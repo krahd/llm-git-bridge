@@ -84,6 +84,9 @@ def load_policy(directory: Path, action: str) -> tuple[list[str], int]:
         "-o", "ControlMaster=no", "-o", "ProxyCommand=none",
         "-o", "ConnectTimeout=8",
         "-o", "UserKnownHostsFile=" + str(known_hosts),
+        "-o", "GlobalKnownHostsFile=/dev/null",
+        "-o", "UpdateHostKeys=no",
+        "-o", "VerifyHostKeyDNS=no",
         "-i", str(key), "-p", str(port),
         user + "@" + host, _COMMANDS[action],
     ]
