@@ -221,3 +221,18 @@ This prevents one known local code-execution path during source preparation.
 It does not claim that arbitrary Git filters, system-wide executable
 configuration or third-party credential helpers have been audited or that
 a GitHub checkout is a sandbox. Production activation remains guarded.
+
+## Approval UI ownership isolation
+
+The source installer now assigns each installed v6 LaunchAgent a unique,
+deterministic macOS application bundle identifier derived from that agent's
+exact label. Staging and production approval applications must not share a
+Launch Services identity: otherwise `open -a` can reuse or activate an
+already-running approval app whose `ApprovalRoot` belongs to the wrong
+staging instance. Each app's Info.plist still binds its own approval root and
+helper executable. A regression test **executes the installer's real plist
+generator** twice and verifies distinct staging/production bundle identities,
+stable repeat identity, and correctly isolated approval roots.
+
+This prevents one known ambiguity, but it does not replace the required live
+native approval DENY/ALLOW tests on the owner's Mac before v5 can stop.
