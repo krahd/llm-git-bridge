@@ -19,6 +19,7 @@ def request(rid: str, cwd: str) -> dict:
         "explanation": "Migration acceptance: verify a pinned, read-only trusted helper and native approval UI",
         "write_scope": "auto",
         "timeout_seconds": 60,
+        "operation_id": rid,
     }
 
 
