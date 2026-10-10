@@ -201,7 +201,7 @@ After reviewing the canonical remote `main`, execute one interactive command
 in a Mac Terminal:
 
 ```bash
-git -C /Users/tom/tom-repos/projects/llm-git-bridge fetch origin refs/heads/main:refs/remotes/origin/main && /bin/bash -c "$(git -C /Users/tom/tom-repos/projects/llm-git-bridge show origin/main:shell_bridge/v6_launch_once.sh)" -- /Users/tom/tom-repos/projects/llm-git-bridge
+git -c core.hooksPath=/dev/null -C /Users/tom/tom-repos/projects/llm-git-bridge fetch origin refs/heads/main:refs/remotes/origin/main && /bin/bash -c "$(git -C /Users/tom/tom-repos/projects/llm-git-bridge show origin/main:shell_bridge/v6_launch_once.sh)" -- /Users/tom/tom-repos/projects/llm-git-bridge
 ```
 
 The launcher validates the canonical GitHub origin and exact fetched commit,
@@ -222,6 +222,15 @@ of an isolated source worktree without launching the release controller.
 No dry-run output claims production acceptance.
 
 ## Local Git hook isolation during source preparation
+
+The bootstrap's initial `git fetch` now explicitly disables the local
+`reference-transaction` and other Git hooks as well. Fetching an updated
+remote-tracking ref can invoke an untracked local hook before the worktree is
+prepared, so protecting only `worktree add` was insufficient. Both steps
+operate with `core.hooksPath=/dev/null`; neither modifies the user's
+existing Git hooks or unpublished working files.
+
+
 
 A Git checkout's `.git/hooks/post-checkout` directory is local-only state,
 not controlled by canonical GitHub `main`. Preparing a new detached worktree
