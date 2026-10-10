@@ -237,6 +237,8 @@ def validate_request(req: dict, request_name: str, allowed_root: Path, max_timeo
     operation_id = req.get("operation_id")
     if operation_id is not None and (not isinstance(operation_id, str) or not ID_RE.fullmatch(operation_id)):
         raise ValueError("operation_id must be a stable lowercase ASCII identifier")
+    if trusted is not None and operation_id is None:
+        raise ValueError("trusted operations require a durable logical operation_id")
     return {
         "id": rid, "cwd": cwd, "command": command, "timeout": timeout, "stdin": stdin,
         "write_scope": write_scope, "explanation": explanation, "operation_id": operation_id,
@@ -1158,9 +1160,20 @@ def _process_one_request(name: str, cfg: dict, preloaded_raw: bytes | None = Non
     confirmation = None
     high_impact_category = high_impact_command_category(v["command"])
     category = high_impact_category or write_plan.get("confirmation_category")
+    approval_command = v["command"]
+    if v.get("trusted_operation") is not None:
+        approved_op = registered_operation_from_config(
+            cfg, v["trusted_operation"]["name"], v["trusted_operation"]["action"], allowed_root
+        )
+        approval_command = (
+            f"Trusted helper: {approved_op.executable}\\n"
+            f"Action: {v['trusted_operation']['action']}\\n"
+            f"SHA-256: {approved_op.executable_sha256}\\n"
+            f"Permitted roots: {', '.join(str(root) for root in approved_op.permitted_roots)}"
+        )
     if category is not None:
         confirmation = request_operator_confirmation(
-            request_id=v["id"], cwd=v["cwd"], command=v["command"], category=category, cfg=cfg,
+            request_id=v["id"], cwd=v["cwd"], command=approval_command, category=category, cfg=cfg,
             explanation=v.get("explanation"),
         )
         if not confirmation["approved"]:
@@ -1175,6 +1188,24 @@ def _process_one_request(name: str, cfg: dict, preloaded_raw: bytes | None = Non
         # Approval does not grant arbitrary network/credential access to a raw
         # shell, which could circumvent mandatory repository-visibility policy.
         # Trusted Git lifecycle capabilities have separate restricted network access.
+
+    trusted_argv = None
+    if v.get("trusted_operation") is not None:
+        try:
+            installed_op = registered_operation_from_config(
+                cfg, v["trusted_operation"]["name"], v["trusted_operation"]["action"], allowed_root
+            )
+            trusted_argv = [
+                str(installed_op.executable), v["trusted_operation"]["action"],
+                *(str(root) for root in installed_op.permitted_roots),
+            ]
+        except TrustedOperationPolicyError as exc:
+            result = result_envelope(v["id"], request_sha, "rejected", {
+                "message": f"trusted helper integrity changed before execution: {exc}",
+                "operator_confirmation": confirmation,
+            })
+            _persist_then_publish(result, local_result, finished_marker, name, cfg)
+            return
 
     atomic_write(started_marker, json.dumps({
         "request_sha256": request_sha,
@@ -1204,6 +1235,7 @@ def _process_one_request(name: str, cfg: dict, preloaded_raw: bytes | None = Non
             sandbox_allow_network=write_plan.get("allow_network", True),
             sandbox_read_roots=write_plan.get("read_roots"),
             sandbox_deny_home_reads=bool(write_plan.get("deny_home_reads", False)),
+            argv_override=trusted_argv,
         )
         if exec_result.get("aborted_by_daemon_shutdown"):
             result = result_envelope(v["id"], request_sha, "indeterminate", {
