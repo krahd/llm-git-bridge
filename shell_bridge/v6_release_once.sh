@@ -178,6 +178,24 @@ while IFS='|' read -r label plist; do
   OLD_PLISTS+=("$plist")
   OLD_ARCHIVED+=("$ARCHIVE_DIR/$label.plist")
 done < "$ROLLBACK_LIST"
+# Historical non-loaded v5 alias can be configured to auto-load on a later
+# login. Archive its top-level plist as well, but only when not currently loaded.
+LEGACY_ALIAS="$HOME/Library/LaunchAgents/com.tom.chatgpt-shell-bridge.plist"
+if [ -e "$LEGACY_ALIAS" ] || [ -L "$LEGACY_ALIAS" ]; then
+  [ -f "$LEGACY_ALIAS" ] && [ ! -L "$LEGACY_ALIAS" ] ||
+    fail "legacy alias plist is not a regular file"
+  if launchctl print "gui/$(id -u)/com.tom.chatgpt-shell-bridge" >/dev/null 2>&1; then
+    fail "legacy alias is unexpectedly loaded; cannot safely archive it"
+  fi
+  alias_found=0
+  for existing in "${OLD_PLISTS[@]}"; do
+    [ "$existing" = "$LEGACY_ALIAS" ] && alias_found=1
+  done
+  if [ "$alias_found" -eq 0 ]; then
+    OLD_PLISTS+=("$LEGACY_ALIAS")
+    OLD_ARCHIVED+=("$ARCHIVE_DIR/com.tom.chatgpt-shell-bridge.plist")
+  fi
+fi
 [ "${#OLD_PLISTS[@]}" -gt 0 ] || fail "no stopped production services available for archiving"
 launchctl print "gui/$(id -u)/$PROD_LABEL" >/dev/null 2>&1 || fail "production v6 is no longer loaded"
 mkdir -m 700 "$ARCHIVE_DIR"
