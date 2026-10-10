@@ -106,6 +106,20 @@ IFS=$'\t' read -r PROD_REMOTE PROD_BASE PROD_ROOT PROD_REQ PROD_RES PROD_ALLOWED
 [ "$REMOTE" = "$PROD_REMOTE" ] || fail "staged candidate uses a different rclone remote"
 [ "$PROD_STATE" = "$HOME/.local/state/chatgpt-shell-bridge" ] || fail "legacy durable state path changed; reconcile manually"
 [ -d "$PROD_ALLOWED" ] && [ -d "$PROD_STATE" ] || fail "v5 root/state not accessible"
+# The stage-only installer may create a missing mailbox. Never let that
+# happen to production: prove the legacy named folder resolves to the exact
+# already-running pinned production folder ID first.
+PROD_DIRECTORY_INVENTORY="$(rclone lsjson "$PROD_REMOTE" --dirs-only --max-depth 1)" ||
+  fail "cannot verify legacy production mailbox path"
+python3 - "$PROD_DIRECTORY_INVENTORY" "$PROD_BASE" "$PROD_ROOT" <<'PYV5PATH'
+import json,sys
+items=json.loads(sys.argv[1])
+base,expected=sys.argv[2:]
+matches=[x for x in items if isinstance(x,dict) and
+         x.get("IsDir") and x.get("Name")==base]
+if len(matches)!=1 or matches[0].get("ID")!=expected:
+    raise SystemExit("HOLD: v5 mailbox path cannot be resolved to pinned production folder")
+PYV5PATH
 PROD_LABEL="net.laurenzo.local-executor-bridge-v6-production-${SOURCE:0:12}"
 PROD_INSTALL="$HOME/.local/share/local-executor-bridge-v6-production-${SOURCE:0:12}"
 PROD_CONFIG_DIR="$HOME/.config/local-executor-bridge-v6-production-${SOURCE:0:12}"
