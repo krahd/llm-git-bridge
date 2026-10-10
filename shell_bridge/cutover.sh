@@ -97,7 +97,7 @@ need python3; need rclone; need launchctl
 [ -f "$NEW_INSTALL_DIR/ssh_pinned_helper.py" ] || fail "staged v6 pinned SSH helper missing"
 [ -f "$NEW_INSTALL_DIR/install-manifest.json" ] || fail "staged v6 install manifest missing: $NEW_INSTALL_DIR/install-manifest.json"
 
-python3 - "$NEW_INSTALL_DIR/install-manifest.json" "$NEW_INSTALL_DIR/bridge.py" "$NEW_INSTALL_DIR/workspace.py" "$NEW_INSTALL_DIR/approval_helper.py" "$NEW_INSTALL_DIR/trusted_operations.py" $NEW_INSTALL_DIR/bridge_mailbox_inspector.py" "$NEW_INSTALL_DIR/ssh_pinned_helper.py" "$NEW_CONFIG" "$NEW_PLIST" "$NEW_INSTALL_DIR/Local Executor Approval.app/Contents/Info.plist" "$NEW_INSTALL_DIR/Local Executor Approval.app/Contents/MacOS/local-executor-approval" <<'PYMANIFEST' || fail "staged v6 install manifest integrity check failed"
+python3 - "$NEW_INSTALL_DIR/install-manifest.json" "$NEW_INSTALL_DIR/bridge.py" "$NEW_INSTALL_DIR/workspace.py" "$NEW_INSTALL_DIR/approval_helper.py" "$NEW_INSTALL_DIR/trusted_operations.py" "$NEW_INSTALL_DIR/bridge_mailbox_inspector.py" "$NEW_INSTALL_DIR/ssh_pinned_helper.py" "$NEW_CONFIG" "$NEW_PLIST" "$NEW_INSTALL_DIR/Local Executor Approval.app/Contents/Info.plist" "$NEW_INSTALL_DIR/Local Executor Approval.app/Contents/MacOS/local-executor-approval" <<'PYMANIFEST' || fail "staged v6 install manifest integrity check failed"
 import hashlib,json,sys
 manifest_path,bridge_path,workspace_path,approval_helper_path,trusted_path,inspector_path,ssh_path,config_path,plist_path,app_info_path,app_exec_path=sys.argv[1:]
 def sha256(path):
