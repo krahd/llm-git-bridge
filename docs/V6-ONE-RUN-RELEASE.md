@@ -134,6 +134,20 @@ If previous production workflows depend on arbitrary outbound SSH or transfers,
 SSH capabilities and live tests are available. This is a business-functionality
 and safety gate, not a request to weaken the sandbox.
 
+## Optional inbound SSH acceptance
+
+Direct macOS Remote Login is separate from the Google Drive bridge transport
+and is **not required** to operate v6 remotely through the bridge. By default,
+the one-run controller records `INBOUND_SSH_NOT_REQUESTED=1` and skips
+Remote Login inspection and external-device witness verification.
+
+To qualify direct inbound SSH as an additional capability during the same
+release, run the launcher with `V6_REQUIRE_INBOUND_SSH=1`. In that mode,
+both the restricted-account preflight and real separate-device witness
+remain mandatory and fail closed. Other values are not an enablement;
+only the exact value `1` opts in. This opt-in does not configure or expose
+Remote Login or qualify reachability over the public internet.
+
 ## Inbound SSH requirement and limits
 
 Inbound SSH is macOS Remote Login, not the bridge transport. Before v6
