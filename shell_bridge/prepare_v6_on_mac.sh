@@ -52,7 +52,8 @@ state="$HOME/.local/state/local-executor-bridge-v6-${suffix}"
 if launchctl print "gui/$(id -u)/$label" >/dev/null 2>&1; then
   echo "HOLD: candidate label already loaded; will not overwrite running service" >&2; exit 6
 fi
-if [ -e "$config" ] || [ -e "$plist" ] || [ -e "$install" ] || [ -e "$state" ]; then
+if [ -e "$config" ] || [ -L "$config" ] || [ -e "$plist" ] || [ -L "$plist" ] || \
+  [ -e "$install" ] || [ -L "$install" ] || [ -e "$state" ] || [ -L "$state" ]; then
   echo "HOLD: candidate installation already exists. Reconcile before reuse; nothing overwritten." >&2; exit 6
 fi
 if [ -z "${RCLONE_REMOTE:-}" ]; then
@@ -69,6 +70,21 @@ PYREMOTE
 )"
 fi
 export RCLONE_REMOTE
+candidate_base="Local Executor Bridge v6 Candidate ${source_commit:0:12}"
+remote_dirs="$(rclone lsjson "$RCLONE_REMOTE" --dirs-only --max-depth 1)" || {
+  echo "HOLD: Drive mailbox inventory failed; no changes made" >&2
+  exit 7
+}
+python3 - "$remote_dirs" "$candidate_base" <<'PYREMOTEID'
+import json,sys
+try:
+    records=json.loads(sys.argv[1])
+    matches=[x for x in records if x.get('IsDir') and x.get('Name')==sys.argv[2]]
+except (ValueError,TypeError,AttributeError):
+    raise SystemExit('HOLD: invalid remote directory inventory')
+if matches:
+    raise SystemExit('HOLD: candidate mailbox already exists remotely; never adopt an unknown consumer mailbox')
+PYREMOTEID
 allowed_root="${ALLOWED_ROOT:-$HOME/tom-repos}"
 python3 - "$ROOT" "$allowed_root" <<'PYALLOWED'
 import pathlib,sys
@@ -82,7 +98,7 @@ if not allowed.is_dir():
     raise SystemExit('HOLD: allowed root is not a directory')
 PYALLOWED
 ALLOWED_ROOT="$allowed_root" \
-BASE_PATH="Local Executor Bridge v6 Candidate ${source_commit:0:12}" \
+BASE_PATH="$candidate_base" \
 LOCAL_EXECUTOR_LABEL="$label" \
 INSTALL_DIR="$install" CONFIG_DIR="$(dirname "$config")" STATE_DIR="$state" PLIST="$plist" \
 bash shell_bridge/install.sh --stage-only
