@@ -252,6 +252,29 @@ class V6ApprovalHelperSourceTests(unittest.TestCase):
         self.assertIn("NSApplication.shared", gui)
         self.assertIn("NSStatusBar.system.statusItem", gui)
 
+
+class RemoteExecutionApprovalFatigueTests(unittest.TestCase):
+    def test_raw_ssh_commands_are_classified_as_remote_effects(self):
+        for command in (
+            "ssh server.example.org uptime",
+            "scp report.txt server.example.org:/tmp/report.txt",
+            "sftp server.example.org",
+            "rsync -av directory/ server.example.org:/srv/",
+        ):
+            with self.subTest(command=command):
+                self.assertEqual(
+                    bridge.high_impact_command_category(command),
+                    "remote_shell_or_copy",
+                )
+
+    def test_raw_remote_shell_rejected_before_approval_popup(self):
+        from pathlib import Path
+        source = Path(bridge.__file__).read_text(encoding="utf-8")
+        preflight = source.index('remote_shell_requires_pinned_capability')
+        approval = source.index('confirmation = request_operator_confirmation(')
+        self.assertLess(preflight, approval)
+        self.assertIn("raw SSH/SCP/SFTP/rsync cannot be authorized by a popup", source)
+
 if __name__ == "__main__": unittest.main()
 
 class BridgeMenuIconAssetTests(unittest.TestCase):
