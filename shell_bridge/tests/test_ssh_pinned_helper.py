@@ -1,4 +1,6 @@
+import io
 import json
+import types
 import os
 import pathlib
 import sys
@@ -78,7 +80,7 @@ class PinnedSSHHelperTests(unittest.TestCase):
     def test_remote_success_is_bounded(self):
         response = helper.subprocess.CompletedProcess([], 0, stdout=b"healthy", stderr=b"")
         with patch.object(helper.subprocess, "run", return_value=response) as run:
-            with patch.object(helper.sys.stdout, "buffer", create=True):
+            with patch.object(helper.sys, "stdout", types.SimpleNamespace(buffer=io.BytesIO())):
                 self.assertEqual(helper.execute("status", str(self.root)), 0)
             self.assertEqual(run.call_count, 1)
             self.assertFalse(run.call_args.kwargs["check"])
