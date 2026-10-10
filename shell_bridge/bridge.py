@@ -1614,6 +1614,7 @@ def installed_build_identity() -> dict:
             "workspace_sha256": install / "workspace.py",
             "approval_helper_sha256": install / "approval_helper.py",
             "trusted_operations_sha256": install / "trusted_operations.py",
+            "bridge_mailbox_inspector_sha256": install / "bridge_mailbox_inspector.py",
             "approval_app_info_sha256": install / "Local Executor Approval.app/Contents/Info.plist",
             "approval_app_executable_sha256": install / "Local Executor Approval.app/Contents/MacOS/local-executor-approval",
         }
