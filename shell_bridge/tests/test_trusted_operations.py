@@ -52,7 +52,7 @@ class TrustedOperationContractTests(unittest.TestCase):
         self.assertFalse(hasattr(trusted_operations, "execute"))
 
     def test_helper_integrity_and_modified_bytes(self):
-        with tempfile.TemporaryDirectory() as directory:
+        with tempfile.TemporaryDirectory(dir=str(pathlib.Path(tempfile.gettempdir()).resolve())) as directory:
             helper = pathlib.Path(directory) / "helper"
             helper.write_bytes(b"safe helper")
             helper.chmod(0o700)
