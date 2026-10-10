@@ -1232,6 +1232,16 @@ def _process_one_request(name: str, cfg: dict, preloaded_raw: bytes | None = Non
     # Installation-time consent applies only to these exact pinned,
     # read-only SSH helper actions. Every other trusted operation must still
     # pass the independent native operator approval gate.
+    if (v.get("trusted_operation") is not None
+            and v["trusted_operation"]["name"] == "ssh-pinned-readonly"
+            and cfg.get("preapproved_pinned_ssh_readonly") is True
+            and not pinned_ssh_readonly_preapproved(v, cfg, write_plan)):
+        result = result_envelope(v["id"], request_sha, "rejected", {
+            "message": "pinned SSH policy or known-host material changed since operator installation; re-provision locally",
+            "policy_reason": "ssh_policy_pin_mismatch",
+        })
+        _persist_then_publish(result, local_result, finished_marker, name, cfg)
+        return
     if pinned_ssh_readonly_preapproved(v, cfg, write_plan):
         category = None
         confirmation = {
