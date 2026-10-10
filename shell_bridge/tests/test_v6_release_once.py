@@ -62,11 +62,15 @@ class SingleRunReleaseContractTests(unittest.TestCase):
         self.assertIsNotNone(re.fullmatch("v6-ssh-staging-[0-9]{14}-[0-9a-f]{12}", value))
         self.assertNotIn("$", value)
 
-    def test_inbound_ssh_requires_real_separate_device_witness_before_cutover(self):
+    def test_opted_in_inbound_ssh_requires_separate_device_witness_before_cutover(self):
         local_switch = SCRIPT.index('inbound_ssh_preflight.py')
         challenge = SCRIPT.index('inbound_ssh_witness.py verify')
         cutover = SCRIPT.index('bash shell_bridge/cutover.sh')
         retirement = SCRIPT.index('echo "Phase 8: archive stopped production v5')
+        self.assertIn('if [ "${V6_REQUIRE_INBOUND_SSH:-0}" = 1 ]; then', SCRIPT)
+        self.assertEqual(SCRIPT.count('if [ "${V6_REQUIRE_INBOUND_SSH:-0}" = 1 ]; then'), 2)
+        self.assertIn('INBOUND_SSH_NOT_REQUESTED=1', SCRIPT)
+        self.assertIn('INBOUND_SSH_WITNESS_SKIPPED=1', SCRIPT)
         self.assertLess(local_switch, challenge)
         self.assertLess(challenge, cutover)
         self.assertLess(cutover, retirement)
