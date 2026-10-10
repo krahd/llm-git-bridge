@@ -1,0 +1,66 @@
+# Remote execution authority: v6 readiness policy
+
+## Current support and limitations
+
+The v6 request mailbox is the transport for remote invocation of **local Mac shell
+commands**. A ChatGPT/Codex provider can submit terminal commands to the daemon.
+The daemon has bounded timeout, output, process-group containment, durable
+request IDs and crash ambiguity semantics, and a macOS filesystem/network sandbox
+for ordinary requests. Within an allowed Git worktree, reversible changes use
+repository scope without an ordinary approval dialog. Read-only commands require
+no approval. Requests seeking unrestricted system shell are denied.
+
+**Raw SSH/SCP/SFTP/rsync is not yet a usable v6 capability.** The shell sandbox
+denies its network access, and a popup cannot change this rule. The bridge now
+rejects these unbounded network operations *before* prompting rather than
+pretending confirmation would make them work.
+
+## Intended friction-minimizing authorization
+
+| Operation | Default |
+| --- | --- |
+| Read-only inspections inside allowed roots | Execute, no popup |
+| Reversible Git/worktree edits with sandbox network denied | Execute, no popup; journal and verify |
+| Destructive or irreversible local operation | Explicit consequence-specific confirmation; never rely on a broad allow-all |
+| Credential/secrets access, external side effects | Separate narrow installed capability; independent confirmation if high impact |
+| Raw arbitrary SSH command or arbitrary remote target | Deny, no cosmetic popup |
+| Host- and action-pinned SSH maintenance/read-only inspection | **To implement and qualify** as a separate trusted helper |
+| Remote irreversible SSH mutations (deployment, deletion, restart) | Require exact host/operation/scope approval, durable ID and visible rollback plan |
+
+## Host-pinned SSH helper requirements before v5 retirement
+
+A separately provisioned helper must:
+
+1. Use a local operator-owned host/action allowlist that agents cannot modify.
+   Resolve host aliases through pinned hostname, port, username, and known host
+   key; never enable StrictHostKeyChecking=no, arbitrary ProxyCommand, or agent-
+   supplied SSH options. Prefer a dedicated restricted key/account.
+2. Take only a registered action token, **not** arbitrary remote shell text,
+   via the established trusted-operation schema. Map each action to a fixed
+   pre-reviewed remote program/argv and privilege level.
+3. Avoid prompting for routine bounded remote *read* operations, only after
+   the host/key/action set has been explicitly installed by the Mac operator.
+   Privileged or irreversible remote operations continue to require exact
+   transaction approval. This requires a deliberate policy upgrade: current
+   trusted-operation descriptors always require approval.
+4. Give every call a durable operation ID, bounded wall-clock timeout and
+   output, and a host-key-verified SSH session. Network timeouts are
+   **indeterminate**, not permission to auto-replay.
+5. Reject unknown hosts, changed host keys, unexpected identities, ambiguous
+   responses, and commands not on the approved inventory. Log the pinned
+   identity, action, request hash, timestamp, exit state and confirmation, but
+   redact credentials and sensitive output.
+6. Qualify on macOS with a disposable SSH test endpoint: successful read,
+   operator denial, hostname/key mismatch, no-network failure, timeout while
+   remote effects may have happened, retries, user/key rotation, and isolation
+   from non-allowlisted hosts. Run an explicitly approved live acceptance
+   probe before claiming production SSH ready.
+
+**Do not sunset v5 based only on the ordinary shell smoke and approval GUI
+tests.** v6 must demonstrate the actual remote terminal flows currently used by
+the ecosystem and the agreed bounded SSH workflow, or explicitly document SSH
+as a deferred non-critical feature with the operator's consent.
+
+The one-invocation local release script proves isolated mailbox transport,
+read-only terminal execution and critical local approvals, but it is not
+sufficient evidence that remote SSH maintenance is qualified.
