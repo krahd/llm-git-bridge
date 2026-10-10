@@ -106,7 +106,7 @@ def inspect_services(home: Path, launchctl_listing: str, process_listing: str | 
             if len(part) != 2 or not part[0].isdecimal():
                 continue
             pid, argv = part
-            if (re.search(r"(?:^|/)bridge\\.py\\s+daemon\\b", argv)
+            if (re.search(r"(?:^|/)bridge\.py\s+daemon\b", argv)
                     and pid not in known_pids):
                 problems.append("unmanaged bridge daemon PID=" + pid)
     for field in ("drive_root_folder_id", "requests_folder_id", "results_folder_id",
