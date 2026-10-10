@@ -59,6 +59,39 @@ class PinnedSSHHelperTests(unittest.TestCase):
                 with self.assertRaises(helper.SSHPolicyError):
                     helper.load_policy(self.root, "status")
 
+    def test_operator_pinned_remote_argv_uses_shell_quoting(self):
+        self.data["schema"] = 2
+        self.data["commands"] = {
+            "repo-status": ["/usr/bin/git", "-C", "/srv/app folder", "status", "--short"],
+            "service-restart": ["/bin/systemctl", "restart", "app.service"],
+        }
+        self.write_policy()
+        argv, timeout = helper.load_policy(self.root, "repo-status")
+        self.assertEqual(timeout, 25)
+        self.assertEqual(argv[-1], "/usr/bin/git -C '/srv/app folder' status --short")
+        self.assertEqual(helper.load_policy(self.root, "service-restart")[0][-1],
+                         "/bin/systemctl restart app.service")
+        with self.assertRaises(helper.SSHPolicyError):
+            helper.load_policy(self.root, "other")
+
+    def test_profile_rejects_unsafe_and_unreviewed_commands(self):
+        self.data["schema"] = 2
+        for commands in [
+            {"status": ["/bin/true"]},
+            {"run": ["relative-executable", "arg"]},
+            {"run": ["/bin/echo", "bad\\narg"]},
+            {"run": "/bin/echo"},
+            {"run": []},
+            {"run": ["/bin/../bin/sh"]},
+            {"run": ["/bin/sh", "bad\\x00arg"]},
+            {"run": ["/bin/echo", 23]},
+        ]:
+            with self.subTest(commands=commands):
+                self.data["commands"] = commands
+                self.write_policy()
+                with self.assertRaises(helper.SSHPolicyError):
+                    helper.load_policy(self.root, "run")
+
     def test_refuses_symlink_and_writable_policy(self):
         self.profile.chmod(0o666)
         with self.assertRaises(helper.SSHPolicyError):
