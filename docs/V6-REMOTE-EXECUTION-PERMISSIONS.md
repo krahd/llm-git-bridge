@@ -109,3 +109,16 @@ checkpoints and external-side-effect restrictions remain essential; an agent
 must not describe high-impact classification alone as an irreversible-action
 security boundary. Do not treat local source tests as a substitute for live
 recovery and final operator acceptance.
+
+## Adversarial SSH output exhaustion hardening
+
+The original host-pinned SSH helper used subprocess.run(capture_output=True).
+A compromised or misbehaving remote endpoint could stream unbounded stdout or
+stderr until the 25-second timeout: checking a 64-KiB cap *after* subprocess
+completion does not bound memory use. The helper now drains output incrementally
+with selectors, imposes a hard 64-KiB cap separately on each stream while the
+process is running, enforces the original elapsed-time deadline and stops the
+local SSH process group on timeout or excess output. Both outcomes are
+non-successful and must never cause automatic replay. Regression tests exercise
+large real child-process stdout/stderr streams and a sleeping child without
+opening any remote network connection.

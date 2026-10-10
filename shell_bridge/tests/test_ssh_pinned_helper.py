@@ -81,17 +81,44 @@ class PinnedSSHHelperTests(unittest.TestCase):
             helper.load_policy(self.root, "status")
 
     def test_remote_failure_and_timeout_never_retry(self):
-        with patch.object(helper.subprocess, "run", side_effect=helper.subprocess.TimeoutExpired("ssh", 25)) as run:
+        with patch.object(helper, "run_bounded",
+                          side_effect=helper.subprocess.TimeoutExpired("ssh", 25)) as run:
             self.assertEqual(helper.execute("status", str(self.root)), 76)
             self.assertEqual(run.call_count, 1)
 
     def test_remote_success_is_bounded(self):
-        response = helper.subprocess.CompletedProcess([], 0, stdout=b"healthy", stderr=b"")
-        with patch.object(helper.subprocess, "run", return_value=response) as run:
-            with patch.object(helper.sys, "stdout", types.SimpleNamespace(buffer=io.BytesIO())):
+        with patch.object(helper, "run_bounded", return_value=(0, b"healthy", b"")) as run:
+            output = io.BytesIO()
+            with patch.object(helper.sys, "stdout", types.SimpleNamespace(buffer=output)):
                 self.assertEqual(helper.execute("status", str(self.root)), 0)
+            self.assertEqual(output.getvalue(), b"healthy")
             self.assertEqual(run.call_count, 1)
-            self.assertFalse(run.call_args.kwargs["check"])
+            self.assertEqual(run.call_args.args[1], 25)
+
+    def test_streaming_output_limit_prevents_unbounded_stdout(self):
+        argv = [sys.executable, "-c",
+                "import sys; sys.stdout.buffer.write(b'x' * 1000000)"]
+        with patch.object(helper, "_MAX_BYTES", 2048):
+            with self.assertRaises(helper.SSHOutputLimit):
+                helper.run_bounded(argv, timeout=3)
+
+    def test_streaming_output_limit_applies_to_stderr(self):
+        argv = [sys.executable, "-c",
+                "import sys; sys.stderr.buffer.write(b'x' * 1000000)"]
+        with patch.object(helper, "_MAX_BYTES", 2048):
+            with self.assertRaises(helper.SSHOutputLimit):
+                helper.run_bounded(argv, timeout=3)
+
+    def test_local_child_is_killed_on_timeout(self):
+        argv = [sys.executable, "-c", "import time; time.sleep(20)"]
+        with self.assertRaises(helper.subprocess.TimeoutExpired):
+            helper.run_bounded(argv, timeout=1)
+
+    def test_short_local_command_exits_and_drains_both_streams(self):
+        argv = [sys.executable, "-c",
+                "import sys; sys.stdout.write('ok'); sys.stderr.write('note')"]
+        code, out, err = helper.run_bounded(argv, timeout=3)
+        self.assertEqual((code, out, err), (0, b"ok", b"note"))
 
 
 if __name__ == "__main__":

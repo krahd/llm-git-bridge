@@ -11,9 +11,12 @@ import json
 import os
 from pathlib import Path
 import re
+import selectors
+import signal
 import stat
 import subprocess
 import sys
+import time
 
 _ACTION = re.compile(r"[a-z][a-z0-9-]{2,63}\Z")
 _HOST = re.compile(r"[a-z0-9][a-z0-9.-]{0,252}\Z")
@@ -93,20 +96,78 @@ def load_policy(directory: Path, action: str) -> tuple[list[str], int]:
     return argv, 25
 
 
+class SSHOutputLimit(Exception):
+    """Remote process exceeded a hard stream cap before it exited."""
+
+
+def run_bounded(argv: list[str], timeout: int) -> tuple[int, bytes, bytes]:
+    """Drain pipes incrementally; never accumulate arbitrary remote output.
+
+    All failure exits stop the *local* SSH process group. A remote timeout may
+    still be indeterminate, so the caller must never automatically resubmit.
+    """
+    proc = subprocess.Popen(
+        argv, stdin=subprocess.DEVNULL, stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE, start_new_session=True, close_fds=True,
+    )
+    streams = selectors.DefaultSelector()
+    stdout = bytearray()
+    stderr = bytearray()
+    completed = False
+    deadline = time.monotonic() + timeout
+    try:
+        for pipe, sink in ((proc.stdout, stdout), (proc.stderr, stderr)):
+            streams.register(pipe, selectors.EVENT_READ, sink)
+        while streams.get_map():
+            remaining = deadline - time.monotonic()
+            if remaining <= 0:
+                raise subprocess.TimeoutExpired(argv, timeout)
+            for key, _ in streams.select(remaining):
+                chunk = os.read(key.fileobj.fileno(), 8192)
+                if not chunk:
+                    streams.unregister(key.fileobj)
+                    key.fileobj.close()
+                    continue
+                sink = key.data
+                if len(sink) + len(chunk) > _MAX_BYTES:
+                    raise SSHOutputLimit("remote output exceeded fixed cap")
+                sink.extend(chunk)
+        remaining = deadline - time.monotonic()
+        if remaining <= 0:
+            raise subprocess.TimeoutExpired(argv, timeout)
+        code = proc.wait(timeout=remaining)
+        completed = True
+        return code, bytes(stdout), bytes(stderr)
+    finally:
+        streams.close()
+        if not completed:
+            try:
+                os.killpg(proc.pid, signal.SIGKILL)
+            except ProcessLookupError:
+                pass
+            try:
+                proc.wait(timeout=2)
+            except subprocess.TimeoutExpired:
+                pass
+        for pipe in (proc.stdout, proc.stderr):
+            if pipe is not None and not pipe.closed:
+                pipe.close()
+
+
 def execute(action: str, directory: str) -> int:
     argv, timeout = load_policy(Path(directory), action)
     try:
-        p = subprocess.run(argv, capture_output=True, timeout=timeout, check=False)
+        code, stdout, stderr = run_bounded(argv, timeout)
+    except SSHOutputLimit:
+        print("PINNED_SSH_OUTPUT_LIMIT", file=sys.stderr)
+        return 76
     except (OSError, subprocess.TimeoutExpired):
         print("PINNED_SSH_INDETERMINATE_OR_UNAVAILABLE", file=sys.stderr)
         return 76
-    if p.returncode != 0:
+    if code != 0:
         print("PINNED_SSH_FAILED; CHECK HOST KEY, NETWORK AND REMOTE ACCOUNT", file=sys.stderr)
         return 1
-    if len(p.stdout) > _MAX_BYTES or len(p.stderr) > _MAX_BYTES:
-        print("PINNED_SSH_OUTPUT_LIMIT", file=sys.stderr)
-        return 1
-    sys.stdout.buffer.write(p.stdout)
+    sys.stdout.buffer.write(stdout)
     return 0
 
 
