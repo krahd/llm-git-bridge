@@ -150,20 +150,20 @@ Remote Login or qualify reachability over the public internet.
 
 ## Inbound SSH requirement and limits
 
-Inbound SSH is macOS Remote Login, not the bridge transport. Before v6
-production staging, the one-run controller reads Remote Login status and checks
+Inbound SSH is macOS Remote Login, not the bridge transport. When \`V6_REQUIRE_INBOUND_SSH=1\` is selected, before v6
+production staging the one-run controller reads Remote Login status and checks
 that the current account belongs to the restricted SSH access group. If this
 is not yet configured, the operator can use macOS System Settings > General >
 Sharing > Remote Login, restrict access to specific authorized users, and
 recheck from the same running script. No script enables Remote Login, installs
 a service, opens a firewall port or weakens host authentication.
 
-Before production switching, a fresh 48-hex-digit challenge is generated in
+With inbound SSH acceptance enabled, before production switching a fresh 48-hex-digit challenge is generated in
 a private local state directory. An operator must establish a genuine SSH login
 to the Mac **from a separate device**, execute the displayed witness command
 in that authenticated session, and let the running controller verify its
 identity, peer address and freshness. A missing or expired witness blocks
-production handover. This is a separate-client SSH session diagnostic; it does
+production handover only when inbound SSH acceptance was explicitly requested. This is a separate-client SSH session diagnostic; it does
 not independently establish public-internet routing, nor can local source
 tests prove access through an off-site firewall/VPN.
 
