@@ -80,6 +80,12 @@ class LoadedBridgeOwnershipTests(unittest.TestCase):
         report = self.check("bridge-a")
         self.assertFalse(report["safe_to_stage"])
 
+    def test_unrelated_macos_bridge_named_daemon_is_ignored(self):
+        listing = "PID\\tStatus\\tLabel\\n123\\t0\\tcom.apple.SystemBridge\\n"
+        report = inspect_services(self.home, listing)
+        self.assertTrue(report["safe_to_stage"])
+        self.assertEqual(report["loaded"], [])
+
     def test_unknown_loaded_bridge_blocks(self):
         result = self.check("net.laurenzo.unexpected-bridge")
         self.assertFalse(result["safe_to_stage"])
