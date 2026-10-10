@@ -210,7 +210,7 @@ PYMAN
 chmod 600 "$INSTALL_DIR/install-manifest.json"
 
 python3 - "$CONFIG_DIR/config.json" "$REMOTE" "$BASE_PATH" "$ROOT_ID" "$REQUESTS_ID" "$RESULTS_ID" "$INSTANCE_ID" "$ALLOWED_ROOT" "$STATE_DIR" "$SHELL_BIN" "$INSTALL_DIR" <<'PY'
-import json,sys,hashlib
+import json,sys
 from pathlib import Path
 path,remote,base,root_id,req_id,res_id,instance,allowed,state,shell,install_dir=sys.argv[1:]
 try:
@@ -234,19 +234,6 @@ cfg.update({
  'wake_lease_enabled':cfg.get('wake_lease_enabled',True),
  'wake_grace_seconds':cfg.get('wake_grace_seconds',3600.0),
 })
-# Register fixed metadata-only inspection capability; approval remains mandatory.
-registered = cfg.get('trusted_operations', {})
-if not isinstance(registered, dict):
-    raise SystemExit('invalid trusted operation registry')
-inspector_path = Path(install_dir) / 'bridge_mailbox_inspector.py'
-registered = dict(registered)
-registered['bridge-mailbox-inspect'] = {
-    'executable': str(inspector_path),
-    'executable_sha256': hashlib.sha256(inspector_path.read_bytes()).hexdigest(),
-    'permitted_roots': [str(Path.home())],
-    'permitted_actions': ['inspect'],
-}
-cfg['trusted_operations'] = registered
 with open(path,'w',encoding='utf-8') as f: json.dump(cfg,f,indent=2,sort_keys=True); f.write('\n')
 PY
 chmod 600 "$CONFIG_DIR/config.json"
