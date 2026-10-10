@@ -157,7 +157,22 @@ if "state=provisional" not in text or "source="+sys.argv[2] not in text:
     raise SystemExit("production provisional receipt is missing or from wrong build")
 print("V6_PRODUCTION_PROVISIONAL_AND_APPROVAL_VERIFIED=1")
 PYFINAL
-echo "Phase 7: archive stopped production v5 LaunchAgents to prevent restart at next login"
+echo "Phase 7: verify exactly one loaded production mailbox owner"
+LIVE_OWNERSHIP="$(python3 shell_bridge/bridge_service_ownership.py)" ||
+  fail "post-cutover live bridge inventory is not verifiable"
+python3 - "$LIVE_OWNERSHIP" "$PROD_ROOT" "$PROD_LABEL" <<'PYEXCLUSIVE'
+import json,sys
+report=json.loads(sys.argv[1])
+root,label=sys.argv[2:]
+if report.get("problems") or not report.get("safe_to_stage"):
+    raise SystemExit("HOLD: post-cutover ownership is ambiguous")
+owners=[x["label"] for x in report.get("loaded",[])
+        if x.get("drive_root_folder_id")==root]
+if owners!=[label]:
+    raise SystemExit("HOLD: v6 does not have exclusive production mailbox ownership")
+print("PRODUCTION_MAILBOX_EXCLUSIVE_OWNER_VERIFIED=1")
+PYEXCLUSIVE
+echo "Phase 8: archive stopped production v5 LaunchAgents to prevent restart at next login"
 ROLLBACK_LIST="$PROD_STATE/cutover-rollback-services.tsv"
 [ -s "$ROLLBACK_LIST" ] || fail "rollback inventory missing; do not retire or claim completion"
 ARCHIVE_DIR="$HOME/Library/LaunchAgents/retired-v5-${SOURCE:0:12}"
