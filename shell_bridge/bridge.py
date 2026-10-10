@@ -540,7 +540,27 @@ def pinned_ssh_readonly_preapproved(request: dict, cfg: dict, plan: dict) -> boo
             return False
         if not secrets.compare_digest(actual, expected):
             return False
-    return True
+    # The identity key is not agent-writable, but replacing/rotating it
+    # must still revoke the previous no-prompt authorization.
+    expected_key = cfg.get("pinned_ssh_identity_sha256")
+    if not isinstance(expected_key, str) or len(expected_key) != 64:
+        return False
+    try:
+        data = json.loads((policy_root / "ssh-policy.json").read_text(encoding="utf-8"))
+        identity_raw = data.get("identity_file")
+        if not isinstance(identity_raw, str):
+            return False
+        identity = Path(identity_raw)
+        if not identity.is_absolute() or identity.is_symlink() or not identity.is_file():
+            return False
+        with identity.open("rb") as stream:
+            identity_bytes = stream.read(131073)
+        if len(identity_bytes) > 131072:
+            return False
+        actual_key = hashlib.sha256(identity_bytes).hexdigest()
+    except (OSError, ValueError, TypeError, AttributeError):
+        return False
+    return secrets.compare_digest(actual_key, expected_key)
 
 
 def public_write_plan(plan: dict) -> dict:
