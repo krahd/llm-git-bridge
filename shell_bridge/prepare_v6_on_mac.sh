@@ -72,5 +72,20 @@ BASE_PATH="Local Executor Bridge v6 Candidate ${source_commit:0:12}" \
 LOCAL_EXECUTOR_LABEL="$label" \
 INSTALL_DIR="$install" CONFIG_DIR="$(dirname "$config")" STATE_DIR="$state" PLIST="$plist" \
 bash shell_bridge/install.sh --stage-only
-printf '\nSTAGED_NOT_STARTED=1\nLABEL=%s\nCONFIG=%s\nSOURCE=%s\n' "$label" "$config" "$source_commit"
-printf 'Production v5 unchanged. Do not cut over until the real approval and recovery acceptance gates pass.\n'
+printf '\n=== Local v6 candidate doctor ===\n'
+python3 "$install/bridge.py" doctor --config "$config"
+printf '\n=== Isolated candidate start ===\n'
+launchctl bootstrap "gui/$(id -u)" "$plist"
+launchctl print "gui/$(id -u)/$label" >/dev/null || {
+  echo "HOLD: candidate bootstrap did not register; inspect isolated logs" >&2; exit 8
+}
+python3 - "$config" "$source_commit" <<'PYCHECK'
+import json,sys
+cfg=json.load(open(sys.argv[1],encoding='utf-8'))
+assert cfg.get('base_path') == 'Local Executor Bridge v6 Candidate '+sys.argv[2][:12]
+assert cfg.get('drive_root_folder_id')
+assert cfg.get('bridge_instance_id')
+print('STAGING_IDENTITY_VALID=1')
+PYCHECK
+printf '\nISOLATED_V6_STARTED=1\nLABEL=%s\nCONFIG=%s\nSOURCE=%s\n' "$label" "$config" "$source_commit"
+printf 'Production v5 unchanged. Cutover still requires live approval, replay and recovery acceptance.\n'
