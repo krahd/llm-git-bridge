@@ -38,6 +38,20 @@ esac
 [ "${#SOURCE}" -eq 40 ] || hold "invalid canonical source SHA"
 
 BASE="$HOME/.local/state/bridge-v6-release-sources"
+# Source worktree must remain outside any agent-writable repository root.
+# Resolve existing symlinked ancestors before creating anything.
+python3 - "$BASE" "${ALLOWED_ROOT:-$HOME/tom-repos}" <<'PYSAFEPATH' ||
+  hold "release source is within an agent-writable or unsafe path"
+import os,sys
+from pathlib import Path
+base=Path(sys.argv[1]).resolve()
+allowed=Path(sys.argv[2]).expanduser().resolve()
+if base==allowed or allowed in base.parents:
+    raise SystemExit("HOLD: release source cannot be agent writable")
+home=Path.home().resolve()
+if base==home or home not in base.parents:
+    raise SystemExit("HOLD: release source must stay in protected home state")
+PYSAFEPATH
 [ ! -L "$BASE" ] || hold "release source directory is a symlink"
 mkdir -p -m 700 "$BASE"
 chmod 700 "$BASE" || hold "cannot protect release source directory"
