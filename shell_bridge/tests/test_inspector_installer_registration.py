@@ -5,6 +5,7 @@ import subprocess
 import sys
 import tempfile
 import unittest
+from unittest import mock
 
 ROOT = pathlib.Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT))
@@ -95,6 +96,32 @@ class InspectorInstallerRegistrationTests(unittest.TestCase):
         self.assertEqual(op.permitted_roots, (policy_dir,))
         self.assertEqual(op.permitted_actions, ("status", "identity"))
         self.assertTrue(op.requires_confirmation)
+
+    def test_installer_rejects_agent_writable_ssh_identity(self):
+        policy_dir = self.home / ".config" / "ssh-pinned"
+        policy_dir.mkdir(parents=True)
+        policy_dir.chmod(0o700)
+        identity = self.agent_root / "id-key"
+        identity.write_text("fake secret")
+        identity.chmod(0o600)
+        known = policy_dir / "known_hosts"
+        known.write_text("example.invalid ssh-ed25519 FAKE\\n")
+        known.chmod(0o600)
+        config = policy_dir / "ssh-policy.json"
+        config.write_text(json.dumps({
+            "schema": 1, "host": "example.invalid",
+            "user": "deploy", "port": 22, "identity_file": str(identity),
+        }))
+        config.chmod(0o600)
+        program = self.install / "ssh_pinned_helper.py"
+        program.write_text((ROOT / "ssh_pinned_helper.py").read_text())
+        program.chmod(0o700)
+        with mock.patch.dict(os.environ, {
+            "REGISTER_PINNED_SSH_POLICY_DIR": str(policy_dir),
+        }):
+            result = self.run_config(False)
+        self.assertNotEqual(result.returncode, 0)
+        self.assertIn("agent-writable SSH private identity", result.stderr)
 
     def test_installer_refuses_escapable_agent_writable_helper(self):
         self.agent_root = self.home
