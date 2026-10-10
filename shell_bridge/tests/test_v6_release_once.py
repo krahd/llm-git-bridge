@@ -1,4 +1,6 @@
 from pathlib import Path
+import re
+import subprocess
 import unittest
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -48,6 +50,17 @@ class SingleRunReleaseContractTests(unittest.TestCase):
         self.assertIn('legacy archive postcondition failed', SCRIPT)
         self.assertIn('recovery_fault_injection_live_verified":False', SCRIPT)
         self.assertIn('legacy_state_preserved":True', SCRIPT)
+
+    def test_ssh_smoke_id_expands_to_protocol_valid_identifier(self):
+        # Previously the shell assignment ended with a literal "$", which
+        # bash -n and all result-verifier tests failed to detect.
+        assignment = next(line.strip() for line in SCRIPT.splitlines()
+                          if line.strip().startswith('rid="v6-ssh-'))
+        value = subprocess.check_output(
+            ["/bin/bash", "-c", 'prefix=staging; ' + assignment +
+             '; printf "%s" "$rid"'], text=True)
+        self.assertRegex(value, r"\\Av6-ssh-staging-[0-9]{14}-[0-9]+\\Z")
+        self.assertNotIn("$", value)
 
     def test_ssh_requires_operator_policy_and_live_dual_smoke(self):
         self.assertIn('V6_SSH_POLICY_DIR', SCRIPT)
