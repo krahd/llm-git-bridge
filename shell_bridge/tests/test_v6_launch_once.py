@@ -74,6 +74,26 @@ class OneRunDirtyCheckoutLauncherTests(unittest.TestCase):
         self.assertEqual(result.returncode, 0, result.stderr)
         self.assertFalse(marker.exists(), "local untracked checkout hook executed")
 
+    def test_fetch_does_not_execute_local_reference_transaction_hook(self):
+        base = Path(self.temp.name)
+        updated = base / "updated"
+        git("clone", "-q", str(self.origin), str(updated))
+        (updated / "updated-note.txt").write_text("remote update\\n")
+        git("add", ".", cwd=updated)
+        git("-c", "user.email=test@example.invalid",
+            "-c", "user.name=Release Test", "commit", "-qm", "advance remote",
+            cwd=updated)
+        git("push", "origin", "main", cwd=updated)
+        marker = self.home / "unexpected-fetch-hook-effect"
+        hook = self.original / ".git" / "hooks" / "reference-transaction"
+        hook.write_text('#!/bin/sh\\nprintf triggered > "' + str(marker) + '"\\n')
+        hook.chmod(0o755)
+        before = git("status", "--porcelain", cwd=self.original)
+        result = self.run_launcher()
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertFalse(marker.exists(), "untracked local fetch hook executed")
+        self.assertEqual(git("status", "--porcelain", cwd=self.original), before)
+
     def test_bootstrap_executes_exact_fetched_launcher_without_touching_dirty_checkout(self):
         before = git("status", "--porcelain", cwd=self.original)
         git("fetch", "origin", "refs/heads/main:refs/remotes/origin/main",
