@@ -124,6 +124,23 @@ This keeps the release at one shell invocation, with one-time host consent,
 two deliberate native approval tests, and a separate consequential `MIGRATE`
 authorization. No routine SSH status call requires another popup.
 
+## Additional operator-pinned SSH profiles
+
+Schema-2 SSH policies can enroll fixed, operator-reviewed remote argv profiles
+alongside the two built-in read-only probes. The policy lives outside the
+agent-writable repository root and is pinned at installation. Unlike the
+built-in status and identity probes, **each custom profile action requires
+a native consequential approval** and an unchanged pinned host, policy file,
+known-host database and identity key. The provider cannot alter the host,
+command or arguments in its request.
+
+The one-run enrollment wizard creates only the minimal built-in policy.
+Additional profiles must be configured and reviewed by the operator before
+installation. Custom profiles extend bounded remote maintenance, but they do
+not qualify arbitrary SSH commands or SCP/SFTP/rsync. Keep the explicit limited
+SSH consent and the v5 feature-parity hold until required workflows are proven
+on the live Mac.
+
 ## Deliberate limited-SSH release decision
 
 Passing the pinned `status` probe does not imply general SSH/SCP/SFTP/RSYNC
