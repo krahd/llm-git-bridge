@@ -62,8 +62,8 @@ def trusted_host_lines(source: Path, host: str, port: int) -> tuple[str, str]:
     return "\n".join(lines) + "\n", fingerprints.stdout.strip()
 
 
-def enroll(directory: Path, known_source: Path, identity: Path, host: str,
-           account: str, port: int, confirmed: bool) -> Path:
+def enroll(directory: Path, identity: Path, host: str,
+           account: str, port: int, confirmed: bool, trusted_lines: str) -> Path:
     if not confirmed:
         raise EnrollmentError("explicit SSH host confirmation is required")
     if not _HOST.fullmatch(host) or not _USER.fullmatch(account):
@@ -71,7 +71,8 @@ def enroll(directory: Path, known_source: Path, identity: Path, host: str,
     if isinstance(port, bool) or not isinstance(port, int) or not 1 <= port <= 65535:
         raise EnrollmentError("invalid SSH port")
     _safe_existing(identity, private=True)
-    keys, _ = trusted_host_lines(known_source, host, port)
+    if not trusted_lines or not trusted_lines.endswith("\\n"):
+        raise EnrollmentError("verified SSH host keys are missing")
     if directory.exists() or directory.is_symlink():
         raise EnrollmentError("SSH enrollment already exists; do not overwrite")
     if not directory.parent.is_dir() or directory.parent.is_symlink():
@@ -82,7 +83,7 @@ def enroll(directory: Path, known_source: Path, identity: Path, host: str,
         "identity_file": str(identity),
     }
     for name, contents in (
-        ("known_hosts", keys),
+        ("known_hosts", trusted_lines),
         ("ssh-policy.json", json.dumps(policy, sort_keys=True, indent=2) + "\n"),
     ):
         path = directory / name
@@ -131,7 +132,7 @@ def main(argv: list[str]) -> int:
             f"Previously trusted host key fingerprint(s):\n{fingerprints}\n"
         )
         confirmed = _ask("Type PIN SSH to accept this exact host and key(s)") == "PIN SSH"
-        enrolled = enroll(policy_dir, known, identity, host, account, port, confirmed)
+        enrolled = enroll(policy_dir, identity, host, account, port, confirmed, lines)
     except (EnrollmentError, ValueError, OSError, subprocess.TimeoutExpired) as exc:
         print("SSH_ENROLLMENT_HELD: " + str(exc), file=sys.stderr)
         return 1
