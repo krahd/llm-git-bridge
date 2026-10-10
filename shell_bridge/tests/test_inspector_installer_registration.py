@@ -89,6 +89,8 @@ class InspectorInstallerRegistrationTests(unittest.TestCase):
         self.assertEqual(op.permitted_roots, (policy_dir,))
         self.assertEqual(op.permitted_actions, ("status", "identity"))
         self.assertTrue(op.requires_confirmation)
+        self.assertEqual(cfg["pinned_ssh_identity_sha256"],
+                         __import__("hashlib").sha256(identity.read_bytes()).hexdigest())
 
     def test_installer_rejects_agent_writable_ssh_identity(self):
         policy_dir = self.home / ".config" / "ssh-pinned"
