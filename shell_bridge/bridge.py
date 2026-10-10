@@ -457,6 +457,18 @@ def resolve_write_plan(request: dict, cfg: dict) -> dict:
         "read_roots": [allowed_root], "deny_home_reads": True, "allow_network": False,
     }
 
+def pinned_ssh_readonly_preapproved(request: dict, cfg: dict, plan: dict) -> bool:
+    """Only installer-consented fixed read actions avoid repeated prompts."""
+    operation = request.get("trusted_operation")
+    return (
+        isinstance(operation, dict)
+        and operation.get("name") == "ssh-pinned-readonly"
+        and operation.get("action") in {"status", "identity"}
+        and cfg.get("preapproved_pinned_ssh_readonly") is True
+        and plan.get("effective") == "trusted_operation"
+    )
+
+
 def public_write_plan(plan: dict) -> dict:
     return {k: v for k, v in plan.items() if k not in {"write_roots", "read_roots"}}
 
@@ -1197,14 +1209,7 @@ def _process_one_request(name: str, cfg: dict, preloaded_raw: bytes | None = Non
     # Installation-time consent applies only to these exact pinned,
     # read-only SSH helper actions. Every other trusted operation must still
     # pass the independent native operator approval gate.
-    preapproved_remote_read = (
-        v.get("trusted_operation") is not None
-        and v["trusted_operation"]["name"] == "ssh-pinned-readonly"
-        and v["trusted_operation"]["action"] in {"status", "identity"}
-        and cfg.get("preapproved_pinned_ssh_readonly") is True
-        and write_plan.get("effective") == "trusted_operation"
-    )
-    if preapproved_remote_read:
+    if pinned_ssh_readonly_preapproved(v, cfg, write_plan):
         category = None
         confirmation = {
             "required": False, "category": "pinned_ssh_readonly",
