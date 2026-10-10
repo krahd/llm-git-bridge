@@ -21,6 +21,7 @@ class BridgeV6SecurityTests(unittest.TestCase):
             content = {"bridge.py": b"test bridge", "workspace.py": b"test workspace",
                        "approval_helper.py": b"test approval",
                        "trusted_operations.py": b"test trusted module",
+                       "bridge_mailbox_inspector.py": b"test inspector",
                        "Local Executor Approval.app/Contents/Info.plist": b"test app info",
                        "Local Executor Approval.app/Contents/MacOS/local-executor-approval": b"test app executable"}
             for name, raw in content.items():
@@ -31,6 +32,7 @@ class BridgeV6SecurityTests(unittest.TestCase):
                               ("workspace.py", "workspace_sha256"),
                               ("approval_helper.py", "approval_helper_sha256"),
                               ("trusted_operations.py", "trusted_operations_sha256"),
+                              ("bridge_mailbox_inspector.py", "bridge_mailbox_inspector_sha256"),
                               ("Local Executor Approval.app/Contents/Info.plist", "approval_app_info_sha256"),
                               ("Local Executor Approval.app/Contents/MacOS/local-executor-approval", "approval_app_executable_sha256")):
                 m[key] = hashlib.sha256(content[name]).hexdigest()
