@@ -458,15 +458,38 @@ def resolve_write_plan(request: dict, cfg: dict) -> dict:
     }
 
 def pinned_ssh_readonly_preapproved(request: dict, cfg: dict, plan: dict) -> bool:
-    """Only installer-consented fixed read actions avoid repeated prompts."""
+    """Only exact operator-installed read actions with unchanged host pins."""
     operation = request.get("trusted_operation")
-    return (
+    if not (
         isinstance(operation, dict)
         and operation.get("name") == "ssh-pinned-readonly"
         and operation.get("action") in {"status", "identity"}
         and cfg.get("preapproved_pinned_ssh_readonly") is True
         and plan.get("effective") == "trusted_operation"
-    )
+    ):
+        return False
+    desc = cfg.get("trusted_operations", {}).get("ssh-pinned-readonly", {})
+    roots = desc.get("permitted_roots") if isinstance(desc, dict) else None
+    if not isinstance(roots, list) or len(roots) != 1 or not isinstance(roots[0], str):
+        return False
+    policy_root = Path(roots[0])
+    if not policy_root.is_absolute() or policy_root.is_symlink():
+        return False
+    for name, field in (
+        ("ssh-policy.json", "pinned_ssh_policy_sha256"),
+        ("known_hosts", "pinned_ssh_known_hosts_sha256"),
+    ):
+        expected = cfg.get(field)
+        path = policy_root / name
+        if not isinstance(expected, str) or len(expected) != 64 or path.is_symlink():
+            return False
+        try:
+            actual = hashlib.sha256(path.read_bytes()).hexdigest()
+        except OSError:
+            return False
+        if not secrets.compare_digest(actual, expected):
+            return False
+    return True
 
 
 def public_write_plan(plan: dict) -> dict:
