@@ -26,7 +26,7 @@ FIELDS = ("bridge_instance_id", "drive_root_folder_id", "requests_folder_id",
 def inspect(home: Path, *, launchctl=None) -> dict:
     """Only fixed relative config paths; no user-controlled paths or command."""
     records = []
-    launchctl = launchctl or _launchctl
+    launchctl = _launchctl if launchctl is None else launchctl
     for label, relative in LABELS.items():
         record = {"label": label}
         file = home / relative
