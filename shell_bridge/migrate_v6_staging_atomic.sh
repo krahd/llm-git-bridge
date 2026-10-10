@@ -59,6 +59,7 @@ if [ "${MIGRATOR_SKIP_STAGE:-0}" != 1 ]; then HOME="$HOME_ROOT" "$ROOT/shell_bri
 [ -f "$NEW_CONFIG" ] || fail "candidate config missing: $NEW_CONFIG"
 [ -f "$NEW_INSTALL/bridge.py" ] || fail "candidate bridge missing"
 [ -f "$NEW_INSTALL/approval_helper.py" ] || fail "candidate approval helper missing"
+[ -f "$NEW_INSTALL/trusted_operations.py" ] || fail "candidate trusted operations module missing"
 CFG_LINE="$(python3 - "$NEW_CONFIG" <<'PYCFG'
 import json,sys
 c=json.load(open(sys.argv[1],encoding='utf-8'))

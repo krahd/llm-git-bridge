@@ -99,3 +99,43 @@ def authorize_known_operation(
     if action not in operation.permitted_actions:
         raise TrustedOperationPolicyError("action not permitted")
     return operation
+
+
+def registered_operation_from_config(
+    config: dict, operation_name: str, action: str, agent_root: Path
+) -> TrustedOperation:
+    """Resolve only administrator-installed configuration, never a request path."""
+    registered = config.get("trusted_operations", {})
+    if not isinstance(registered, dict):
+        raise TrustedOperationPolicyError("trusted operation registry must be an object")
+    descriptor = registered.get(operation_name)
+    if not isinstance(descriptor, dict):
+        raise TrustedOperationPolicyError("unknown privileged operation")
+    required = {"executable", "executable_sha256", "permitted_roots", "permitted_actions"}
+    if set(descriptor) != required:
+        raise TrustedOperationPolicyError("trusted operation descriptor has invalid fields")
+    if (not isinstance(descriptor["executable"], str) or
+        not isinstance(descriptor["executable_sha256"], str) or
+        not isinstance(descriptor["permitted_roots"], list) or
+        not isinstance(descriptor["permitted_actions"], list) or
+        any(not isinstance(x, str) for x in descriptor["permitted_roots"]) or
+        any(not isinstance(x, str) for x in descriptor["permitted_actions"])):
+        raise TrustedOperationPolicyError("trusted operation descriptor has invalid types")
+    operation = TrustedOperation(
+        name=operation_name,
+        executable=Path(descriptor["executable"]),
+        executable_sha256=descriptor["executable_sha256"],
+        permitted_roots=tuple(Path(x) for x in descriptor["permitted_roots"]),
+        permitted_actions=tuple(descriptor["permitted_actions"]),
+        requires_confirmation=True,
+    )
+    authorize_known_operation({operation_name: operation}, operation_name, action)
+    agent_root = agent_root.expanduser().resolve()
+    try:
+        operation.executable.relative_to(agent_root)
+    except ValueError:
+        pass
+    else:
+        raise TrustedOperationPolicyError("trusted helper must not be inside the agent-writable root")
+    verify_installed_helper(operation)
+    return operation
