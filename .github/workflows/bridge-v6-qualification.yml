@@ -13,8 +13,11 @@ jobs:
     timeout-minutes: 15
     steps:
       - uses: actions/checkout@v4
-      - name: Validate cutover shell syntax
-        run: bash -n shell_bridge/cutover.sh
+      - name: Validate all installer and migration shell syntax
+        run: |
+          for script in shell_bridge/install.sh shell_bridge/cutover.sh shell_bridge/migrate_v6_staging_atomic.sh shell_bridge/prepare_v6_on_mac.sh; do
+            bash -n "$script"
+          done
       - name: Run bridge Python regression suite
         env:
           PYTHONDONTWRITEBYTECODE: '1'
