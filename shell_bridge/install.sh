@@ -285,6 +285,13 @@ if ssh_dir:
     module.loader.exec_module(helper)
     for action in ("status","identity"):
         helper.load_policy(directory,action)
+    ssh_identity=Path(json.loads((directory/"ssh-policy.json").read_text(encoding="utf-8"))["identity_file"])
+    try:
+        ssh_identity.resolve().relative_to(root)
+    except ValueError:
+        pass
+    else:
+        raise SystemExit("refusing agent-writable SSH private identity")
     ops=cfg.get("trusted_operations",{})
     if not isinstance(ops,dict) or "ssh-pinned-readonly" in ops:
         raise SystemExit("existing or malformed SSH trusted helper registration")
