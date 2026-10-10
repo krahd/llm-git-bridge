@@ -509,7 +509,14 @@ def resolve_write_plan(request: dict, cfg: dict) -> dict:
     }
 
 def pinned_ssh_readonly_preapproved(request: dict, cfg: dict, plan: dict) -> bool:
-    """Only exact operator-installed read actions with unchanged host pins."""
+    """Only built-in read actions may skip a popup after enrollment."""
+    operation = request.get("trusted_operation")
+    return (isinstance(operation, dict)
+                and pinned_ssh_material_unchanged(request, cfg, plan))
+
+
+def pinned_ssh_material_unchanged(request: dict, cfg: dict, plan: dict) -> bool:
+    """Every SSH action requires the exact installed host, policy and identity pins."""
     operation = request.get("trusted_operation")
     if not (
         isinstance(operation, dict)
@@ -1306,7 +1313,7 @@ def _process_one_request(name: str, cfg: dict, preloaded_raw: bytes | None = Non
     if (v.get("trusted_operation") is not None
             and v["trusted_operation"]["name"] == "ssh-pinned-readonly"
             and cfg.get("preapproved_pinned_ssh_readonly") is True
-            and not pinned_ssh_readonly_preapproved(v, cfg, write_plan)):
+            and not pinned_ssh_material_unchanged(v, cfg, write_plan)):
         result = result_envelope(v["id"], request_sha, "rejected", {
             "message": "pinned SSH policy or known-host material changed since operator installation; re-provision locally",
             "policy_reason": "ssh_policy_pin_mismatch",
