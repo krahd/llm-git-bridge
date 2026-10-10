@@ -9,6 +9,9 @@ fail(){ printf 'HOLD: %s\n' "$*" >&2; exit 1; }
 [ "$(uname -s)" = Darwin ] || fail "requires macOS"
 [ "$#" -eq 0 ] || fail "usage: bash shell_bridge/v6_release_once.sh"
 [ -z "${CHATGPT_SHELL_BRIDGE_REQUEST_ID:-}" ] || fail "run from a local Terminal, never the bridge being replaced"
+[ -n "${V6_SSH_POLICY_DIR:-}" ] || fail "v5 retirement requires an operator-pinned SSH policy; no production change made"
+REGISTER_PINNED_SSH_POLICY_DIR="$V6_SSH_POLICY_DIR"
+export REGISTER_PINNED_SSH_POLICY_DIR
 for tool in git python3 rclone launchctl; do
   command -v "$tool" >/dev/null 2>&1 || fail "missing $tool"
 done
@@ -82,9 +85,38 @@ approval_canary(){
   fi
   rm -f "$request_file" "$result_file"
 }
+ssh_status_canary(){
+  local root="$1" allowed="$2" prefix="$3"
+  local rid request_file result_file found=0 attempt
+  rid="v6-ssh-$prefix-$(date -u +%Y%m%d%H%M%S)-$"
+  request_file="$(mktemp)"; result_file="$(mktemp)"
+  if ! python3 shell_bridge/verify_v6_pinned_ssh.py create "$request_file" "$rid" "$allowed"; then
+    rm -f "$request_file" "$result_file"; return 1
+  fi
+  if ! rclone --drive-root-folder-id "$root" --timeout 20s copyto "$request_file" "${REMOTE}requests/$rid.json"; then
+    echo "HOLD: ambiguous SSH smoke submission ID $rid; never replay" >&2
+    rm -f "$request_file" "$result_file"; return 1
+  fi
+  for attempt in {1..30}; do
+    if rclone --drive-root-folder-id "$root" --timeout 20s copyto "${REMOTE}results/$rid.json" "$result_file" >/dev/null 2>&1; then
+      found=1; break
+    fi
+    sleep 3
+  done
+  if [ "$found" -ne 1 ]; then
+    echo "HOLD: pinned SSH smoke result not received, ID $rid" >&2
+    rm -f "$request_file" "$result_file"; return 1
+  fi
+  if ! python3 shell_bridge/verify_v6_pinned_ssh.py verify "$request_file" "$rid" "$result_file"; then
+    echo "HOLD: pinned SSH smoke denied or unverified, ID $rid" >&2
+    rm -f "$request_file" "$result_file"; return 1
+  fi
+  rm -f "$request_file" "$result_file"
+}
 echo "Phase 2: two critical one-time native UI acceptance decisions"
 approval_canary "$CANDIDATE_ROOT" "$CANDIDATE_ALLOWED" deny staging
 approval_canary "$CANDIDATE_ROOT" "$CANDIDATE_ALLOWED" allow staging
+ssh_status_canary "$CANDIDATE_ROOT" "$CANDIDATE_ALLOWED" staging
 
 echo "Phase 3: stage immutable production v6 without starting it"
 LEGACY_CONFIG="$HOME/.config/chatgpt-shell-bridge/config.json"
@@ -172,6 +204,7 @@ if "state=provisional" not in text or "source="+sys.argv[2] not in text:
     raise SystemExit("production provisional receipt is missing or from wrong build")
 print("V6_PRODUCTION_PROVISIONAL_AND_APPROVAL_VERIFIED=1")
 PYFINAL
+ssh_status_canary "$PROD_ROOT" "$PROD_ALLOWED" production || fail "production SSH read-only acceptance failed; hold v6 provisional and preserve rollback"
 echo "Phase 7: verify exactly one loaded production mailbox owner"
 LIVE_OWNERSHIP="$(python3 shell_bridge/bridge_service_ownership.py)" ||
   fail "post-cutover live bridge inventory is not verifiable"
