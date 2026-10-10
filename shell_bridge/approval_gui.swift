@@ -84,6 +84,23 @@ final class ApprovalController: NSObject, NSApplicationDelegate {
         return String(compact.prefix(max(0, limit - 1))) + "…"
     }
 
+    private func riskDescription(_ category: String) -> String {
+        switch category {
+        case "filesystem_delete":
+            return "A file may be deleted permanently, including untracked work that Git cannot restore."
+        case "filesystem_recursive_delete":
+            return "Files or entire directories may be removed. Untracked content may be unrecoverable."
+        case "git_destructive_local":
+            return "Git reset or clean may permanently discard uncommitted or untracked work."
+        case "trusted_operation":
+            return "A verified installed helper will run outside the normal shell sandbox. Check the action and permitted roots."
+        case "non_repository_filesystem_mutation":
+            return "Files outside the Git repository may be changed. The effects may not be undoable."
+        default:
+            return "This action has elevated or uncertain effects. Reject it if the exact changes are unclear."
+        }
+    }
+
     @objc private func review(_ sender: NSMenuItem) {
         guard let requestID = sender.representedObject as? String,
               let req = pendingRequests().first(where: { $0.request_id == requestID }) else {
@@ -136,8 +153,8 @@ final class ApprovalController: NSObject, NSApplicationDelegate {
         scroll.documentView = contents
         let alert = NSAlert()
         alert.alertStyle = .warning
-        alert.messageText = "Bridge approval required"
-        alert.informativeText = "Review the full exact command. Reject or defer if its effects are unclear. Allow once executes only this pending request."
+        alert.messageText = "Review high-impact action"
+        alert.informativeText = riskDescription(req.category) + " Inspect the exact command below before choosing Allow once."
         alert.accessoryView = scroll
         // The safest option is the default. No approval is recorded without an explicit click.
         alert.addButton(withTitle: "Reject")
