@@ -288,6 +288,26 @@ launchctl kickstart -k "gui/${UID_NOW}/${NEW_LABEL}"
 launchctl print "gui/${UID_NOW}/${NEW_LABEL}" >/dev/null || fail "v6 LaunchAgent did not start"
 python3 "$NEW_INSTALL_DIR/bridge.py" doctor --config "$NEW_CONFIG" >/dev/null || fail "v6 doctor failed after service switch"
 
+# A correct installed manifest is not evidence that launchd actually started
+# the intended binary. Require an independently published, fresh health record
+# bound to the exact expected Git revision, target mailbox, and daemon PID.
+HEALTH_VERIFIER="$(cd "$(dirname "$0")" && pwd)/verify_v6_candidate_health.py"
+[ -f "$HEALTH_VERIFIER" ] || fail "exact-build health verifier missing"
+LIVE_HEALTH="$(mktemp)"
+for attempt in 1 2 3 4 5 6 7 8 9 10 11 12 13 14 15; do
+  if "${R[@]}" copyto "${REMOTE}health.json" "$LIVE_HEALTH" >/dev/null 2>&1 &&
+    python3 "$HEALTH_VERIFIER" "$NEW_CONFIG" "$LIVE_HEALTH" "$EXPECTED_SOURCE_COMMIT" "$NEW_LABEL" >/dev/null 2>&1; then
+    LIVE_HEALTH_CONFIRMED=1
+    break
+  fi
+  sleep 2
+done
+if [ "${LIVE_HEALTH_CONFIRMED:-0}" != 1 ]; then
+  rm -f "$LIVE_HEALTH"
+  fail "production daemon exact build, PID, or heartbeat not verified; rollback remains guarded"
+fi
+rm -f "$LIVE_HEALTH"
+
 # End-to-end production smoke: at this point v6 is the sole mailbox consumer.
 RID="cutover-smoke-$(date +%Y%m%d%H%M%S)-$$"
 TMP_REQ="$(mktemp)"; TMP_RESULT="$(mktemp)"
