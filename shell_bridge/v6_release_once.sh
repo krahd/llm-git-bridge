@@ -122,11 +122,11 @@ ALLOWED_ROOT="$PROD_ALLOWED" STATE_DIR="$PROD_STATE" \
 LOCAL_EXECUTOR_LABEL="$PROD_LABEL" INSTALL_DIR="$PROD_INSTALL" \
 CONFIG_DIR="$PROD_CONFIG_DIR" PLIST="$PROD_PLIST" \
 bash shell_bridge/install.sh --stage-only
-python3 - "$PROD_CONFIG" "$PROD_ROOT" "$PROD_REQ" "$PROD_RES" "$PROD_STATE" <<'PYMATCH'
+python3 - "$PROD_CONFIG" "$PROD_ROOT" "$PROD_REQ" "$PROD_RES" "$PROD_STATE" "$PROD_INSTANCE" <<'PYMATCH'
 import json,sys
 c=json.load(open(sys.argv[1],encoding="utf-8"))
 for key,value in zip(("drive_root_folder_id","requests_folder_id",
-                      "results_folder_id","state_dir"),sys.argv[2:]):
+                      "results_folder_id","state_dir","bridge_instance_id"),sys.argv[2:]):
     if c.get(key)!=value:
         raise SystemExit("HOLD: production stage differs from v5 "+key)
 PYMATCH
