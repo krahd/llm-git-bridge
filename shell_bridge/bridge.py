@@ -268,6 +268,13 @@ def high_impact_command_category(command: str) -> str | None:
         command,
     ):
         return "filesystem_recursive_delete"
+    # Even a single rm/unlink can irreversibly remove an untracked file.
+    # Git containment does not make this operation automatically undoable.
+    if re.search(
+        r"(?im)(?:^|[;&|]\s*|\n)\s*(?:sudo\s+)?(?:rm|unlink)\b",
+        command,
+    ):
+        return "filesystem_delete"
     # Network/control-plane effects cannot be made read-only by a filesystem sandbox.
     # These rules are therefore an additional approval gate, not the primary sandbox.
     for category, pattern in HIGH_IMPACT_COMMAND_RULES:
