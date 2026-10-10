@@ -372,13 +372,24 @@ def _run_job_shell(shell: str, command: str, cwd: Path, timeout: int):
     # is confined to its worktree/Git metadata with no network or other home reads.
     env = os.environ.copy()
     temp_dir = Path(tempfile.mkdtemp(prefix="local-executor-workspace-"))
-    argv = [shell, "-lc", command]
+    # A login shell can read ~/.bash_profile before executing trusted validation,
+    # even when the sandbox forbids home reads. Run non-login in every mode.
+    argv = [shell, "-c", command]
     if sys.platform == "darwin" and os.environ.get("_LOCAL_EXECUTOR_NESTED_VALIDATION") != "1":
         if not SANDBOX_EXEC.is_file() or not os.access(SANDBOX_EXEC, os.X_OK):
             shutil.rmtree(temp_dir, ignore_errors=True)
             raise WorkspaceError("macOS sandbox-exec is unavailable; refusing workspace command")
         argv = [str(SANDBOX_EXEC), "-p", _workspace_sandbox_profile(cwd, temp_dir), *argv]
-        env.update({"TMPDIR": str(temp_dir), "TMP": str(temp_dir), "TEMP": str(temp_dir)})
+        # Git otherwise attempts to open ~/.gitconfig and ~/.config/git/config,
+        # which this isolated policy intentionally prohibits. The job is already
+        # confined to its checkout and must not depend on operator home settings.
+        # Keep a private, writable HOME under the one authorized scratch root.
+        env.update({
+            "TMPDIR": str(temp_dir), "TMP": str(temp_dir), "TEMP": str(temp_dir),
+            "HOME": str(temp_dir), "XDG_CONFIG_HOME": str(temp_dir),
+            "GIT_CONFIG_GLOBAL": os.devnull, "GIT_CONFIG_SYSTEM": os.devnull,
+            "GIT_ATTR_NOSYSTEM": "1",
+        })
     proc = subprocess.Popen(argv, cwd=cwd, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True, env=env)
     try:
         stdout, stderr = proc.communicate(timeout=timeout)
