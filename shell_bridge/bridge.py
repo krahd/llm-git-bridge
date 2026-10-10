@@ -1194,6 +1194,23 @@ def _process_one_request(name: str, cfg: dict, preloaded_raw: bytes | None = Non
             f"SHA-256: {approved_op.executable_sha256}\\n"
             f"Permitted roots: {', '.join(str(root) for root in approved_op.permitted_roots)}"
         )
+    # Installation-time consent applies only to these exact pinned,
+    # read-only SSH helper actions. Every other trusted operation must still
+    # pass the independent native operator approval gate.
+    preapproved_remote_read = (
+        v.get("trusted_operation") is not None
+        and v["trusted_operation"]["name"] == "ssh-pinned-readonly"
+        and v["trusted_operation"]["action"] in {"status", "identity"}
+        and cfg.get("preapproved_pinned_ssh_readonly") is True
+        and write_plan.get("effective") == "trusted_operation"
+    )
+    if preapproved_remote_read:
+        category = None
+        confirmation = {
+            "required": False, "category": "pinned_ssh_readonly",
+            "mode": "operator_installed_capability", "approved": True,
+            "message": "fixed read-only action preapproved at installation",
+        }
     if category is not None:
         confirmation = request_operator_confirmation(
             request_id=v["id"], cwd=v["cwd"], command=approval_command, category=category, cfg=cfg,
