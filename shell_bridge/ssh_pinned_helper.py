@@ -61,7 +61,7 @@ def load_policy(directory: Path, action: str) -> tuple[list[str], int]:
     except (OSError, ValueError) as exc:
         raise SSHPolicyError("invalid SSH policy") from exc
     required = {"schema", "host", "user", "port", "identity_file"}
-    if not isinstance(data, dict) or (
+    if not isinstance(data, dict) or type(data.get("schema")) is not int or (
         data.get("schema") == 1 and set(data) != required
     ) or (
         data.get("schema") == 2 and set(data) != required | {"commands"}
