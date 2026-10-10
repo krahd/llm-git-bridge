@@ -18,7 +18,7 @@ CONFIG_SCRIPT = INSTALL[START:END]
 
 class InspectorInstallerRegistrationTests(unittest.TestCase):
     def setUp(self):
-        self.tmp = tempfile.TemporaryDirectory()
+        self.tmp = tempfile.TemporaryDirectory(dir=pathlib.Path.cwd())
         self.addCleanup(self.tmp.cleanup)
         self.home = pathlib.Path(self.tmp.name) / "home"
         self.home.mkdir()
