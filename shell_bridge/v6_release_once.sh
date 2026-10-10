@@ -25,6 +25,21 @@ if [ -z "${V6_SSH_POLICY_DIR:-}" ]; then
 fi
 REGISTER_PINNED_SSH_POLICY_DIR="$V6_SSH_POLICY_DIR"
 export REGISTER_PINNED_SSH_POLICY_DIR
+echo "SSH prerequisite: macOS Remote Login must be restricted to the current account."
+inbound_ready=0
+for attempt in 1 2 3; do
+  if PYTHONDONTWRITEBYTECODE=1 python3 shell_bridge/inbound_ssh_preflight.py; then
+    inbound_ready=1
+    break
+  fi
+  echo "Use System Settings > General > Sharing > Remote Login."
+  echo "Choose Only these users, restrict access to your authorized account,"
+  echo "and verify this Mac's SSH host key from a separate trusted device."
+  printf 'After configuring it yourself, type RECHECK SSH (or anything else to hold v5): '
+  IFS= read -r response || fail "Remote Login preflight interrupted; v5 unchanged"
+  [ "$response" = "RECHECK SSH" ] || fail "Remote Login not qualified; v5 unchanged"
+done
+[ "$inbound_ready" = 1 ] || fail "Remote Login remains unverified; v5 unchanged"
 echo "Phase 1: macOS regressions, live owner inventory, isolated v6 startup and smoke"
 REGISTER_MAILBOX_INSPECTOR=1 bash shell_bridge/prepare_v6_on_mac.sh
 # The preparation script created exactly this isolated and uniquely named build.
@@ -124,8 +139,6 @@ approval_canary "$CANDIDATE_ROOT" "$CANDIDATE_ALLOWED" allow staging
 ssh_status_canary "$CANDIDATE_ROOT" "$CANDIDATE_ALLOWED" staging
 
 echo "Phase 2b: verify macOS inbound Remote Login and a real separate-device SSH session"
-PYTHONDONTWRITEBYTECODE=1 python3 shell_bridge/inbound_ssh_preflight.py ||
-  fail "inbound Remote Login not safely configured; preserve v5 and configure access locally"
 [ -d "$HOME/.local/state" ] || fail "SSH witness state directory is missing"
 SSH_WITNESS_DIR="$(mktemp -d "$HOME/.local/state/v6-inbound-ssh.XXXXXXXX")" ||
   fail "cannot reserve a private SSH witness directory"
