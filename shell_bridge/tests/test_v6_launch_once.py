@@ -62,11 +62,7 @@ class OneRunDirtyCheckoutLauncherTests(unittest.TestCase):
         self.assertEqual(git("rev-parse", "HEAD", cwd=release),
                          self.original_sha)
         self.assertEqual(git("status", "--porcelain", cwd=release), "")
-        self.assertEqual(
-            git("symbolic-ref", "-q", "--short", "HEAD", cwd=release)
-            if False else git("rev-parse", "--abbrev-ref", "HEAD", cwd=release),
-            "HEAD",
-        )
+        self.assertEqual(git("rev-parse", "--abbrev-ref", "HEAD", cwd=release), "HEAD")
 
     def test_existing_release_worktree_is_not_replayed_or_overwritten(self):
         first = self.run_launcher()
