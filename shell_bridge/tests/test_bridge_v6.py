@@ -1,12 +1,14 @@
 import importlib.util
 import json
 import os
+import sys
 import tempfile
 import time
 import unittest
 from pathlib import Path
 
 ROOT = Path(__file__).resolve().parents[1]
+sys.path.insert(0, str(ROOT))
 spec = importlib.util.spec_from_file_location("bridge_v6", ROOT / "bridge.py")
 bridge = importlib.util.module_from_spec(spec); spec.loader.exec_module(bridge)
 
