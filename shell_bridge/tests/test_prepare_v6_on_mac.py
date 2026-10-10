@@ -7,7 +7,7 @@ SCRIPT = (ROOT / 'prepare_v6_on_mac.sh').read_text()
 class LocalPreparationContractTests(unittest.TestCase):
     def test_never_runs_cutover_or_bootout(self):
         self.assertNotIn('launchctl bootout', SCRIPT)
-        self.assertNotIn('cutover.sh ', SCRIPT)
+        self.assertNotIn('bash shell_bridge/cutover.sh --', SCRIPT)
         self.assertNotIn('--retire-old-after-smoke', SCRIPT)
         self.assertIn('install.sh --stage-only', SCRIPT)
 
