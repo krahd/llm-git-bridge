@@ -85,3 +85,11 @@ class InstallScriptTests(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+    def test_mailbox_inspector_installed_and_registered_for_approval(self):
+        self.assertIn('cp "$SCRIPT_DIR/bridge_mailbox_inspector.py"', self.text)
+        self.assertIn("'bridge_mailbox_inspector_sha256':sha256(inspector_path)", self.text)
+        self.assertIn("registered['bridge-mailbox-inspect'] = {", self.text)
+        self.assertIn("'permitted_actions': ['inspect']", self.text)
+        self.assertIn("'permitted_roots': [str(Path.home())]", self.text)
+        self.assertNotIn("'requires_confirmation': False", self.text)
