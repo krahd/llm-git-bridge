@@ -18,7 +18,7 @@ import sys
 _ACTION = re.compile(r"[a-z][a-z0-9-]{2,63}\Z")
 _HOST = re.compile(r"[a-z0-9][a-z0-9.-]{0,252}\Z")
 _USER = re.compile(r"[a-z_][a-z0-9_-]{0,31}\Z")
-_COMMANDS = {"status": "uptime", "identity": "id -un"}
+_COMMANDS = {"status": "/usr/bin/uptime", "identity": "/usr/bin/id -un"}
 _MAX_BYTES = 65536
 
 
