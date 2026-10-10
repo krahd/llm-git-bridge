@@ -86,6 +86,17 @@ class CutoverIdentityTests(unittest.TestCase):
         self.assertLess(stop, start)
         self.assertLess(text.index('OLD_CONSUMERS_STOPPED=1', stop), start)
 
+    def test_failed_legacy_restoration_persists_hold_and_evidence(self):
+        text = (pathlib.Path(__file__).parents[1] / "cutover.sh").read_text()
+        rollback = text.split("rollback() {", 1)[1].split("trap rollback EXIT", 1)[0]
+        old = rollback.split('elif [ "$OLD_CONSUMERS_STOPPED" -eq 1 ]; then', 1)[1]
+        self.assertIn('restore_failed=0', old)
+        self.assertIn('legacy rollback service did not restore', old)
+        self.assertIn('legacy_rollback_incomplete', old)
+        self.assertIn('cutover-reconciliation-required', old)
+        self.assertIn('cutover-rollback-services.tsv', old)
+        self.assertIn('if ! launchctl print "gui/${UID_NOW}/${label}"', old)
+
     def test_first_cutover_preserves_rollback_and_defers_legacy_retirement(self):
         text = (pathlib.Path(__file__).parents[1] / "cutover.sh").read_text()
         self.assertIn('RETIRE_OLD_AFTER_SMOKE="${RETIRE_OLD_AFTER_SMOKE:-0}"', text)
