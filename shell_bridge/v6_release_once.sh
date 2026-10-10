@@ -108,7 +108,7 @@ approval_canary(){
 ssh_status_canary(){
   local root="$1" allowed="$2" prefix="$3"
   local rid request_file result_file found=0 attempt
-  rid="v6-ssh-$prefix-$(date -u +%Y%m%d%H%M%S)-$"
+  rid="v6-ssh-$prefix-$(date -u +%Y%m%d%H%M%S)-$(python3 -c 'import secrets; print(secrets.token_hex(6))')"
   request_file="$(mktemp)"; result_file="$(mktemp)"
   if ! python3 shell_bridge/verify_v6_pinned_ssh.py create "$request_file" "$rid" "$allowed"; then
     rm -f "$request_file" "$result_file"; return 1
