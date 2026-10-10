@@ -157,5 +157,59 @@ if "state=provisional" not in text or "source="+sys.argv[2] not in text:
     raise SystemExit("production provisional receipt is missing or from wrong build")
 print("V6_PRODUCTION_PROVISIONAL_AND_APPROVAL_VERIFIED=1")
 PYFINAL
-echo "Production v6 is provisionally active and passed native approval acceptance."
-echo "Legacy plists and journals are preserved for rollback; retiring old staging services requires an independently verified idle-state audit."
+echo "Phase 7: archive stopped production v5 LaunchAgents to prevent restart at next login"
+ROLLBACK_LIST="$PROD_STATE/cutover-rollback-services.tsv"
+[ -s "$ROLLBACK_LIST" ] || fail "rollback inventory missing; do not retire or claim completion"
+ARCHIVE_DIR="$HOME/Library/LaunchAgents/retired-v5-${SOURCE:0:12}"
+[ ! -e "$ARCHIVE_DIR" ] && [ ! -L "$ARCHIVE_DIR" ] || fail "old LaunchAgent archive exists; reconcile before replay"
+declare -a OLD_PLISTS=()
+declare -a OLD_ARCHIVED=()
+while IFS='|' read -r label plist; do
+  [ -n "$label" ] || continue
+  case "$label" in
+    io.llm-git-bridge.daemon|com.tom.chatgpt-shell-bridge|net.laurenzo.mac-executor-bridge|net.laurenzo.local-executor-bridge) ;;
+    *) fail "unexpected legacy label in rollback evidence: $label" ;;
+  esac
+  [ "$plist" = "$HOME/Library/LaunchAgents/$label.plist" ] || fail "unexpected rollback plist path"
+  [ -f "$plist" ] && [ ! -L "$plist" ] || fail "legacy plist missing/symlinked: $label"
+  if launchctl print "gui/$(id -u)/$label" >/dev/null 2>&1; then
+    fail "legacy production service is loaded again; refuse retirement"
+  fi
+  OLD_PLISTS+=("$plist")
+  OLD_ARCHIVED+=("$ARCHIVE_DIR/$label.plist")
+done < "$ROLLBACK_LIST"
+[ "${#OLD_PLISTS[@]}" -gt 0 ] || fail "no stopped production services available for archiving"
+launchctl print "gui/$(id -u)/$PROD_LABEL" >/dev/null 2>&1 || fail "production v6 is no longer loaded"
+mkdir -m 700 "$ARCHIVE_DIR"
+# Each rename is reversible. On partial failure preserve the archive and
+# never restart v5 automatically while v6 may have executed effects.
+for ((i=0;i<${#OLD_PLISTS[@]};i++)); do
+  mv -n "${OLD_PLISTS[i]}" "${OLD_ARCHIVED[i]}" || fail "failed to archive legacy service, preserve partial evidence"
+  [ -f "${OLD_ARCHIVED[i]}" ] && [ ! -e "${OLD_PLISTS[i]}" ] ||
+    fail "legacy archive postcondition failed"
+done
+python3 - "$PROD_STATE/v6-release-acceptance.json" "$SOURCE" "$PROD_LABEL" "$ARCHIVE_DIR" <<'PYACCEPT'
+import json,os,sys,tempfile,time
+path,source,label,archive=sys.argv[1:]
+receipt={
+    "schema":1,"kind":"bridge_v6_production_acceptance",
+    "source_commit":source, "production_label":label,
+    "native_operator_approval_verified":True,
+    "v5_launchagents_archived":archive,
+    "legacy_state_preserved":True,
+    "recovery_fault_injection_live_verified":False,
+    "accepted_at":time.strftime("%Y-%m-%dT%H:%M:%SZ",time.gmtime()),
+}
+fd,tmp=tempfile.mkstemp(prefix=".v6-acceptance-",dir=os.path.dirname(path))
+try:
+    with os.fdopen(fd,"w",encoding="utf-8") as f:
+        json.dump(receipt,f,sort_keys=True,indent=2)
+        f.write("\\n");f.flush();os.fsync(f.fileno())
+    os.chmod(tmp,0o600)
+    os.replace(tmp,path)
+finally:
+    if os.path.exists(tmp):os.unlink(tmp)
+PYACCEPT
+echo "V6_PRODUCTION_ACCEPTED_WITH_RECOVERY_EVIDENCE_PRESERVED=1"
+echo "Historical v5 production launch agents archived; other staging instances are retained until separately reconciled."
+
