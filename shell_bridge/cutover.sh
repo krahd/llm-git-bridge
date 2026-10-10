@@ -155,6 +155,36 @@ fi
 if launchctl print "gui/${UID_NOW}/${NEW_LABEL}" >/dev/null 2>&1; then
   fail "v6 service is already loaded; reconcile the existing v6 service before cutover"
 fi
+# Discover actual loaded consumers rather than assuming static legacy labels
+# are complete. Only known production labels may be stopped automatically;
+# unrelated staged instances on separate mailboxes must be preserved.
+OWNER_SCRIPT="$(cd "$(dirname "$0")" && pwd)/bridge_service_ownership.py"
+[ -f "$OWNER_SCRIPT" ] || fail "live bridge ownership inspector is missing"
+OWNERSHIP="$(python3 "$OWNER_SCRIPT")" || fail "loaded bridge ownership is not independently verified"
+KNOWN_CONSUMERS="$(python3 - "$OWNERSHIP" "$ROOT_ID" "$NEW_LABEL" <<'PYOWNERS'
+import json,sys
+inventory=json.loads(sys.argv[1])
+root,new=sys.argv[2:]
+if inventory.get('problems') or not inventory.get('safe_to_stage'):
+    raise SystemExit('HOLD: duplicate or unknown loaded bridge')
+known={'com.tom.chatgpt-shell-bridge','io.llm-git-bridge.daemon',
+       'net.laurenzo.mac-executor-bridge','net.laurenzo.local-executor-bridge'}
+owners=[r['label'] for r in inventory['loaded']
+        if r.get('drive_root_folder_id')==root]
+if not owners:
+    raise SystemExit('HOLD: no loaded production mailbox consumer to transfer')
+if new in owners or any(label not in known for label in owners):
+    raise SystemExit('HOLD: production mailbox consumer is not a recognized legacy service')
+for label in owners:
+    print(label)
+PYOWNERS
+)" || fail "production consumer enumeration failed"
+OLD_LABELS=()
+while IFS= read -r label; do
+  [ -n "$label" ] && OLD_LABELS+=("$label")
+done <<< "$KNOWN_CONSUMERS"
+[ "${#OLD_LABELS[@]}" -gt 0 ] || fail "no verified production consumers to transfer"
+
 
 EXPECTED_APPROVAL_APP="$NEW_INSTALL_DIR/Local Executor Approval.app"
 CONFIG_APPROVAL_APP="$(python3 - "$NEW_CONFIG" <<'PYAPP'
