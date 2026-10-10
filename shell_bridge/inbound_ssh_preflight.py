@@ -39,10 +39,25 @@ def verify(remote_login_stdout: str, membership_stdout: str, username: str) -> d
 
 
 def launchctl_remote_login_status(output: str) -> str:
-    # macOS launchctl disabled output changes spelling between OS releases.
-    # An absent or duplicated sshd entry is not evidence of Remote Login.
-    statuses = re.findall(
-        r'^\\s*"?com\\.openssh\\.sshd"?\\s*=>\\s*(enabled|disabled|true|false)\\s*
+    # launchctl print-disabled reports the SSH service with OS-specific values.
+    entries = []
+    for line in output.splitlines():
+        if "com.openssh.sshd" not in line:
+            continue
+        parts = line.strip().replace('"', '').split("=>")
+        if len(parts) != 2 or parts[0].strip() != "com.openssh.sshd":
+            raise ValueError("invalid SSH launchd state")
+        entries.append(parts[1].strip().lower())
+    if len(entries) != 1:
+        raise ValueError("launchd SSH service state is ambiguous")
+    if entries[0] in ("enabled", "false"):
+        return "Remote Login: On"
+    if entries[0] in ("disabled", "true"):
+        return "Remote Login: Off"
+    raise ValueError("unknown SSH launchd state")
+
+
+def main() -> int:
     if sys.platform != "darwin":
         print("INBOUND_SSH_HOLD: macOS only", file=sys.stderr)
         return 2
