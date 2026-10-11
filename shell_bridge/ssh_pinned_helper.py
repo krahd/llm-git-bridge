@@ -71,8 +71,14 @@ def load_policy(directory: Path, action: str) -> tuple[list[str], int]:
     _regular_owner_file(path, directory, max_bytes=_MAX_POLICY_BYTES)
     _regular_owner_file(known_hosts, directory, max_bytes=_MAX_KNOWN_HOSTS_BYTES)
     try:
-        data = json.loads(path.read_text(encoding="utf-8"), object_pairs_hook=_no_duplicate_json_keys)
-    except (OSError, ValueError) as exc:
+        # Bound the actual read, not only the earlier stat size: the file
+        # might change between validation and parsing.
+        with path.open("rb") as stream:
+            raw_policy = stream.read(_MAX_POLICY_BYTES + 1)
+        if len(raw_policy) > _MAX_POLICY_BYTES:
+            raise SSHPolicyError("SSH policy material exceeds fixed size limit")
+        data = json.loads(raw_policy.decode("utf-8"), object_pairs_hook=_no_duplicate_json_keys)
+    except (OSError, ValueError, UnicodeError) as exc:
         raise SSHPolicyError("invalid SSH policy") from exc
     required = {"schema", "host", "user", "port", "identity_file"}
     if not isinstance(data, dict) or type(data.get("schema")) is not int or (
