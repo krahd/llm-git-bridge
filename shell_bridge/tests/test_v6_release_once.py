@@ -51,6 +51,16 @@ class SingleRunReleaseContractTests(unittest.TestCase):
         self.assertIn('recovery_fault_injection_live_verified":False', SCRIPT)
         self.assertIn('legacy_state_preserved":True', SCRIPT)
 
+    def test_reversible_archive_is_not_misrepresented_as_sunset_readiness(self):
+        archive = SCRIPT.index('echo "Phase 8: archive stopped production v5')
+        receipt = SCRIPT.index('"v5_sunset_ready":False')
+        self.assertLess(archive, receipt)
+        self.assertIn('"acceptance_level":"provisional_handover"', SCRIPT)
+        self.assertIn('"recovery_fault_injection_live_verified":False', SCRIPT)
+        self.assertIn("V5_SUNSET_READY=0", SCRIPT)
+        self.assertIn("V6_PRODUCTION_PROVISIONAL_HANDED_OVER_WITH_RECOVERY_PENDING=1", SCRIPT)
+        self.assertNotIn("V6_PRODUCTION_ACCEPTED_WITH_RECOVERY_EVIDENCE_PRESERVED=1", SCRIPT)
+
     def test_ssh_smoke_id_expands_to_protocol_valid_identifier(self):
         # Previously the shell assignment ended with a literal "$", which
         # bash -n and all result-verifier tests failed to detect.
