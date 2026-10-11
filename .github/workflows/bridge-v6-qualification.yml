@@ -48,10 +48,12 @@ jobs:
             xargs -0 -n 1 bash -n
       - name: Compile canonical Python sources and tests
         run: python3 -m compileall -q src tests shell_bridge
-      - name: Run portable pinned SSH helper regression tests
+      - name: Run portable pinned SSH helper and release acceptance regressions
         env:
           PYTHONDONTWRITEBYTECODE: '1'
-        run: PYTHONPATH=shell_bridge python3 -m unittest discover -s shell_bridge/tests -p test_ssh_pinned_helper.py -v
+        run: |
+          PYTHONPATH=shell_bridge python3 -m unittest discover -s shell_bridge/tests -p test_ssh_pinned_helper.py -v
+          PYTHONPATH=shell_bridge python3 -m unittest discover -s shell_bridge/tests -p test_v6_release_once.py -v
       - name: Run canonical repository unit tests
         env:
           PYTHONDONTWRITEBYTECODE: '1'
