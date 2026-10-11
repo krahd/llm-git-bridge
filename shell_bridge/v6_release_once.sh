@@ -18,13 +18,23 @@ SOURCE="$(git rev-parse HEAD)"
 [ "${#SOURCE}" -eq 40 ] || fail "invalid source identity"
 [ "$(git rev-parse refs/remotes/origin/main 2>/dev/null)" = "$SOURCE" ] || fail "this worktree is not the freshly fetched canonical origin/main release"
 echo "RELEASE_SOURCE=$SOURCE"
-if [ -z "${V6_SSH_POLICY_DIR:-}" ]; then
-  echo "One-time operator enrollment: select an existing verified SSH host."
-  V6_SSH_POLICY_DIR="$(PYTHONDONTWRITEBYTECODE=1 python3 shell_bridge/setup_v6_pinned_ssh.py "$SOURCE" "${ALLOWED_ROOT:-$HOME/tom-repos}")" ||
-    fail "SSH enrollment incomplete; production v5 has not been modified"
+case "${V6_ENABLE_OUTBOUND_SSH:-0}" in
+  0|1) ;;
+  *) fail "V6_ENABLE_OUTBOUND_SSH must be exactly 0 or 1" ;;
+esac
+if [ "${V6_ENABLE_OUTBOUND_SSH:-0}" = 1 ]; then
+  if [ -z "${V6_SSH_POLICY_DIR:-}" ]; then
+    echo "One-time operator enrollment: select an existing verified SSH host."
+    V6_SSH_POLICY_DIR="$(PYTHONDONTWRITEBYTECODE=1 python3 shell_bridge/setup_v6_pinned_ssh.py "$SOURCE" "${ALLOWED_ROOT:-$HOME/tom-repos}")" ||
+      fail "SSH enrollment incomplete; production v5 has not been modified"
+  fi
+  REGISTER_PINNED_SSH_POLICY_DIR="$V6_SSH_POLICY_DIR"
+  export REGISTER_PINNED_SSH_POLICY_DIR
+else
+  [ -z "${V6_SSH_POLICY_DIR:-}" ] || fail "SSH policy specified without V6_ENABLE_OUTBOUND_SSH=1"
+  unset REGISTER_PINNED_SSH_POLICY_DIR
+  echo "OUTBOUND_SSH_NOT_REQUESTED=1"
 fi
-REGISTER_PINNED_SSH_POLICY_DIR="$V6_SSH_POLICY_DIR"
-export REGISTER_PINNED_SSH_POLICY_DIR
 case "${V6_REQUIRE_INBOUND_SSH:-0}" in
   0|1) ;;
   *) fail "V6_REQUIRE_INBOUND_SSH must be exactly 0 or 1; no SSH gate silently skipped" ;;
@@ -144,7 +154,11 @@ ssh_status_canary(){
 echo "Phase 2: two critical one-time native UI acceptance decisions"
 approval_canary "$CANDIDATE_ROOT" "$CANDIDATE_ALLOWED" deny staging
 approval_canary "$CANDIDATE_ROOT" "$CANDIDATE_ALLOWED" allow staging
-ssh_status_canary "$CANDIDATE_ROOT" "$CANDIDATE_ALLOWED" staging
+if [ "${V6_ENABLE_OUTBOUND_SSH:-0}" = 1 ]; then
+  ssh_status_canary "$CANDIDATE_ROOT" "$CANDIDATE_ALLOWED" staging
+else
+  echo "STAGING_SSH_CANARY_SKIPPED=1"
+fi
 
 if [ "${V6_REQUIRE_INBOUND_SSH:-0}" = 1 ]; then
 echo "Phase 2b: verify macOS inbound Remote Login and a real separate-device SSH session"
@@ -264,7 +278,11 @@ if "state=provisional" not in text or "source="+sys.argv[2] not in text:
     raise SystemExit("production provisional receipt is missing or from wrong build")
 print("V6_PRODUCTION_PROVISIONAL_AND_APPROVAL_VERIFIED=1")
 PYFINAL
-ssh_status_canary "$PROD_ROOT" "$PROD_ALLOWED" production || fail "production SSH read-only acceptance failed; hold v6 provisional and preserve rollback"
+if [ "${V6_ENABLE_OUTBOUND_SSH:-0}" = 1 ]; then
+  ssh_status_canary "$PROD_ROOT" "$PROD_ALLOWED" production || fail "production SSH read-only acceptance failed; hold v6 provisional and preserve rollback"
+else
+  echo "PRODUCTION_SSH_CANARY_SKIPPED=1"
+fi
 echo "Phase 7: verify exactly one loaded production mailbox owner"
 LIVE_OWNERSHIP="$(python3 shell_bridge/bridge_service_ownership.py)" ||
   fail "post-cutover live bridge inventory is not verifiable"
