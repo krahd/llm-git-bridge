@@ -63,6 +63,24 @@ because regular CI and normal operation passed.
   approvals and journals are inspected. Do not retire unrelated provider
   sessions based solely on historical label names.
 
+## Recovery after the 81accc8 interrupted launcher
+
+The October 10 attempt reached outbound SSH enrollment and created a
+detached worktree at
+`~/.local/state/bridge-v6-release-sources/81accc8e365a54d95c11c0d606527e338c8515cc`.
+It also exposed a heredoc parser defect: Bash included a continuation
+`hold` statement in the Python source. The resulting `IndentationError`
+did not stop worktree creation. The corrected launcher uses a complete
+`if ! python3 ... <<'PYSAFEPATH'` guard with the closing delimiter before
+`then`, and regression checks that an unsafe path cannot advance.
+
+Do **not** rerun that exact source SHA or remove its worktree blindly.
+After successful qualification of a newer canonical main, the launcher
+creates a different SHA-keyed worktree. Verify the old worktree and any
+partial candidate state before cleanup. The displayed prompt was still
+pre-staging, but a runtime-side inventory is required to establish that v5
+continues to own production.
+
 ## Operational preconditions
 
 Requires a macOS user session with `git`, `python3`, `rclone`, `launchctl`
@@ -84,45 +102,35 @@ release worktree and invokes `bash shell_bridge/v6_release_once.sh`.
 Do not claim full ecosystem migration or retire other staging instances until
 their independent mailbox/journal ownership and provider routing are reconciled.
 
-## Required pinned SSH acceptance (added before v5 sunset)
+## Optional outbound SSH enrollment
 
-The operator must provide `V6_SSH_POLICY_DIR` in the same terminal invocation.
-This is an explicit prerequisite for retirement, not a request for additional
-privileges. The directory must already contain a secure operator-owned
-`ssh-policy.json` declaring a host, user, port and owner-only private key,
-plus its corresponding pinned `known_hosts`. The installer receives that
-directory via `REGISTER_PINNED_SSH_POLICY_DIR`, SHA-pins the helper and
-host-key material, and preauthorizes only fixed read-only `status` and
-`identity` actions. The full one-run controller then sends a *single* status
-request through isolated v6 and production v6, using exact request hashes
-and no-prompt authorization. A missing profile, altered key, unavailable host,
-or ambiguous remote result holds rather than retiring v5.
+Outbound SSH is a separately enrolled bridge capability, **not** a prerequisite
+for Drive-backed command transport. The default is
+`V6_ENABLE_OUTBOUND_SSH=0`: no SSH host is requested, no pinned helper
+is registered and no SSH status probes are submitted. The release records
+`OUTBOUND_SSH_NOT_REQUESTED=1` and marks the two SSH probes skipped.
 
-This is an intentionally minimal first SSH capability. It does not claim
-arbitrary interactive remote shell access or unrestricted SSH deployment.
-Additional host/operation profiles require explicit policy design and
-installation before v5 parity can be asserted. Do not run the older
-unqualified release command; it lacks the operator-pinned SSH profile.
+To include pinned outbound SSH acceptance, set
+`V6_ENABLE_OUTBOUND_SSH=1`. Supply a pre-reviewed
+`V6_SSH_POLICY_DIR`, or complete interactive, independently verified
+host-key enrollment. The installer pins the operator-owned policy,
+known-host database and SSH identity and registers the bounded helper.
+Both isolated-staging and production SSH status canaries then become mandatory
+and fail closed. A supplied policy without the explicit opt-in is rejected;
+values other than `0` or `1` are rejected.
+
+Skipping SSH is not proof of feature parity. Before stopping v5, the launcher
+still requires `MIGRATE LIMITED SSH` to acknowledge that arbitrary SSH,
+SCP, SFTP and rsync have not been qualified. Do not consent to migration
+if current workflows depend on those capabilities.
 
 ## Single-run interactive SSH enrollment
 
-If `V6_SSH_POLICY_DIR` is not provided, the same release invocation now runs
-`setup_v6_pinned_ssh.py` before any staging or production mutation. It prompts
-once for a pinned SSH hostname, account, port, existing owner-only identity key,
-and the already trusted `known_hosts` file. It displays the previously trusted
-SSH host-key fingerprint(s), and **requires the explicit confirmation** `PIN
-SSH` before writing a separate operator-owned SHA-bound policy directory.
-
-The wizard does not call `ssh-keyscan`, use automatic trust-on-first-use, or
-connect to a remote SSH endpoint. If the selected host is not already present
-in the Mac's trusted host-key database, enrollment holds before staging so the
-operator can verify the host key independently. Existing enrollments are never
-overwritten; the operator can point `V6_SSH_POLICY_DIR` at a verified existing
-policy on a later safe run.
-
-This keeps the release at one shell invocation, with one-time host consent,
-two deliberate native approval tests, and a separate consequential `MIGRATE`
-authorization. No routine SSH status call requires another popup.
+When outbound SSH is explicitly enabled and no policy directory is supplied,
+`setup_v6_pinned_ssh.py` prompts for the pinned hostname, account, port,
+existing owner-only identity and previously trusted `known_hosts` file. It
+requires a verified fingerprint and explicit `PIN SSH` confirmation, never
+uses trust-on-first-use, and refuses to overwrite an existing enrollment.
 
 ## Additional operator-pinned SSH profiles
 

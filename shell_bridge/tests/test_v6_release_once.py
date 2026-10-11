@@ -86,6 +86,21 @@ class SingleRunReleaseContractTests(unittest.TestCase):
         self.assertLess(SCRIPT.index('case "${V6_REQUIRE_INBOUND_SSH:-0}" in'),
                         SCRIPT.index('prepare_v6_on_mac.sh'))
 
+    def test_outbound_ssh_opt_in_covers_enrollment_and_both_canaries(self):
+        self.assertIn('case "${V6_ENABLE_OUTBOUND_SSH:-0}" in', SCRIPT)
+        self.assertIn('V6_ENABLE_OUTBOUND_SSH must be exactly 0 or 1', SCRIPT)
+        self.assertIn('OUTBOUND_SSH_NOT_REQUESTED=1', SCRIPT)
+        self.assertIn('STAGING_SSH_CANARY_SKIPPED=1', SCRIPT)
+        self.assertIn('PRODUCTION_SSH_CANARY_SKIPPED=1', SCRIPT)
+        self.assertIn('SSH policy specified without V6_ENABLE_OUTBOUND_SSH=1', SCRIPT)
+        self.assertEqual(SCRIPT.count('if [ "${V6_ENABLE_OUTBOUND_SSH:-0}" = 1 ]; then'), 3)
+        self.assertLess(SCRIPT.index('case "${V6_ENABLE_OUTBOUND_SSH:-0}" in'),
+                        SCRIPT.index('setup_v6_pinned_ssh.py'))
+        self.assertLess(SCRIPT.index('STAGING_SSH_CANARY_SKIPPED=1'),
+                        SCRIPT.index('bash shell_bridge/cutover.sh'))
+        self.assertGreater(SCRIPT.index('PRODUCTION_SSH_CANARY_SKIPPED=1'),
+                           SCRIPT.index('bash shell_bridge/cutover.sh'))
+
     def test_ssh_requires_operator_policy_and_live_dual_smoke(self):
         self.assertIn('V6_SSH_POLICY_DIR', SCRIPT)
         self.assertIn('REGISTER_PINNED_SSH_POLICY_DIR="$V6_SSH_POLICY_DIR"', SCRIPT)

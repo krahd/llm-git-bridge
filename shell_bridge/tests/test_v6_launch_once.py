@@ -125,6 +125,22 @@ class OneRunDirtyCheckoutLauncherTests(unittest.TestCase):
         self.assertNotIn("SHELL_BRIDGE_STAGED=1", result.stdout)
         self.assertNotIn("V6_PRODUCTION_ACCEPTED", result.stdout)
 
+    def test_release_source_safety_check_rejects_agent_writable_base(self):
+        # The real launcher previously put '|| hold' after a heredoc opener.
+        # Bash then passed the hold statement into Python, which raised an
+        # IndentationError but allowed subsequent worktree creation.
+        env = dict(self.env)
+        env["ALLOWED_ROOT"] = str(self.home)
+        result = subprocess.run(
+            ["/bin/bash", str(LAUNCH), str(self.original)],
+            env=env, text=True, capture_output=True, timeout=30)
+        self.assertNotEqual(result.returncode, 0)
+        self.assertIn("release source is within an agent-writable or unsafe path",
+                      result.stderr)
+        self.assertNotIn("EXACT_CANONICAL_RELEASE_SOURCE", result.stdout)
+        self.assertNotIn("IndentationError", result.stderr)
+        self.assertFalse((self.home / ".local/state/bridge-v6-release-sources").exists())
+
     def test_incorrect_origin_refused_before_mutation(self):
         env = dict(self.env)
         env.pop("V6_RELEASE_DRY_RUN")
