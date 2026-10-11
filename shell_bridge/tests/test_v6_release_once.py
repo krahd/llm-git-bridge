@@ -66,8 +66,8 @@ class SingleRunReleaseContractTests(unittest.TestCase):
 
     def test_embedded_acceptance_writer_records_actual_provisional_state(self):
         # Run the Python heredoc, not just a source substring assertion.
-        start = SCRIPT.index("<<'PYACCEPT'\\n") + len("<<'PYACCEPT'\\n")
-        end = SCRIPT.index("\\nPYACCEPT", start)
+        start = SCRIPT.index("<<'PYACCEPT'\n") + len("<<'PYACCEPT'\n")
+        end = SCRIPT.index("\nPYACCEPT", start)
         embedded = SCRIPT[start:end]
         with tempfile.TemporaryDirectory() as tmp:
             receipt = Path(tmp) / "receipt.json"
