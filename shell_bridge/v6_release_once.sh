@@ -250,8 +250,11 @@ PYMATCH
 python3 "$PROD_INSTALL/bridge.py" doctor --config "$PROD_CONFIG" >/dev/null
 # Only a local operator may authorize transferring the production mailbox.
 echo "Phase 4: consequential cutover authorization"
-echo "IMPORTANT: v6 currently supports only pinned SSH status/identity actions."
+echo "IMPORTANT: v6 supports fixed operator-pinned SSH status/identity and separately reviewed custom command profiles."
 echo "Arbitrary SSH, SCP, SFTP and RSYNC are NOT yet qualified as v5 replacement capabilities."
+if [ "${V6_ENABLE_OUTBOUND_SSH:-0}" = 0 ]; then
+  echo "Outbound SSH was explicitly skipped for this release (no remote SSH capability enrolled)."
+fi
 echo "If those workflows are required, STOP here and keep v5 as production."
 printf 'To deliberately accept this limited SSH scope and switch production, type MIGRATE LIMITED SSH: '
 IFS= read -r authorization
