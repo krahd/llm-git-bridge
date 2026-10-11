@@ -356,7 +356,11 @@ receipt={
     "native_operator_approval_verified":True,
     "v5_launchagents_archived":archive,
     "legacy_state_preserved":True,
+    # The reversible LaunchAgent archive prevents dual consumers on login,
+    # but does not certify crash/lost-result or cross-version journal recovery.
     "recovery_fault_injection_live_verified":False,
+    "v5_sunset_ready":False,
+    "acceptance_level":"provisional_handover",
     "accepted_at":time.strftime("%Y-%m-%dT%H:%M:%SZ",time.gmtime()),
 }
 fd,tmp=tempfile.mkstemp(prefix=".v6-acceptance-",dir=os.path.dirname(path))
@@ -369,6 +373,7 @@ try:
 finally:
     if os.path.exists(tmp):os.unlink(tmp)
 PYACCEPT
-echo "V6_PRODUCTION_ACCEPTED_WITH_RECOVERY_EVIDENCE_PRESERVED=1"
-echo "Historical v5 production launch agents archived; other staging instances are retained until separately reconciled."
+echo "V6_PRODUCTION_PROVISIONAL_HANDED_OVER_WITH_RECOVERY_PENDING=1"
+echo "Reversible v5 LaunchAgent archive prevents dual consumers after login; legacy binary, config, journals and rollback evidence preserved."
+echo "V5_SUNSET_READY=0: complete live crash/lost-result recovery and independent client acceptance before permanent retirement."
 
