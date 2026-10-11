@@ -42,8 +42,16 @@ jobs:
     timeout-minutes: 10
     steps:
       - uses: actions/checkout@v4
+      - name: Validate bridge shell syntax on Linux
+        run: |
+          find shell_bridge -maxdepth 1 -type f -name '*.sh' -print0 |
+            xargs -0 -n 1 bash -n
       - name: Compile canonical Python sources and tests
-        run: python3 -m compileall -q src tests
+        run: python3 -m compileall -q src tests shell_bridge
+      - name: Run portable pinned SSH helper regression tests
+        env:
+          PYTHONDONTWRITEBYTECODE: '1'
+        run: PYTHONPATH=shell_bridge python3 -m unittest discover -s shell_bridge/tests -p test_ssh_pinned_helper.py -v
       - name: Run canonical repository unit tests
         env:
           PYTHONDONTWRITEBYTECODE: '1'
