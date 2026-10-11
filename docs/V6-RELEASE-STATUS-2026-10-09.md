@@ -353,3 +353,52 @@ release controller explicitly requires one-time `MIGRATE LIMITED SSH`
 authorization before any v5 retirement; without a user-accepted restricted
 scope and live Mac acceptance, production must remain v5. Unrestricted
 agent system-shell execution also remains prohibited by design.
+
+
+## Integrated v6 source release checkpoint — 2026-10-10
+
+Canonical GitHub `main` was independently verified at
+`6ed7cbb22adebe16bba57b14de3c6d4c8b5c88d2` after these changes:
+
+- PR #26 (`5ae344b`) separated optional direct inbound macOS Remote Login
+  acceptance from the Drive-backed Mac command transport. Opt-in
+  `V6_REQUIRE_INBOUND_SSH=1` retains the restricted-account preflight and
+  real second-device witness; omission does not enable Remote Login.
+- PR #27 (`aac6c54`) rejects invalid inbound SSH opt-in values before staging.
+- PR #28 (`dd95c4d`) supports operator-installed schema-2 SSH command profiles
+  with fixed remote argv, pinned host keys and private identity, bounded
+  output/time, no agent-supplied host/options/command, native per-call
+  approval for custom actions, and an exact destination/command review.
+  Built-in `status` and `identity` alone may use installation-time consent.
+  Host or policy changes invalidate the capability.
+- PR #29 (`6ed7cbb`) suppresses untracked local Git hooks both during initial
+  `git fetch` and isolated worktree preparation, preserving dirty checkout
+  state. A regression verifies a deliberately side-effecting
+  `reference-transaction` hook normally runs but not during release fetch.
+
+PR #28's macOS qualification run `38093475343` passed 265 standard tests
+and 265 direct sandbox tests (six skipped in each), plus installer syntax,
+Python compilation and Swift typecheck. PR #29's earlier-branch qualification
+run `38093606964` passed 260 tests in each macOS suite (six skipped), plus
+the same static/native checks. Because PR #29 was tested against a potentially
+older merge base, these independent results are **not** sufficient to claim
+the combined final tree was tested. A new integrated-main qualification of
+this documentation checkpoint must pass before release source qualification
+is considered complete.
+
+**No Mac production migration or v5 sunset is recorded.** The current
+source supports Mac-local sandboxed terminal work and explicit operator-pinned
+outbound SSH profiles; it does not promise unrestricted arbitrary remote SSH,
+SCP/SFTP/rsync, or unattended shell escalation. The production release still
+requires exact host/operation-scope consent and actual local acceptance.
+Known remaining external checks include native GUI Reject/Allow (and
+expiration), SSH endpoint smoke and key-pin rejection, fresh mailbox/process
+inventory, at-most-once journal reconciliation, actual production handover,
+post-cutover approval, exclusive mailbox ownership, and a recoverable rollback
+record. v5 GC protections and pre-existing local branches/state must remain
+intact until these gates pass.
+
+The operator's supported entrypoint remains the one-paste launcher documented
+in `docs/V6-ONE-RUN-RELEASE.md`, using the latest qualified canonical main.
+Do not instruct the operator to run earlier pinned-commit commands or perform
+independent repeated migration scripts.
