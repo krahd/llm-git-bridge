@@ -36,3 +36,15 @@ jobs:
         run: python3 -m unittest discover -s shell_bridge/tests -q
       - name: Typecheck native approval application
         run: xcrun swiftc -typecheck -framework AppKit shell_bridge/approval_gui.swift
+
+  core-repository-regressions:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v4
+      - name: Compile canonical Python sources and tests
+        run: python3 -m compileall -q src tests
+      - name: Run canonical repository unit tests
+        env:
+          PYTHONDONTWRITEBYTECODE: '1'
+        run: PYTHONPATH=src python3 -m unittest discover -s tests -v
