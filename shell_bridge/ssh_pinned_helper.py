@@ -24,13 +24,16 @@ _HOST = re.compile(r"[a-z0-9][a-z0-9.-]{0,252}\Z")
 _USER = re.compile(r"[a-z_][a-z0-9_-]{0,31}\Z")
 _COMMANDS = {"status": "/usr/bin/uptime", "identity": "/usr/bin/id -un"}
 _MAX_BYTES = 65536
+_MAX_POLICY_BYTES = 65536
+_MAX_KNOWN_HOSTS_BYTES = 131072
+_MAX_IDENTITY_BYTES = 131072
 
 
 class SSHPolicyError(ValueError):
     pass
 
 
-def _regular_owner_file(path: Path, parent: Path) -> None:
+def _regular_owner_file(path: Path, parent: Path, *, max_bytes: int) -> None:
     if not path.is_absolute() or path.parent != parent or path.is_symlink():
         raise SSHPolicyError("unsafe SSH policy file path")
     try:
@@ -39,6 +42,8 @@ def _regular_owner_file(path: Path, parent: Path) -> None:
         raise SSHPolicyError("SSH policy file unavailable") from exc
     if not stat.S_ISREG(info.st_mode) or info.st_uid != os.getuid() or info.st_mode & 0o022:
         raise SSHPolicyError("SSH policy file ownership or mode invalid")
+    if info.st_size > max_bytes:
+        raise SSHPolicyError("SSH policy material exceeds fixed size limit")
 
 
 def _no_duplicate_json_keys(pairs: list[tuple[str, object]]) -> dict:
@@ -63,8 +68,8 @@ def load_policy(directory: Path, action: str) -> tuple[list[str], int]:
         raise SSHPolicyError("invalid SSH action token")
     path = directory / "ssh-policy.json"
     known_hosts = directory / "known_hosts"
-    _regular_owner_file(path, directory)
-    _regular_owner_file(known_hosts, directory)
+    _regular_owner_file(path, directory, max_bytes=_MAX_POLICY_BYTES)
+    _regular_owner_file(known_hosts, directory, max_bytes=_MAX_KNOWN_HOSTS_BYTES)
     try:
         data = json.loads(path.read_text(encoding="utf-8"), object_pairs_hook=_no_duplicate_json_keys)
     except (OSError, ValueError) as exc:
@@ -91,6 +96,8 @@ def load_policy(directory: Path, action: str) -> tuple[list[str], int]:
     key_info = key.stat()
     if key_info.st_uid != os.getuid() or key_info.st_mode & 0o077:
         raise SSHPolicyError("SSH private identity ownership or permissions invalid")
+    if key_info.st_size > _MAX_IDENTITY_BYTES:
+        raise SSHPolicyError("SSH private identity exceeds fixed size limit")
     commands = data.get("commands", {})
     if not isinstance(commands, dict) or len(commands) > 32:
         raise SSHPolicyError("invalid registered SSH commands")
