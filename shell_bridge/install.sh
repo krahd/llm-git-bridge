@@ -17,16 +17,15 @@ SMOKE_SLEEP="${SMOKE_SLEEP:-2}"
 UID_NOW="$(id -u)"
 STARTED_AGENT=0
 STAGE_ONLY=0
-RETIRE_OLD_AFTER_SMOKE=0
 TMP_REQ=""
 RESULT_TMP=""
 TMP_MARKER=""
 
-usage(){ echo "Usage: install.sh [--stage-only] [--retire-old-after-smoke]"; }
+usage(){ echo "Usage: install.sh [--stage-only]"; }
 while [ "$#" -gt 0 ]; do
   case "$1" in
     --stage-only) STAGE_ONLY=1 ;;
-    --retire-old-after-smoke) RETIRE_OLD_AFTER_SMOKE=1 ;;
+    --retire-old-after-smoke) echo "ERROR: first-install smoke is not production retirement acceptance" >&2; exit 2 ;;
     -h|--help) usage; exit 0 ;;
     *) echo "ERROR: unknown option: $1" >&2; usage >&2; exit 2 ;;
   esac
@@ -42,6 +41,17 @@ need python3; need rclone; need git; need launchctl
 [ -x "$SHELL_BIN" ] || { echo "ERROR: shell is not executable: $SHELL_BIN" >&2; exit 1; }
 
 fail(){ echo "ERROR: $*" >&2; exit 1; }
+# Installation targets are immutable. Reusing a loaded v6 install directory
+# rewrites its Python files and manifest before the old process is stopped.
+# That is neither an atomic upgrade nor a recoverable rollback.
+for protected_target in "$INSTALL_DIR" "$CONFIG_DIR" "$PLIST"; do
+  if [ -e "$protected_target" ] || [ -L "$protected_target" ]; then
+    fail "existing bridge install target; use a fresh stage-only installation and guarded cutover: $protected_target"
+  fi
+done
+if [ "$STAGE_ONLY" -eq 0 ] && { [ -e "$STATE_DIR" ] || [ -L "$STATE_DIR" ]; }; then
+  fail "direct install cannot adopt an existing durable journal; stage a verified handover instead"
+fi
 normalize_remote(){ case "$1" in *:) printf '%s\n' "$1";; *) printf '%s:\n' "$1";; esac; }
 marker_for(){ rclone cat "$1$2/bridge-instance.json" 2>/dev/null || true; }
 valid_marker(){ python3 - "$1" <<'PY'
@@ -141,6 +151,16 @@ PYMARKER
 
 choose_allowed_root
 choose_remote
+# Never rewrite or launch a v6 instance while an unresolved legacy or other
+# v6 LaunchAgent may claim the mailbox. This is read-only and happens BEFORE
+# even creating/adopting remote mailbox directories.
+OWNER_INSPECTOR="$(cd "$(dirname "$0")" && pwd -P)/bridge_service_ownership.py"
+if [ "$STAGE_ONLY" -eq 0 ]; then
+  [ -f "$OWNER_INSPECTOR" ] && [ ! -L "$OWNER_INSPECTOR" ] ||
+    fail "read-only LaunchAgent ownership inspector unavailable"
+  PYTHONDONTWRITEBYTECODE=1 python3 "$OWNER_INSPECTOR" >/dev/null ||
+    fail "loaded bridge ownership is ambiguous; stage an isolated build, do not run an in-place install"
+fi
 ensure_mailbox
 
 # Inspect only rclone's redacted view; never print OAuth material.
@@ -163,6 +183,40 @@ INSTANCE_ID="$(python3 - "$MARKER" <<'PY'
 import json,sys; print(json.loads(sys.argv[1])['bridge_instance_id'])
 PY
 )"
+
+verify_unclaimed_target_mailbox() {
+  local inventory
+  inventory="$(PYTHONDONTWRITEBYTECODE=1 python3 "$OWNER_INSPECTOR")" ||
+    fail "loaded LaunchAgent mailbox ownership changed or is unverifiable"
+  python3 - "$inventory" "$ROOT_ID" "$STATE_DIR" <<'PYOWNER'
+import json,sys
+report=json.loads(sys.argv[1])
+root,state=sys.argv[2:]
+from pathlib import Path
+state=str(Path(state).expanduser().resolve(strict=False))
+if report.get("kind") != "loaded_bridge_ownership" or report.get("mutations_performed") is not False:
+    raise SystemExit("HOLD: invalid loaded bridge identity evidence")
+if report.get("problems") or report.get("safe_to_stage") is not True:
+    raise SystemExit("HOLD: conflicting loaded bridge; do not modify a running installation")
+claimants=[r.get("label") for r in report.get("loaded", [])
+           if r.get("drive_root_folder_id")==root]
+if claimants:
+    raise SystemExit("HOLD: target mailbox already has loaded consumer(s); stage-only and guarded cutover required")
+shared_state=[r.get("label") for r in report.get("loaded", [])
+              if isinstance(r.get("state_dir"), str) and
+                 str(Path(r["state_dir"]).expanduser().resolve(strict=False))==state]
+if shared_state:
+    raise SystemExit("HOLD: direct install reuses a loaded bridge durable journal directory; stage-only and guarded handover required")
+PYOWNER
+}
+
+# A new direct install is allowed only when no already loaded LaunchAgent
+# claims this exact mailbox. Stage-only may prepare an isolated replacement,
+# but is never permission to start it beside the current owner.
+if [ "$STAGE_ONLY" -eq 0 ]; then
+  verify_unclaimed_target_mailbox ||
+    fail "fresh target mailbox ownership cannot be verified for direct install"
+fi
 
 R=(rclone --drive-root-folder-id "$ROOT_ID")
 "${R[@]}" mkdir "${REMOTE}requests"
@@ -405,6 +459,10 @@ PYLEGACY
     fail "active v5 uses this same mailbox; run install.sh --stage-only, then run cutover.sh out-of-band"
   fi
 fi
+# Close the read-to-write race: check loaded owner identity again immediately
+# before launchctl changes. A failed check leaves only a staged candidate.
+verify_unclaimed_target_mailbox ||
+  fail "new or changed loaded mailbox owner; activation forbidden"
 
 # v6 never retires the old service before the new service passes its smoke test.
 launchctl bootout "gui/${UID_NOW}" "$PLIST" >/dev/null 2>&1 || true
@@ -438,19 +496,6 @@ print('SHELL_BRIDGE_INSTALLED=1')
 PY
 "${R[@]}" deletefile "${REMOTE}results/${RID}.json" >/dev/null 2>&1 || true
 STARTED_AGENT=0
-
-if [ "$RETIRE_OLD_AFTER_SMOKE" -eq 1 ]; then
-  for old_label in "$OLD_LABEL_1" "$OLD_LABEL_2"; do
-    old_plist="$HOME/Library/LaunchAgents/$old_label.plist"
-    launchctl bootout "gui/${UID_NOW}/${old_label}" >/dev/null 2>&1 || \
-      launchctl bootout "gui/${UID_NOW}" "$old_plist" >/dev/null 2>&1 || true
-    if [ -f "$old_plist" ]; then
-      archive_dir="$STATE_DIR/retired-launchagents"
-      mkdir -p "$archive_dir"; chmod 700 "$archive_dir"
-      mv "$old_plist" "$archive_dir/${old_label}.$(date +%Y%m%d%H%M%S).plist"
-    fi
-  done
-fi
 
 echo "ROOT_ID:   $ROOT_ID"
 echo "REQUESTS:  $REQUESTS_ID"
