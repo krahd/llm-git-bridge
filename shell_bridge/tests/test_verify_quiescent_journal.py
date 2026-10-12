@@ -129,7 +129,7 @@ class QuiescentJournalTests(unittest.TestCase):
         folder = self.record("oversize", "completed")
         path = folder / "result.json"
         with path.open("ab") as handle:
-            handle.truncate(40 * 1024 * 1024 + 1)
+            handle.truncate(48 * 1024 * 1024 + 1)
         with self.assertRaisesRegex(UnresolvedJournalError, "bounded audit"):
             verify(self.state)
 
