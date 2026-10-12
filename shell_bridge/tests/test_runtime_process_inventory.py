@@ -1,4 +1,5 @@
 from pathlib import Path
+import re
 import subprocess
 import unittest
 
@@ -25,6 +26,24 @@ class RuntimeProcessInventoryTests(unittest.TestCase):
             self.assertNotIn(prohibited, text)
         self.assertIn("if (count++ < 40)", text)
         self.assertNotIn("ps -axww", text)
+
+    def test_dynamic_v6_launchagent_filter_matches_actual_labels(self):
+        source = SCRIPT.read_text()
+        match = re.search(r"launchctl list \\| awk '([^']+)'", source)
+        self.assertIsNotNone(match, "dynamic label matcher missing")
+        sample = (
+            "PID Status Label\\n"
+            "1790 0 net.laurenzo.local-executor-bridge-v6-manual-bootstrap\\n"
+            "1768 0 net.laurenzo.local-executor-bridge-v6-candidate-0b84b2f-g2\\n"
+            "1400 0 com.apple.unrelated\\n"
+        )
+        result = subprocess.run(["awk", match.group(1)], input=sample,
+                                text=True, capture_output=True, check=True)
+        self.assertIn("1790 net.laurenzo.local-executor-bridge-v6-manual-bootstrap",
+                      result.stdout)
+        self.assertIn("1768 net.laurenzo.local-executor-bridge-v6-candidate-0b84b2f-g2",
+                      result.stdout)
+        self.assertNotIn("unrelated", result.stdout)
 
     def test_live_release_hold_can_reference_this_inventory(self):
         release = (SCRIPT.parent / "v6_release_once.sh").read_text()
