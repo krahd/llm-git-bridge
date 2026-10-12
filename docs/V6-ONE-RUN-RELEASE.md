@@ -38,6 +38,15 @@ can therefore derive different OS lock inodes for the **same** Drive mailbox
 identity. Matching mailbox IDs is not proof that their `flock` operations
 contend.
 
+When a v6 config contains both a canonical Drive folder ID and the
+operator-pinned remote/base folder name, newer builds also acquire the
+named-mailbox alias lock. This prevents a concurrent new v6 daemon configured
+by legacy remote/base naming alone from bypassing the canonical-ID lock.
+A missing or malformed canonical Drive token must not silently become a
+different lock namespace. The alias supplements, rather than replaces,
+the pinned ID; older binaries with unrelated TMPDIRs still require a
+loaded-owner handover check.
+
 Newly installed v6 builds now hold both the historical TMPDIR lock and
 an additional per-user fixed `/tmp/chatgpt-shell-bridge-<uid>/` lock.
 The fixed lock is owner-only and rejects symlinked/non-regular lock files.
