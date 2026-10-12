@@ -17,7 +17,7 @@ import tempfile
 from bridge_service_ownership import inspect_services
 
 FOLDER = re.compile(r"[A-Za-z0-9_-]{1,128}\Z")
-PID = re.compile(r"p([0-9]+)\Z")
+PID = re.compile(r"[0-9]+\Z")
 
 
 def lock_path(mailbox_id: str, *, uid: int | None = None,
@@ -36,7 +36,7 @@ def open_lock_file_pids(path: Path, *, runner=subprocess.run) -> dict:
     if not path.is_file():
         return {"state": "not_present", "pids": []}
     try:
-        result = runner(["/usr/sbin/lsof", "-w", "-F", "p", str(path)],
+        result = runner(["/usr/sbin/lsof", "-w", "-t", str(path)],
                         capture_output=True, text=True, timeout=8, check=False)
     except (OSError, subprocess.TimeoutExpired):
         return {"state": "unverified", "pids": [], "reason": "cannot inspect open descriptors"}
@@ -48,7 +48,7 @@ def open_lock_file_pids(path: Path, *, runner=subprocess.run) -> dict:
         m = PID.fullmatch(row)
         if not m:
             return {"state": "unverified", "pids": [], "reason": "unexpected lsof output"}
-        pids.add(m.group(1))
+        pids.add(row)
     return {"state": "open_descriptors_observed" if pids else "no_open_descriptors_observed",
             "pids": sorted(pids, key=int)}
 
