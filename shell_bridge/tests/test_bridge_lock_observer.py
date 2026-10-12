@@ -39,7 +39,7 @@ class LockDescriptorEvidenceTests(unittest.TestCase):
             calls = []
             def runner(argv, **kw):
                 calls.append((argv, kw))
-                return types.SimpleNamespace(returncode=0, stdout="p1786\\np1738\\n", stderr="")
+                return types.SimpleNamespace(returncode=0, stdout="p1786\np1738\n", stderr="")
             data = locks.open_lock_file_pids(path, runner=runner)
             self.assertEqual(data, {"state": "open_descriptors_observed", "pids": ["1738", "1786"]})
             self.assertEqual(calls[0][0], ["/usr/sbin/lsof", "-w", "-F", "p", str(path)])
@@ -51,8 +51,8 @@ class LockDescriptorEvidenceTests(unittest.TestCase):
             path.touch()
             for result in (
                 types.SimpleNamespace(returncode=1, stdout="", stderr=""),
-                types.SimpleNamespace(returncode=0, stdout="nsecret\\n", stderr=""),
-                types.SimpleNamespace(returncode=0, stdout="p1786\\n", stderr="warning"),
+                types.SimpleNamespace(returncode=0, stdout="nsecret\n", stderr=""),
+                types.SimpleNamespace(returncode=0, stdout="p1786\n", stderr="warning"),
             ):
                 with self.subTest(result=result):
                     evidence = locks.open_lock_file_pids(
