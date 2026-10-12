@@ -1635,7 +1635,7 @@ def _open_instance_lock_file(path: Path):
     try:
         meta = os.fstat(fd)
         if (not stat.S_ISREG(meta.st_mode) or meta.st_uid != os.getuid()
-                or meta.st_nlink != 1):
+                or meta.st_nlink != 1 or meta.st_mode & 0o077):
             raise RuntimeError("bridge lock file is not a private regular file")
         return os.fdopen(fd, "r+")
     except BaseException:
