@@ -1613,11 +1613,8 @@ def _instance_lock_path(cfg: dict) -> Path:
         identity = f"mailbox:{remote}|{base}"
     digest = hashlib.sha256(identity.encode("utf-8")).hexdigest()[:32]
     lock_root = Path(tempfile.gettempdir()) / f"chatgpt-shell-bridge-{os.getuid()}"
-    lock_root.mkdir(mode=0o700, parents=True, exist_ok=True)
-    try:
-        lock_root.chmod(0o700)
-    except OSError:
-        pass
+    # Pure path derivation; _open_instance_lock_file performs owner-verified,
+    # no-follow creation rather than chmodding pre-existing directories.
     return lock_root / f"{digest}.lock"
 
 
