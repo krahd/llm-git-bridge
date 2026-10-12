@@ -1,4 +1,6 @@
 import json
+import fcntl
+import os
 from pathlib import Path
 import sys
 import tempfile
@@ -22,6 +24,17 @@ class LockDescriptorEvidenceTests(unittest.TestCase):
             with self.subTest(value=invalid):
                 with self.assertRaises(ValueError):
                     locks.lock_path(invalid)
+
+    @unittest.skipUnless(sys.platform == "darwin", "Mac lsof integration")
+    def test_real_macos_lsof_sees_current_exclusive_lock_holder(self):
+        with tempfile.TemporaryDirectory() as td:
+            path = Path(td) / "bridge-test.lock"
+            with path.open("a+") as handle:
+                fcntl.flock(handle.fileno(), fcntl.LOCK_EX | fcntl.LOCK_NB)
+                observed = locks.open_lock_file_pids(path)
+                self.assertEqual(observed["state"], "open_descriptors_observed", observed)
+                self.assertIn(str(os.getpid()), observed["pids"])
+                fcntl.flock(handle.fileno(), fcntl.LOCK_UN)
 
     def test_absent_file_never_invokes_lsof(self):
         with tempfile.TemporaryDirectory() as td:
