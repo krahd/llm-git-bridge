@@ -36,6 +36,19 @@ class LockDescriptorEvidenceTests(unittest.TestCase):
                 observed = locks.lock_path("production")
                 self.assertEqual(expected, observed)
 
+    def test_dual_environment_and_stable_lock_evidence_never_certifies_exclusive_owner(self):
+        inventory = {"kind": "loaded_bridge_ownership", "safe_to_stage": False,
+                     "loaded": [{"label": "bridge-a", "pid": "1768",
+                                 "drive_root_folder_id": "staging"}]}
+        with tempfile.TemporaryDirectory() as td:
+            with mock.patch.object(locks.tempfile, "gettempdir", return_value=td):
+                data = locks.inspect(inventory)
+        self.assertEqual(
+            {row["lock_location"] for row in data["lock_evidence"]},
+            {"legacy_tmpdir", "fixed_tmp"})
+        self.assertFalse(data["exclusive_lock_proved"])
+        self.assertFalse(data["retirement_authorized"])
+
     @unittest.skipUnless(sys.platform == "darwin", "Mac lsof integration")
     def test_real_macos_lsof_sees_current_exclusive_lock_holder(self):
         with tempfile.TemporaryDirectory() as td:

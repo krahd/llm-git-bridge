@@ -12,6 +12,7 @@ import shlex
 import shutil
 import secrets
 import signal
+import stat
 import subprocess
 import sys
 import tempfile
@@ -1612,26 +1613,77 @@ def _instance_lock_path(cfg: dict) -> Path:
         identity = f"mailbox:{remote}|{base}"
     digest = hashlib.sha256(identity.encode("utf-8")).hexdigest()[:32]
     lock_root = Path(tempfile.gettempdir()) / f"chatgpt-shell-bridge-{os.getuid()}"
-    lock_root.mkdir(mode=0o700, parents=True, exist_ok=True)
-    try:
-        lock_root.chmod(0o700)
-    except OSError:
-        pass
+    # Pure path derivation; _open_instance_lock_file performs owner-verified,
+    # no-follow creation rather than chmodding pre-existing directories.
     return lock_root / f"{digest}.lock"
 
 
-def acquire_instance_lock(cfg: dict):
-    lock_file = _instance_lock_path(cfg).open("a+")
+def _stable_instance_lock_path(cfg: dict) -> Path:
+    # Canonical per-user location, independent of launchd TMPDIR.
+    old_path = _instance_lock_path(cfg)
+    return Path("/tmp") / old_path.parent.name / old_path.name
+
+
+def _open_instance_lock_file(path: Path):
+    path.parent.mkdir(mode=0o700, parents=True, exist_ok=True)
+    meta = path.parent.lstat()
+    if (not stat.S_ISDIR(meta.st_mode) or meta.st_uid != os.getuid()
+            or meta.st_mode & 0o077):
+        raise RuntimeError("bridge lock directory is not exclusively owned")
+    flags = os.O_RDWR | os.O_CREAT | os.O_NOFOLLOW
+    fd = os.open(path, flags, 0o600)
     try:
-        fcntl.flock(lock_file.fileno(), fcntl.LOCK_EX | fcntl.LOCK_NB)
-    except BlockingIOError as exc:
-        lock_file.close()
-        raise RuntimeError("another shell-bridge instance already holds the instance lock") from exc
-    lock_file.seek(0)
-    lock_file.truncate()
-    lock_file.write(f"pid={os.getpid()}\n")
-    lock_file.flush()
-    return lock_file
+        meta = os.fstat(fd)
+        if (not stat.S_ISREG(meta.st_mode) or meta.st_uid != os.getuid()
+                or meta.st_nlink != 1):
+            raise RuntimeError("bridge lock file is not a private regular file")
+        return os.fdopen(fd, "r+")
+    except BaseException:
+        os.close(fd)
+        raise
+
+
+class _HeldMailboxLocks:
+    def __init__(self, files):
+        self.files = files
+
+    def close(self):
+        for file in reversed(self.files):
+            file.close()
+        self.files.clear()
+
+
+def acquire_instance_lock(cfg: dict):
+    # Hold the historical TMPDIR lock AND a fixed /tmp lock until shutdown.
+    # Legacy binaries can coexist during a migration; the release owner audit
+    # must still rule out a legacy daemon with a DIFFERENT TMPDIR.
+    # /tmp and /private/tmp can name the same directory on macOS.
+    # Deduplicate by canonical parent identity to avoid double-flocking an inode.
+    unique_paths = {}
+    for path in (_instance_lock_path(cfg), _stable_instance_lock_path(cfg)):
+        identity = path.parent.resolve(strict=False) / path.name
+        unique_paths.setdefault(identity, path)
+    paths = sorted(unique_paths.values(), key=str)
+    files = []
+    try:
+        for path in paths:
+            handle = _open_instance_lock_file(path)
+            files.append(handle)
+            try:
+                fcntl.flock(handle.fileno(), fcntl.LOCK_EX | fcntl.LOCK_NB)
+            except BlockingIOError as exc:
+                raise RuntimeError("another shell-bridge instance already holds the instance lock") from exc
+        for handle in files:
+            handle.seek(0)
+            handle.truncate()
+            handle.write("pid=" + str(os.getpid()) + chr(10))
+            handle.flush()
+        return _HeldMailboxLocks(files)
+    except BaseException:
+        for handle in reversed(files):
+            handle.close()
+        raise
+
 
 
 def _result_state_counts(cfg: dict) -> dict:

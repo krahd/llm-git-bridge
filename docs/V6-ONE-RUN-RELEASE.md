@@ -30,6 +30,29 @@ remain governed by their own reconciliation requirements. Do not operate
 two loaded bridge services against the same mailbox merely because this gate
 has passed once.
 
+## Per-user mailbox locking and LaunchAgent environments
+
+Previous installed bridge versions derive the mailbox lock path beneath the
+process-specific `TMPDIR`. Two processes in different launch environments
+can therefore derive different OS lock inodes for the **same** Drive mailbox
+identity. Matching mailbox IDs is not proof that their `flock` operations
+contend.
+
+Newly installed v6 builds now hold both the historical TMPDIR lock and
+an additional per-user fixed `/tmp/chatgpt-shell-bridge-<uid>/` lock.
+The fixed lock is owner-only and rejects symlinked/non-regular lock files.
+It remains held until shutdown. Acquiring *both* locks preserves exclusion
+against old binaries that use the same TMPDIR and against new binaries
+using different TMPDIR environments. Unit tests include real separate
+processes with different TMPDIR roots.
+
+This change **cannot protect against an older binary in another TMPDIR**;
+the local LaunchAgent inventory and running-owner acceptance gates must
+therefore still refuse production activation while older mailbox claimants
+are loaded. The OS lock observer reports both known lock locations and never
+infers retirement readiness from open descriptors. Do not apply any
+unqualified in-place replacement to a live daemon.
+
 ## Non-disruptive instance-lock descriptor evidence
 
 `shell_bridge/audit_runtime_processes.sh` additionally invokes

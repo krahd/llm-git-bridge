@@ -63,18 +63,24 @@ def inspect(root: dict, *, runner=subprocess.run) -> dict:
             by_mailbox.setdefault(mailbox, []).append(record)
     lock_evidence = []
     for mailbox, claimants in sorted(by_mailbox.items()):
-        path = lock_path(mailbox)
-        data = open_lock_file_pids(path, runner=runner)
-        claimant_pids = {x["pid"] for x in claimants if x.get("pid")}
-        evidence = {
-            "mailbox": mailbox, "lock_evidence_state": data["state"],
-            "open_lock_file_pids": data["pids"],
-            "claimant_pids": sorted(claimant_pids, key=int),
-            "unrecognized_open_pids": [p for p in data["pids"] if p not in claimant_pids],
-        }
-        if data.get("reason"):
-            evidence["reason"] = data["reason"]
-        lock_evidence.append(evidence)
+        legacy = lock_path(mailbox)
+        stable = lock_path(mailbox, tmp=Path("/tmp"))
+        locations = [("legacy_tmpdir", legacy)]
+        if stable != legacy:
+            locations.append(("fixed_tmp", stable))
+        for location, path in locations:
+            data = open_lock_file_pids(path, runner=runner)
+            claimant_pids = {x["pid"] for x in claimants if x.get("pid")}
+            evidence = {
+                "mailbox": mailbox, "lock_location": location,
+                "lock_evidence_state": data["state"],
+                "open_lock_file_pids": data["pids"],
+                "claimant_pids": sorted(claimant_pids, key=int),
+                "unrecognized_open_pids": [p for p in data["pids"] if p not in claimant_pids],
+            }
+            if data.get("reason"):
+                evidence["reason"] = data["reason"]
+            lock_evidence.append(evidence)
     return {
         "schema": 1, "kind": "bridge_open_lock_file_evidence",
         "lock_evidence": lock_evidence,
