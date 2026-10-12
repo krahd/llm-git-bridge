@@ -128,7 +128,7 @@ class LoadedBridgeOwnershipTests(unittest.TestCase):
         self.assertFalse(result["safe_to_stage"])
         self.assertEqual(result["schema"], 1)
         self.assertEqual(
-            {r["pid"] for r in result["active_consumers"]},
+            {r["pid"] for r in result["running_claimants"]},
             {"1786", "1738"})
         self.assertEqual(result["parked_loaded"], [dormant])
         self.assertTrue(any("active shared requests_folder_id" in p
@@ -145,7 +145,7 @@ class LoadedBridgeOwnershipTests(unittest.TestCase):
         listing = f"PID\\tStatus\\tLabel\\n-\\t1\\t{a}\\n-\\t1\\t{b}\\n"
         result = inspect_services(self.home, listing)
         self.assertFalse(result["safe_to_stage"])
-        self.assertEqual(result["active_consumers"], [])
+        self.assertEqual(result["running_claimants"], [])
         self.assertEqual(result["active_collisions"], [])
         self.assertEqual(result["parked_loaded"], sorted((a, b)))
         self.assertTrue(any("shared drive_root_folder_id" in p
