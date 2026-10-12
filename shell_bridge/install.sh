@@ -49,6 +49,9 @@ for protected_target in "$INSTALL_DIR" "$CONFIG_DIR" "$PLIST"; do
     fail "existing bridge install target; use a fresh stage-only installation and guarded cutover: $protected_target"
   fi
 done
+if [ "$STAGE_ONLY" -eq 0 ] && { [ -e "$STATE_DIR" ] || [ -L "$STATE_DIR" ]; }; then
+  fail "direct install cannot adopt an existing durable journal; stage a verified handover instead"
+fi
 normalize_remote(){ case "$1" in *:) printf '%s\n' "$1";; *) printf '%s:\n' "$1";; esac; }
 marker_for(){ rclone cat "$1$2/bridge-instance.json" 2>/dev/null || true; }
 valid_marker(){ python3 - "$1" <<'PY'
