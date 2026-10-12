@@ -1,6 +1,8 @@
 """Shutdown regression: held mailbox lock must outlive every request worker."""
 from pathlib import Path
+import subprocess
 import sys
+import tempfile
 import threading
 import time
 import unittest
@@ -10,6 +12,30 @@ import bridge
 
 
 class WorkerDrainBeforeUnlockTests(unittest.TestCase):
+    def test_grandchild_inheriting_pipes_cannot_yield_verified_complete_result(self):
+        # The direct child exits successfully, but a detached grandchild still
+        # holds both streams. A three-second reader join must be recorded as
+        # indeterminate, never as a trustworthy complete output/receipt.
+        script = (
+            "import subprocess,sys;"
+            "subprocess.Popen([sys.executable,'-c','import time;time.sleep(5)'],"
+            "stdin=subprocess.DEVNULL,stdout=sys.stdout,stderr=sys.stderr,"
+            "start_new_session=True)"
+        )
+        with tempfile.TemporaryDirectory() as td:
+            value = bridge.run_shell(Path(td), "ignored", b"", 8,
+                                     shell=sys.executable,
+                                     argv_override=[sys.executable, "-c", script])
+            self.assertEqual(value["exit_code"], 0)
+            self.assertTrue(value["streams_incomplete"],
+                            "unclosed descendant pipes must remain unresolved")
+            self.assertFalse(value["timed_out"])
+            self.assertFalse(value["aborted_by_daemon_shutdown"])
+        source = (Path(__file__).resolve().parents[1] / "bridge.py").read_text()
+        self.assertIn(
+            'exec_result.get("aborted_by_daemon_shutdown") or exec_result.get("streams_incomplete")',
+            source)
+
     def test_shutdown_drain_waits_for_live_worker(self):
         start = threading.Event()
         release = threading.Event()
