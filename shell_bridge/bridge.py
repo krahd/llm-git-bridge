@@ -1572,7 +1572,12 @@ def load_config(path: Path) -> dict:
     for key in ["remote", "allowed_root", "state_dir"]:
         if not isinstance(cfg.get(key), str) or not cfg[key]:
             raise ValueError(f"missing config key: {key}")
-    if not cfg.get("drive_root_folder_id"):
+    folder = cfg.get("drive_root_folder_id")
+    if folder is not None and folder != "" and (
+            not isinstance(folder, str) or
+            re.fullmatch(r"[A-Za-z0-9_-]{1,128}", folder) is None):
+        raise ValueError("drive_root_folder_id must be a canonical Drive folder token")
+    if not folder:
         if not isinstance(cfg.get("base_path"), str) or not cfg["base_path"]:
             raise ValueError("missing config key: base_path (or drive_root_folder_id)")
     if not Path(cfg["allowed_root"]).expanduser().resolve().is_dir():
@@ -1657,12 +1662,23 @@ def acquire_instance_lock(cfg: dict):
     # Hold the historical TMPDIR lock AND a fixed /tmp lock until shutdown.
     # Legacy binaries can coexist during a migration; the release owner audit
     # must still rule out a legacy daemon with a DIFFERENT TMPDIR.
+    # A legacy bridge may identify the exact same mailbox only by rclone
+    # remote+folder path rather than canonical Drive root ID. Also acquire
+    # its name-based identity when available, preserving a shared fixed lock
+    # across both v6 config formats and distinct macOS TMPDIR environments.
+    identities = [cfg]
+    if cfg.get("drive_root_folder_id") and cfg.get("remote") and cfg.get("base_path"):
+        alias = dict(cfg)
+        alias.pop("drive_root_folder_id", None)
+        identities.append(alias)
     # /tmp and /private/tmp can name the same directory on macOS.
     # Deduplicate by canonical parent identity to avoid double-flocking an inode.
     unique_paths = {}
-    for path in (_instance_lock_path(cfg), _stable_instance_lock_path(cfg)):
-        identity = path.parent.resolve(strict=False) / path.name
-        unique_paths.setdefault(identity, path)
+    for identity_cfg in identities:
+        for path in (_instance_lock_path(identity_cfg),
+                     _stable_instance_lock_path(identity_cfg)):
+            identity = path.parent.resolve(strict=False) / path.name
+            unique_paths.setdefault(identity, path)
     paths = sorted(unique_paths.values(), key=str)
     files = []
     try:
