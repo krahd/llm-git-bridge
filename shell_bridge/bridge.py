@@ -1713,18 +1713,37 @@ def acquire_instance_lock(cfg: dict):
 
 def _result_state_counts(cfg: dict) -> dict:
     root = Path(cfg["state_dir"]).expanduser() / "requests"
-    out = {"started_without_finished": 0, "finished": 0}
+    out = {"started_without_finished": 0, "finished": 0,
+           "indeterminate": 0, "unverifiable_finished": 0}
     if not root.exists():
         return out
-    for d in root.iterdir():
-        if not d.is_dir():
+    try:
+        children = list(root.iterdir())
+    except OSError:
+        out["unverifiable_finished"] += 1
+        return out
+    for d in children:
+        if d.is_symlink() or not d.is_dir():
+            out["unverifiable_finished"] += 1
             continue
         started = (d / "started.json").exists()
-        finished = (d / "finished.json").exists()
+        result = d / "finished.json"
+        finished = result.exists()
         if started and not finished:
             out["started_without_finished"] += 1
         if finished:
             out["finished"] += 1
+            try:
+                if result.is_symlink() or result.stat().st_size > 65536:
+                    raise ValueError("unsafe finished marker")
+                record = json.loads(result.read_text(encoding="utf-8"))
+                status = record.get("status") if isinstance(record, dict) else None
+                if status == "indeterminate":
+                    out["indeterminate"] += 1
+                elif status not in ("completed", "rejected"):
+                    out["unverifiable_finished"] += 1
+            except (OSError, UnicodeError, ValueError, TypeError):
+                out["unverifiable_finished"] += 1
     return out
 
 
