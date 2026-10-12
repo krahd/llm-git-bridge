@@ -28,8 +28,11 @@ if ! rclone --drive-root-folder-id 1PRsQHgVsgXhIYT_8akGFRGdhdlw9Lmk6 --timeout 2
   copyto "${LIVE_LEGACY_REMOTE}health.json" "$LIVE_V5_HEALTH"; then
   fail "cannot read pinned production heartbeat; do not assume that v5 still owns the mailbox"
 fi
-python3 shell_bridge/verify_v5_production_health.py verify "$LEGACY_CONFIG" "$LIVE_V5_HEALTH" ||
+if ! python3 shell_bridge/verify_v5_production_health.py verify "$LEGACY_CONFIG" "$LIVE_V5_HEALTH"; then
+  echo "Read-only live LaunchAgent/mailbox inventory (no service changes):" >&2
+  PYTHONDONTWRITEBYTECODE=1 python3 shell_bridge/bridge_service_ownership.py >&2 || true
   fail "production is not verified as v5; reconcile installed owners before release"
+fi
 rm -f "$LIVE_V5_HEALTH"
 trap - EXIT
 case "${V6_ENABLE_OUTBOUND_SSH:-0}" in
