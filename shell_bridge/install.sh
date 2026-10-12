@@ -20,6 +20,8 @@ STAGE_ONLY=0
 TMP_REQ=""
 RESULT_TMP=""
 TMP_MARKER=""
+INSTALL_LOCK_DIR=""
+INSTALL_LOCK_HELD=0
 
 usage(){ echo "Usage: install.sh [--stage-only]"; }
 while [ "$#" -gt 0 ]; do
@@ -33,7 +35,19 @@ while [ "$#" -gt 0 ]; do
 done
 
 need(){ command -v "$1" >/dev/null 2>&1 || { echo "ERROR: missing required command: $1" >&2; exit 1; }; }
-cleanup(){ rc=$?; [ -n "$TMP_REQ" ] && rm -f "$TMP_REQ" || true; [ -n "$RESULT_TMP" ] && rm -f "$RESULT_TMP" || true; [ -n "$TMP_MARKER" ] && rm -f "$TMP_MARKER" || true; if [ "$rc" -ne 0 ] && [ "$STARTED_AGENT" -eq 1 ]; then launchctl bootout "gui/${UID_NOW}" "$PLIST" >/dev/null 2>&1 || true; fi; }
+cleanup(){
+  rc=$?
+  [ -n "$TMP_REQ" ] && rm -f "$TMP_REQ" || true
+  [ -n "$RESULT_TMP" ] && rm -f "$RESULT_TMP" || true
+  [ -n "$TMP_MARKER" ] && rm -f "$TMP_MARKER" || true
+  if [ "$rc" -ne 0 ] && [ "$STARTED_AGENT" -eq 1 ]; then
+    launchctl bootout "gui/${UID_NOW}" "$PLIST" >/dev/null 2>&1 || true
+  fi
+  if [ "$INSTALL_LOCK_HELD" -eq 1 ]; then
+    rmdir "$INSTALL_LOCK_DIR" ||
+      echo "HOLD: installer lock not removable; reconcile installed state before retry: $INSTALL_LOCK_DIR" >&2
+  fi
+}
 trap cleanup EXIT
 
 [ "$(uname -s)" = Darwin ] || { echo "ERROR: this installer is for macOS" >&2; exit 1; }
@@ -52,6 +66,23 @@ done
 if [ "$STAGE_ONLY" -eq 0 ] && { [ -e "$STATE_DIR" ] || [ -L "$STATE_DIR" ]; }; then
   fail "direct install cannot adopt an existing durable journal; stage a verified handover instead"
 fi
+# A global per-user reservation closes the check-then-copy race between
+# simultaneous installer processes, even if they choose different install
+# directories but the same state, config, mailbox or LaunchAgent label.
+# Stale reservations after SIGKILL are intentionally not stolen automatically.
+INSTALL_LOCK_PARENT="$HOME/.local/state"
+mkdir -p "$INSTALL_LOCK_PARENT"
+python3 - "$INSTALL_LOCK_PARENT" <<'PYINSTALLLOCK' ||
+  fail "installer lock parent is not an operator-owned non-writable-by-others directory"
+import os,stat,sys
+item=os.lstat(sys.argv[1])
+if not stat.S_ISDIR(item.st_mode) or item.st_uid!=os.getuid() or item.st_mode & 0o022:
+    raise SystemExit(1)
+PYINSTALLLOCK
+INSTALL_LOCK_DIR="$INSTALL_LOCK_PARENT/bridge-installer-active.lock"
+(umask 077; mkdir "$INSTALL_LOCK_DIR") ||
+  fail "another installer is active or previous installation ended indeterminately; inspect before retry"
+INSTALL_LOCK_HELD=1
 normalize_remote(){ case "$1" in *:) printf '%s\n' "$1";; *) printf '%s:\n' "$1";; esac; }
 marker_for(){ rclone cat "$1$2/bridge-instance.json" 2>/dev/null || true; }
 valid_marker(){ python3 - "$1" <<'PY'
