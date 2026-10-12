@@ -15,11 +15,16 @@ jobs:
       - uses: actions/checkout@v4
       - name: Validate all installer and migration shell syntax
         run: |
-          for script in shell_bridge/install.sh shell_bridge/cutover.sh shell_bridge/migrate_v6_staging_atomic.sh shell_bridge/prepare_v6_on_mac.sh shell_bridge/v6_release_once.sh shell_bridge/v6_launch_once.sh; do
-            bash -n "$script"
-          done
+          # Validate every shell entrypoint, not only the historical shortlist.
+          find shell_bridge -maxdepth 1 -type f -name '*.sh' -print0 |
+            xargs -0 -n 1 bash -n
       - name: Compile all bridge and test Python sources before regressions
-        run: python3 -m compileall -q shell_bridge
+        run: |
+          python3 -m compileall -q shell_bridge src tests
+      - name: Run canonical repository regression suite
+        env:
+          PYTHONDONTWRITEBYTECODE: '1'
+        run: PYTHONPATH=src python3 -m unittest discover -s tests -v
       - name: Run bridge Python regression suite
         env:
           PYTHONDONTWRITEBYTECODE: '1'
@@ -31,3 +36,25 @@ jobs:
         run: python3 -m unittest discover -s shell_bridge/tests -q
       - name: Typecheck native approval application
         run: xcrun swiftc -typecheck -framework AppKit shell_bridge/approval_gui.swift
+
+  core-repository-regressions:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v4
+      - name: Validate bridge shell syntax on Linux
+        run: |
+          find shell_bridge -maxdepth 1 -type f -name '*.sh' -print0 |
+            xargs -0 -n 1 bash -n
+      - name: Compile canonical Python sources and tests
+        run: python3 -m compileall -q src tests shell_bridge
+      - name: Run portable pinned SSH helper and release acceptance regressions
+        env:
+          PYTHONDONTWRITEBYTECODE: '1'
+        run: |
+          PYTHONPATH=shell_bridge python3 -m unittest discover -s shell_bridge/tests -p test_ssh_pinned_helper.py -v
+          PYTHONPATH=shell_bridge python3 -m unittest discover -s shell_bridge/tests -p test_v6_release_once.py -v
+      - name: Run canonical repository unit tests
+        env:
+          PYTHONDONTWRITEBYTECODE: '1'
+        run: PYTHONPATH=src python3 -m unittest discover -s tests -v

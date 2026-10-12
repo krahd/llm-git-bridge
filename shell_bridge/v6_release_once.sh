@@ -250,8 +250,11 @@ PYMATCH
 python3 "$PROD_INSTALL/bridge.py" doctor --config "$PROD_CONFIG" >/dev/null
 # Only a local operator may authorize transferring the production mailbox.
 echo "Phase 4: consequential cutover authorization"
-echo "IMPORTANT: v6 currently supports only pinned SSH status/identity actions."
+echo "IMPORTANT: v6 supports fixed operator-pinned SSH status/identity and separately reviewed custom command profiles."
 echo "Arbitrary SSH, SCP, SFTP and RSYNC are NOT yet qualified as v5 replacement capabilities."
+if [ "${V6_ENABLE_OUTBOUND_SSH:-0}" = 0 ]; then
+  echo "Outbound SSH was explicitly skipped for this release (no remote SSH capability enrolled)."
+fi
 echo "If those workflows are required, STOP here and keep v5 as production."
 printf 'To deliberately accept this limited SSH scope and switch production, type MIGRATE LIMITED SSH: '
 IFS= read -r authorization
@@ -356,7 +359,11 @@ receipt={
     "native_operator_approval_verified":True,
     "v5_launchagents_archived":archive,
     "legacy_state_preserved":True,
+    # The reversible LaunchAgent archive prevents dual consumers on login,
+    # but does not certify crash/lost-result or cross-version journal recovery.
     "recovery_fault_injection_live_verified":False,
+    "v5_sunset_ready":False,
+    "acceptance_level":"provisional_handover",
     "accepted_at":time.strftime("%Y-%m-%dT%H:%M:%SZ",time.gmtime()),
 }
 fd,tmp=tempfile.mkstemp(prefix=".v6-acceptance-",dir=os.path.dirname(path))
@@ -369,6 +376,7 @@ try:
 finally:
     if os.path.exists(tmp):os.unlink(tmp)
 PYACCEPT
-echo "V6_PRODUCTION_ACCEPTED_WITH_RECOVERY_EVIDENCE_PRESERVED=1"
-echo "Historical v5 production launch agents archived; other staging instances are retained until separately reconciled."
+echo "V6_PRODUCTION_PROVISIONAL_HANDED_OVER_WITH_RECOVERY_PENDING=1"
+echo "Reversible v5 LaunchAgent archive prevents dual consumers after login; legacy binary, config, journals and rollback evidence preserved."
+echo "V5_SUNSET_READY=0: complete live crash/lost-result recovery and independent client acceptance before permanent retirement."
 

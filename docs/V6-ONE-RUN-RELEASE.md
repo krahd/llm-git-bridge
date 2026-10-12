@@ -40,7 +40,14 @@ Mac. The entrypoint holds on real uncertainty instead of coercing migration.
 
 The produced `v6-release-acceptance.json` records both what passed and what
 remains unverified. **Live crash/replay fault injection is not asserted** merely
-because regular CI and normal operation passed.
+because regular CI and normal operation passed. A successful one-run
+handover archives the stopped v5 LaunchAgent plists **reversibly** to prevent
+both versions from claiming the same mailbox after the next login. The
+acceptance level is `provisional_handover`, with
+`recovery_fault_injection_live_verified=false` and
+`v5_sunset_ready=false`. Do not delete the v5 installation, journals, or
+rollback evidence based on that provisional record; independent recovery
+and client tests must precede permanent retirement.
 
 ## Failure handling
 

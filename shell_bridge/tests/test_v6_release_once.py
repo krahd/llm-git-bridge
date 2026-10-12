@@ -1,6 +1,9 @@
 from pathlib import Path
+import json
 import re
 import subprocess
+import sys
+import tempfile
 import unittest
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -50,6 +53,36 @@ class SingleRunReleaseContractTests(unittest.TestCase):
         self.assertIn('legacy archive postcondition failed', SCRIPT)
         self.assertIn('recovery_fault_injection_live_verified":False', SCRIPT)
         self.assertIn('legacy_state_preserved":True', SCRIPT)
+
+    def test_reversible_archive_is_not_misrepresented_as_sunset_readiness(self):
+        archive = SCRIPT.index('echo "Phase 8: archive stopped production v5')
+        receipt = SCRIPT.index('"v5_sunset_ready":False')
+        self.assertLess(archive, receipt)
+        self.assertIn('"acceptance_level":"provisional_handover"', SCRIPT)
+        self.assertIn('"recovery_fault_injection_live_verified":False', SCRIPT)
+        self.assertIn("V5_SUNSET_READY=0", SCRIPT)
+        self.assertIn("V6_PRODUCTION_PROVISIONAL_HANDED_OVER_WITH_RECOVERY_PENDING=1", SCRIPT)
+        self.assertNotIn("V6_PRODUCTION_ACCEPTED_WITH_RECOVERY_EVIDENCE_PRESERVED=1", SCRIPT)
+
+    def test_embedded_acceptance_writer_records_actual_provisional_state(self):
+        # Run the Python heredoc, not just a source substring assertion.
+        start = SCRIPT.index("<<'PYACCEPT'\n") + len("<<'PYACCEPT'\n")
+        end = SCRIPT.index("\nPYACCEPT", start)
+        embedded = SCRIPT[start:end]
+        with tempfile.TemporaryDirectory() as tmp:
+            receipt = Path(tmp) / "receipt.json"
+            archive = Path(tmp) / "archive"
+            subprocess.run(
+                [sys.executable, "-c", embedded, str(receipt), "a" * 40,
+                 "v6-production-test", str(archive)],
+                check=True, capture_output=True, text=True)
+            obj = json.loads(receipt.read_text())
+            self.assertEqual(obj["source_commit"], "a" * 40)
+            self.assertEqual(obj["acceptance_level"], "provisional_handover")
+            self.assertIs(obj["v5_sunset_ready"], False)
+            self.assertIs(obj["recovery_fault_injection_live_verified"], False)
+            self.assertTrue(obj["legacy_state_preserved"])
+            self.assertEqual(receipt.stat().st_mode & 0o777, 0o600)
 
     def test_ssh_smoke_id_expands_to_protocol_valid_identifier(self):
         # Previously the shell assignment ended with a literal "$", which

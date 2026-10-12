@@ -102,6 +102,21 @@ class PinnedSSHHelperTests(unittest.TestCase):
         with self.assertRaises(helper.SSHPolicyError):
             helper.load_policy(self.root, "status")
 
+    def test_oversized_ssh_material_is_rejected_before_parsing_or_network(self):
+        for material, maximum in (
+            (self.profile, helper._MAX_POLICY_BYTES),
+            (self.hosts, helper._MAX_KNOWN_HOSTS_BYTES),
+            (self.key, helper._MAX_IDENTITY_BYTES),
+        ):
+            with self.subTest(material=material.name):
+                original = material.read_bytes()
+                with material.open("wb") as stream:
+                    stream.truncate(maximum + 1)
+                with self.assertRaisesRegex(helper.SSHPolicyError, "size limit"):
+                    helper.load_policy(self.root, "status")
+                material.write_bytes(original)
+                material.chmod(0o600)
+
     def test_private_key_permissions_must_be_owner_only(self):
         self.key.chmod(0o644)
         with self.assertRaises(helper.SSHPolicyError):
