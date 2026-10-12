@@ -977,6 +977,11 @@ def run_shell(cwd: Path, command: str, stdin: bytes, timeout: int, shell: str = 
         for t in readers:
             t.join(timeout=3)
         writer_thread.join(timeout=3)
+    # A detached grandchild may have inherited the stdout/stderr pipes even
+    # after the recorded child process exited. Incomplete pipes MUST NOT be
+    # reported as a verified completed result, especially for effects whose
+    # receipt could be lost and whose replay would be dangerous.
+    streams_incomplete = any(t.is_alive() for t in readers) or writer_thread.is_alive()
 
     finished = time.time()
     stdout = bytes(stdout_buf)
@@ -987,6 +992,7 @@ def run_shell(cwd: Path, command: str, stdin: bytes, timeout: int, shell: str = 
         "exit_code": p.returncode,
         "timed_out": timed_out,
         "aborted_by_daemon_shutdown": aborted,
+        "streams_incomplete": streams_incomplete,
         "output_limited": limit_event.is_set(),
         "duration_seconds": round(finished - started, 6),
         "stdout_b64": base64.b64encode(stdout).decode("ascii"),
@@ -1419,10 +1425,13 @@ def _process_one_request(name: str, cfg: dict, preloaded_raw: bytes | None = Non
             sandbox_deny_home_reads=bool(write_plan.get("deny_home_reads", False)),
             argv_override=trusted_argv,
         )
-        if exec_result.get("aborted_by_daemon_shutdown"):
+        if exec_result.get("aborted_by_daemon_shutdown") or exec_result.get("streams_incomplete"):
+            reason = ("daemon shutdown aborted a STARTED request; request was not replayed"
+                      if exec_result.get("aborted_by_daemon_shutdown") else
+                      "stdout/stderr/stdin drain incomplete after child exit; effect is indeterminate")
             result = result_envelope(v["id"], request_sha, "indeterminate", {
                 "cwd": str(v["cwd"]),
-                "message": "daemon shutdown aborted a STARTED request; request was not replayed",
+                "message": reason,
                 **exec_result,
             })
         else:
