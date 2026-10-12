@@ -186,10 +186,12 @@ verify_unclaimed_target_mailbox() {
   local inventory
   inventory="$(PYTHONDONTWRITEBYTECODE=1 python3 "$OWNER_INSPECTOR")" ||
     fail "loaded LaunchAgent mailbox ownership changed or is unverifiable"
-  python3 - "$inventory" "$ROOT_ID" <<'PYOWNER'
+  python3 - "$inventory" "$ROOT_ID" "$STATE_DIR" <<'PYOWNER'
 import json,sys
 report=json.loads(sys.argv[1])
-root=sys.argv[2]
+root,state=sys.argv[2:]
+from pathlib import Path
+state=str(Path(state).expanduser().resolve(strict=False))
 if report.get("kind") != "loaded_bridge_ownership" or report.get("mutations_performed") is not False:
     raise SystemExit("HOLD: invalid loaded bridge identity evidence")
 if report.get("problems") or report.get("safe_to_stage") is not True:
@@ -198,6 +200,10 @@ claimants=[r.get("label") for r in report.get("loaded", [])
            if r.get("drive_root_folder_id")==root]
 if claimants:
     raise SystemExit("HOLD: target mailbox already has loaded consumer(s); stage-only and guarded cutover required")
+shared_state=[r.get("label") for r in report.get("loaded", [])
+              if r.get("state_dir")==state]
+if shared_state:
+    raise SystemExit("HOLD: direct install reuses a loaded bridge durable journal directory; stage-only and guarded handover required")
 PYOWNER
 }
 
