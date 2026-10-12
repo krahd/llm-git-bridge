@@ -8,6 +8,7 @@ FINISHED; the actual local journal must be inspected separately.
 from __future__ import annotations
 
 import json
+import re
 from pathlib import Path
 import sys
 
@@ -16,6 +17,52 @@ from bridge import _result_state_counts
 
 class UnresolvedJournalError(ValueError):
     pass
+
+
+_SHA256 = re.compile(r"[0-9a-f]{64}\\Z")
+_MAX_RESULT_BYTES = 40 * 1024 * 1024
+_MAX_TOTAL_BYTES = 64 * 1024 * 1024
+
+
+def _verify_completed_receipt_pair(folder: Path, budget: int) -> int:
+    """A FINISHED marker alone cannot attest to an immutable local result."""
+    finished = folder / "finished.json"
+    result = folder / "result.json"
+    active = folder / "active.json"
+    if active.is_symlink() or active.exists():
+        raise UnresolvedJournalError("journal contains stale active process evidence")
+    if finished.is_symlink() or result.is_symlink():
+        raise UnresolvedJournalError("journal receipt path is symlinked")
+    if not finished.exists():
+        if result.exists():
+            raise UnresolvedJournalError("local result has no durable FINISHED marker")
+        return budget
+    if not finished.is_file() or not result.is_file():
+        raise UnresolvedJournalError("FINISHED marker has no matching local result")
+    try:
+        meta = result.stat()
+        finish_stat = finished.stat()
+        if (meta.st_size > _MAX_RESULT_BYTES or
+                meta.st_size + finish_stat.st_size > budget or
+                finish_stat.st_size > 65536):
+            raise UnresolvedJournalError("completed receipt exceeds bounded audit budget")
+        finish_data = json.loads(finished.read_text(encoding="utf-8"))
+        result_data = json.loads(result.read_text(encoding="utf-8"))
+    except (OSError, UnicodeError, ValueError, TypeError) as exc:
+        raise UnresolvedJournalError("FINISHED/result pair is unreadable") from exc
+    if not isinstance(finish_data, dict) or not isinstance(result_data, dict):
+        raise UnresolvedJournalError("FINISHED/result pair is malformed")
+    status = finish_data.get("status")
+    sha = finish_data.get("request_sha256")
+    if (status not in ("completed", "rejected") or
+            not isinstance(sha, str) or _SHA256.fullmatch(sha) is None or
+            result_data.get("status") != status or
+            result_data.get("request_sha256") != sha or
+            result_data.get("id") != folder.name or
+            result_data.get("protocol") != 1 or
+            result_data.get("kind") != "result"):
+        raise UnresolvedJournalError("FINISHED metadata and local result disagree")
+    return budget - meta.st_size - finish_stat.st_size
 
 
 def verify(state: Path) -> dict:
@@ -36,6 +83,11 @@ def verify(state: Path) -> dict:
             raise UnresolvedJournalError("journal cannot be enumerated") from exc
         if count > 10000:
             raise UnresolvedJournalError("journal has too many entries for bounded audit")
+        remaining = _MAX_TOTAL_BYTES
+        for folder in journal.iterdir():
+            if folder.is_symlink() or not folder.is_dir():
+                raise UnresolvedJournalError("journal contains non-directory or linked entry")
+            remaining = _verify_completed_receipt_pair(folder, remaining)
     counters = _result_state_counts({"state_dir": str(state)})
     if any(counters.get(key) != 0 for key in
            ("started_without_finished", "indeterminate", "unverifiable_finished")):
