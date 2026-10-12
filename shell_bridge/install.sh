@@ -74,13 +74,15 @@ fi
 # Stale reservations after SIGKILL are intentionally not stolen automatically.
 INSTALL_LOCK_PARENT="$HOME/.local/state"
 mkdir -p "$INSTALL_LOCK_PARENT"
-python3 - "$INSTALL_LOCK_PARENT" <<'PYINSTALLLOCK' ||
-  fail "installer lock parent is not an operator-owned non-writable-by-others directory"
+if ! python3 - "$INSTALL_LOCK_PARENT" <<'PYINSTALLLOCK'
 import os,stat,sys
 item=os.lstat(sys.argv[1])
 if not stat.S_ISDIR(item.st_mode) or item.st_uid!=os.getuid() or item.st_mode & 0o022:
     raise SystemExit(1)
 PYINSTALLLOCK
+then
+  fail "installer lock parent is not an operator-owned non-writable-by-others directory"
+fi
 INSTALL_LOCK_DIR="$INSTALL_LOCK_PARENT/bridge-installer-active.lock"
 (umask 077; mkdir "$INSTALL_LOCK_DIR") ||
   fail "another installer is active or previous installation ended indeterminately; inspect before retry"
