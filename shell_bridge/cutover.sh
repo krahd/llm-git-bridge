@@ -258,6 +258,11 @@ PENDING="$("${R[@]}" lsf "${REMOTE}requests" --files-only)" || fail "cannot list
 PENDING="$(printf '%s\n' "$PENDING" | sed '/^[[:space:]]*$/d')"
 [ -z "$PENDING" ] || fail "production request mailbox is not empty; finish or reconcile pending requests first"
 
+# Historical FINISHED files can still be indeterminate. A clean heartbeat
+# STARTED-without-FINISHED counter is insufficient for a safe handover.
+python3 "$(cd "$(dirname "$0")" && pwd)/verify_quiescent_journal.py" "$LEGACY_STATE_DIR" ||
+  fail "legacy durable journal contains unresolved or indeterminate effects"
+
 ROLLBACK_FILE="$(mktemp)"
 for label in "${OLD_LABELS[@]}"; do
   plist="$HOME/Library/LaunchAgents/$label.plist"
@@ -288,6 +293,11 @@ done
 PENDING_AFTER_STOP="$("${R[@]}" lsf "${REMOTE}requests" --files-only)" || fail "cannot list production request mailbox after stopping legacy consumers"
 PENDING_AFTER_STOP="$(printf '%s\n' "$PENDING_AFTER_STOP" | sed '/^[[:space:]]*$/d')"
 [ -z "$PENDING_AFTER_STOP" ] || fail "a request arrived during cutover drain; restoring legacy consumers before retry"
+
+# Stop/drain may have altered durable state since the first snapshot.
+# Re-read local FINISHED/STARTED markers after the old owner has stopped.
+python3 "$(cd "$(dirname "$0")" && pwd)/verify_quiescent_journal.py" "$LEGACY_STATE_DIR" ||
+  fail "journal changed to unresolved/indeterminate during shutdown; hold all consumers"
 
 # From here a partially successful bootstrap may already have started v6,
 # even when launchctl reports failure. Fail closed and require journal review.
