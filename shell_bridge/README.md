@@ -91,6 +91,31 @@ and rollback artifacts must remain intact. The v5-first-cutover controller
 is **not** a v6-to-v6 upgrader and must not be run against a production
 heartbeat already reporting v6.
 
+### Read-only inventory before an existing-installation handover
+
+On the Mac itself, run the source-verified local audit from the intended
+repository revision:
+
+```bash
+PYTHONDONTWRITEBYTECODE=1 python3 shell_bridge/audit_handover_readiness.py
+```
+
+The audit inspects loaded and parked launchd jobs, running PIDs, lock-file
+descriptors, and the durable journals from **every distinct loaded bridge
+state directory**, even when duplicate mailbox ownership makes the owner
+inventory fail its safety gate. It neither starts/stops a service nor submits
+requests. All output is limited to diagnostic metadata; it does not print
+request command bodies or OAuth configuration. Inspect and preserve a `hold`
+for each journal that cannot be verified, including historical staging states.
+A missing or parked PID is not evidence that a LaunchAgent can never run again.
+
+A passing local journal check does **not** prove an exclusive flock, an empty
+Drive request queue, exact installed binary/build, native approval handling,
+or recoverable rollback. The report therefore never authorizes activation or
+legacy retirement. In particular, a staging mailbox that has already
+double-executed requests must remain excluded from side-effecting operations
+until an out-of-band, guarded ownership handover is verified.
+
 ## Request protocol
 
 Create a raw JSON file named `<id>.json` in the mailbox `requests/` folder:
