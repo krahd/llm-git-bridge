@@ -114,6 +114,9 @@ class LiveProductionV5PreflightTests(unittest.TestCase):
         self.assertLess(script.index("verify_v5_production_health.py verify"),
                         script.index("prepare_v6_on_mac.sh"))
         self.assertIn("reconcile installed owners before release", script)
+        self.assertIn("bridge_service_ownership.py", script)
+        self.assertLess(script.index("bridge_service_ownership.py"),
+                        script.index("prepare_v6_on_mac.sh"))
 
 
 if __name__ == "__main__":
