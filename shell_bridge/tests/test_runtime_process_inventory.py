@@ -29,13 +29,13 @@ class RuntimeProcessInventoryTests(unittest.TestCase):
 
     def test_dynamic_v6_launchagent_filter_matches_actual_labels(self):
         source = SCRIPT.read_text()
-        match = re.search(r"launchctl list \\| awk '([^']+)'", source)
+        match = re.search(r"launchctl list \| awk '([^']+)'", source)
         self.assertIsNotNone(match, "dynamic label matcher missing")
         sample = (
-            "PID Status Label\\n"
-            "1790 0 net.laurenzo.local-executor-bridge-v6-manual-bootstrap\\n"
-            "1768 0 net.laurenzo.local-executor-bridge-v6-candidate-0b84b2f-g2\\n"
-            "1400 0 com.apple.unrelated\\n"
+            "PID Status Label\n"
+            "1790 0 net.laurenzo.local-executor-bridge-v6-manual-bootstrap\n"
+            "1768 0 net.laurenzo.local-executor-bridge-v6-candidate-0b84b2f-g2\n"
+            "1400 0 com.apple.unrelated\n"
         )
         result = subprocess.run(["awk", match.group(1)], input=sample,
                                 text=True, capture_output=True, check=True)
