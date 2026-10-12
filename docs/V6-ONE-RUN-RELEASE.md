@@ -12,6 +12,22 @@ cutover. No finite test suite can guarantee that external Google Drive,
 LaunchAgents, or the native approval GUI will behave identically on the user's
 Mac. The entrypoint holds on real uncertainty instead of coercing migration.
 
+## Read-only reconciliation of an already-v6 heartbeat
+
+From an exact, current canonical source worktree on the Mac, run
+`bash shell_bridge/audit_runtime_processes.sh` to record a bounded
+inventory of loaded legacy and v6 LaunchAgents, executable identities,
+approval-app presence, and the existing verified mailbox-owner report.
+The helper performs no service changes or deletions, omits command
+arguments and caps emitted process records. A green CI test of this helper
+on a hosted Mac is **not** evidence about the operator's actual Mac;
+that read-only inventory must still be collected in the local user session.
+
+Do not start the v5-first-cutover controller when the production heartbeat
+declares v6; first identify which loaded LaunchAgent, install manifest and
+durable journal produced that heartbeat, and then determine whether the
+correct procedure is a staged v6 upgrade or final live acceptance.
+
 ## Live production identity hold (2026-10-11)
 
 Read-only access to the pinned production Drive root returned a fresh
