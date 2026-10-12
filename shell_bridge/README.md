@@ -70,7 +70,17 @@ bash shell_bridge/install.sh
 
 `RCLONE_REMOTE` accepts the remote name with or without the trailing `:`. `ALLOWED_ROOT` must already exist. `--stage-only` writes the installed files/config/LaunchAgent but does not start the agent or run the smoke request.
 
-To update an existing installation, pull or otherwise update this repository and run the same installer again. Existing bridge config is retained where appropriate, while the installed bridge/workspace code and manifest are refreshed from the checked-out commit.
+**Do not rerun the installer over an existing live installation.** It
+now rejects any pre-existing bridge install directory, config directory or
+LaunchAgent plist before contacting Drive or writing local files. It also
+rejects a direct install when loaded LaunchAgent ownership is ambiguous or
+the target mailbox already has a loaded consumer, and rechecks just before
+activation. An active v6-to-v6 change must be staged under fresh, isolated
+paths with `--stage-only` and subsequently handed over by a separately
+qualified, recoverable cutover procedure. The original installation, journal
+and rollback artifacts must remain intact. The v5-first-cutover controller
+is **not** a v6-to-v6 upgrader and must not be run against a production
+heartbeat already reporting v6.
 
 ## Request protocol
 
