@@ -1997,6 +1997,18 @@ def _signal_shutdown(_signum, _frame):
         _terminate_pgid(pgid)
 
 
+def _drain_workers_before_unlock(threads: set[threading.Thread]) -> None:
+    """Never release the mailbox lock while a request worker can still run.
+
+    A five-second join timeout was unsafe: a worker may still be publishing a
+    result or holding a side-effecting child process when a new daemon acquires
+    the released lock. We deliberately prefer a held service during shutdown
+    to two concurrently executing mailbox consumers.
+    """
+    for worker in list(threads):
+        worker.join()
+
+
 def daemon(config_path: Path) -> None:
     global _WAKE_LEASE
     cfg = load_config(config_path)
@@ -2054,14 +2066,16 @@ def daemon(config_path: Path) -> None:
     finally:
         _SHUTDOWN.set()
         _signal_shutdown(signal.SIGTERM, None)
-        deadline = time.monotonic() + 5
-        for t in list(threads):
-            t.join(timeout=max(0.0, deadline - time.monotonic()))
-        wake.close()
-        _WAKE_LEASE = None
-        lock_file.close()
-        for sig, handler in old_handlers.items():
-            signal.signal(sig, handler)
+        try:
+            # This intentionally has no duration cap. A still-running request
+            # worker makes a clean ownership handover impossible.
+            _drain_workers_before_unlock(threads)
+        finally:
+            wake.close()
+            _WAKE_LEASE = None
+            lock_file.close()
+            for sig, handler in old_handlers.items():
+                signal.signal(sig, handler)
 
 
 def once(config_path: Path) -> None:
