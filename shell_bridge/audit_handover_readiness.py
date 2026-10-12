@@ -44,8 +44,15 @@ def audit_inventory(inventory: dict, home: Path, *,
         if not path.is_absolute() or state_base not in path.parents:
             journal_problems.append("durable state outside allowed audit root")
             continue
-        if path.is_symlink():
-            journal_problems.append("linked state directory")
+        ancestor = path
+        linked = False
+        while ancestor != home:
+            if ancestor.is_symlink():
+                linked = True
+                break
+            ancestor = ancestor.parent
+        if linked:
+            journal_problems.append("linked state directory or ancestor")
             continue
         roots.add(path)
     if len(roots) > MAX_UNIQUE_STATES:
