@@ -160,7 +160,10 @@ def atomic_write(path: Path, data: bytes) -> None:
 
 
 def load_json_bytes(data: bytes) -> dict:
-    value = json.loads(data.decode("utf-8"))
+    # A raw Google Drive upload or Google Docs export may carry the single
+    # permitted UTF-8 BOM. Keep the original bytes for request SHA/idempotency,
+    # but decode that optional prefix before strict JSON object validation.
+    value = json.loads(data.decode("utf-8-sig"))
     if not isinstance(value, dict):
         raise ValueError("request must be a JSON object")
     return value
