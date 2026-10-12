@@ -19,7 +19,7 @@ class UnresolvedJournalError(ValueError):
     pass
 
 
-_SHA256 = re.compile(r"[0-9a-f]{64}\\Z")
+_SHA256 = re.compile(r"[0-9a-f]{64}\Z")
 _MAX_RESULT_BYTES = 48 * 1024 * 1024
 _MAX_TOTAL_BYTES = 256 * 1024 * 1024
 
@@ -48,6 +48,8 @@ def _verify_completed_receipt_pair(folder: Path, budget: int) -> int:
             raise UnresolvedJournalError("completed receipt exceeds bounded audit budget")
         finish_data = json.loads(finished.read_text(encoding="utf-8"))
         result_data = json.loads(result.read_text(encoding="utf-8"))
+    except UnresolvedJournalError:
+        raise
     except (OSError, UnicodeError, ValueError, TypeError) as exc:
         raise UnresolvedJournalError("FINISHED/result pair is unreadable") from exc
     if not isinstance(finish_data, dict) or not isinstance(result_data, dict):
