@@ -339,6 +339,11 @@ for ((i=0;i<SMOKE_ATTEMPTS;i++)); do
   sleep "$SMOKE_SLEEP"
 done
 [ "$FOUND" -eq 1 ] || fail "v6 production smoke produced no result"
+RESULT_LISTING="$("${R[@]}" --timeout 20s lsjson "${REMOTE}results" --files-only --max-depth 1 --include "$RID.json")" ||
+  fail "production smoke result listing could not be independently verified"
+printf '%s' "$RESULT_LISTING" |
+  python3 "$(cd "$(dirname "$0")" && pwd)/verify_unique_result.py" "$RID" >/dev/null ||
+  fail "production smoke result is missing or duplicated in Drive"
 python3 - "$TMP_REQ" "$TMP_RESULT" "$RID" <<'PYRESULT'
 import hashlib,json,sys
 raw=open(sys.argv[1],'rb').read()
