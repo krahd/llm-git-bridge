@@ -1657,17 +1657,31 @@ class _HeldMailboxLocks:
 
 
 def acquire_instance_lock(cfg: dict):
-    lock_file = _instance_lock_path(cfg).open("a+")
+    # Hold the historical TMPDIR lock AND a fixed /tmp lock until shutdown.
+    # Legacy binaries can coexist during a migration; the release owner audit
+    # must still rule out a legacy daemon with a DIFFERENT TMPDIR.
+    paths = sorted(set((_instance_lock_path(cfg), _stable_instance_lock_path(cfg))),
+                   key=str)
+    files = []
     try:
-        fcntl.flock(lock_file.fileno(), fcntl.LOCK_EX | fcntl.LOCK_NB)
-    except BlockingIOError as exc:
-        lock_file.close()
-        raise RuntimeError("another shell-bridge instance already holds the instance lock") from exc
-    lock_file.seek(0)
-    lock_file.truncate()
-    lock_file.write(f"pid={os.getpid()}\n")
-    lock_file.flush()
-    return lock_file
+        for path in paths:
+            handle = _open_instance_lock_file(path)
+            files.append(handle)
+            try:
+                fcntl.flock(handle.fileno(), fcntl.LOCK_EX | fcntl.LOCK_NB)
+            except BlockingIOError as exc:
+                raise RuntimeError("another shell-bridge instance already holds the instance lock") from exc
+        for handle in files:
+            handle.seek(0)
+            handle.truncate()
+            handle.write("pid=" + str(os.getpid()) + "\\n")
+            handle.flush()
+        return _HeldMailboxLocks(files)
+    except BaseException:
+        for handle in reversed(files):
+            handle.close()
+        raise
+
 
 
 def _result_state_counts(cfg: dict) -> dict:
