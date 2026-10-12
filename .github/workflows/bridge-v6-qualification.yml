@@ -5,6 +5,9 @@ on:
   pull_request:
     branches: [main]
   workflow_dispatch:
+concurrency:
+  group: bridge-v6-${{ github.ref }}
+  cancel-in-progress: true
 permissions:
   contents: read
 jobs:
