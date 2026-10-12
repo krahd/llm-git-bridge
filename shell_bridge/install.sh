@@ -182,6 +182,33 @@ import json,sys; print(json.loads(sys.argv[1])['bridge_instance_id'])
 PY
 )"
 
+verify_unclaimed_target_mailbox() {
+  local inventory
+  inventory="$(PYTHONDONTWRITEBYTECODE=1 python3 "$OWNER_INSPECTOR")" ||
+    fail "loaded LaunchAgent mailbox ownership changed or is unverifiable"
+  python3 - "$inventory" "$ROOT_ID" <<'PYOWNER'
+import json,sys
+report=json.loads(sys.argv[1])
+root=sys.argv[2]
+if report.get("kind") != "loaded_bridge_ownership" or report.get("mutations_performed") is not False:
+    raise SystemExit("HOLD: invalid loaded bridge identity evidence")
+if report.get("problems") or report.get("safe_to_stage") is not True:
+    raise SystemExit("HOLD: conflicting loaded bridge; do not modify a running installation")
+claimants=[r.get("label") for r in report.get("loaded", [])
+           if r.get("drive_root_folder_id")==root]
+if claimants:
+    raise SystemExit("HOLD: target mailbox already has loaded consumer(s); stage-only and guarded cutover required")
+PYOWNER
+}
+
+# A new direct install is allowed only when no already loaded LaunchAgent
+# claims this exact mailbox. Stage-only may prepare an isolated replacement,
+# but is never permission to start it beside the current owner.
+if [ "$STAGE_ONLY" -eq 0 ]; then
+  verify_unclaimed_target_mailbox ||
+    fail "fresh target mailbox ownership cannot be verified for direct install"
+fi
+
 R=(rclone --drive-root-folder-id "$ROOT_ID")
 "${R[@]}" mkdir "${REMOTE}requests"
 "${R[@]}" mkdir "${REMOTE}results"
@@ -423,6 +450,10 @@ PYLEGACY
     fail "active v5 uses this same mailbox; run install.sh --stage-only, then run cutover.sh out-of-band"
   fi
 fi
+# Close the read-to-write race: check loaded owner identity again immediately
+# before launchctl changes. A failed check leaves only a staged candidate.
+verify_unclaimed_target_mailbox ||
+  fail "new or changed loaded mailbox owner; activation forbidden"
 
 # v6 never retires the old service before the new service passes its smoke test.
 launchctl bootout "gui/${UID_NOW}" "$PLIST" >/dev/null 2>&1 || true
