@@ -42,6 +42,14 @@ need python3; need rclone; need git; need launchctl
 [ -x "$SHELL_BIN" ] || { echo "ERROR: shell is not executable: $SHELL_BIN" >&2; exit 1; }
 
 fail(){ echo "ERROR: $*" >&2; exit 1; }
+# Installation targets are immutable. Reusing a loaded v6 install directory
+# rewrites its Python files and manifest before the old process is stopped.
+# That is neither an atomic upgrade nor a recoverable rollback.
+for protected_target in "$INSTALL_DIR" "$CONFIG_DIR" "$PLIST"; do
+  if [ -e "$protected_target" ] || [ -L "$protected_target" ]; then
+    fail "existing bridge install target; use a fresh stage-only installation and guarded cutover: $protected_target"
+  fi
+done
 normalize_remote(){ case "$1" in *:) printf '%s\n' "$1";; *) printf '%s:\n' "$1";; esac; }
 marker_for(){ rclone cat "$1$2/bridge-instance.json" 2>/dev/null || true; }
 valid_marker(){ python3 - "$1" <<'PY'
