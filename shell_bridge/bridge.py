@@ -12,6 +12,7 @@ import shlex
 import shutil
 import secrets
 import signal
+import stat
 import subprocess
 import sys
 import tempfile
@@ -1624,6 +1625,35 @@ def _stable_instance_lock_path(cfg: dict) -> Path:
     # Canonical per-user location, independent of launchd TMPDIR.
     old_path = _instance_lock_path(cfg)
     return Path("/tmp") / old_path.parent.name / old_path.name
+
+
+def _open_instance_lock_file(path: Path):
+    path.parent.mkdir(mode=0o700, parents=True, exist_ok=True)
+    meta = path.parent.lstat()
+    if (not stat.S_ISDIR(meta.st_mode) or meta.st_uid != os.getuid()
+            or meta.st_mode & 0o077):
+        raise RuntimeError("bridge lock directory is not exclusively owned")
+    flags = os.O_RDWR | os.O_CREAT | os.O_NOFOLLOW
+    fd = os.open(path, flags, 0o600)
+    try:
+        meta = os.fstat(fd)
+        if (not stat.S_ISREG(meta.st_mode) or meta.st_uid != os.getuid()
+                or meta.st_nlink != 1):
+            raise RuntimeError("bridge lock file is not a private regular file")
+        return os.fdopen(fd, "r+")
+    except BaseException:
+        os.close(fd)
+        raise
+
+
+class _HeldMailboxLocks:
+    def __init__(self, files):
+        self.files = files
+
+    def close(self):
+        for file in reversed(self.files):
+            file.close()
+        self.files.clear()
 
 
 def acquire_instance_lock(cfg: dict):
