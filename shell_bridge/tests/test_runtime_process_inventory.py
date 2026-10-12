@@ -29,7 +29,7 @@ class RuntimeProcessInventoryTests(unittest.TestCase):
     def test_live_release_hold_can_reference_this_inventory(self):
         release = (SCRIPT.parent / "v6_release_once.sh").read_text()
         self.assertIn("Read-only live LaunchAgent/mailbox inventory", release)
-        self.assertIn("bridge_service_ownership.py", release)
+        self.assertIn("audit_runtime_processes.sh", release)
 
 
 if __name__ == "__main__":
