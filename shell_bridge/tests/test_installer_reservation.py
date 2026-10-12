@@ -7,9 +7,9 @@ import unittest
 
 
 INSTALL = (Path(__file__).resolve().parents[1] / "install.sh").read_text()
-MARKER = "<<'PYINSTALLLOCK'\n"
-START = INSTALL.index(MARKER) + len(MARKER)
-END = INSTALL.index("PYINSTALLLOCK\n", START)
+MARKER = "<<'PYINSTALLLOCK'"
+START = INSTALL.index("import os,stat,sys", INSTALL.index(MARKER))
+END = INSTALL.index("PYINSTALLLOCK", START)
 OWNER_GATE = INSTALL[START:END]
 
 
