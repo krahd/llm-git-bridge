@@ -13,6 +13,21 @@ import bridge as b
 
 
 class V5ConfigTests(unittest.TestCase):
+    def test_optional_utf8_bom_request_is_accepted_without_changing_original_hash(self):
+        request = {"protocol": 1, "id": "bom-safe", "command": "true"}
+        canonical = json.dumps(request).encode("utf-8")
+        prefixed = bytes.fromhex("efbbbf") + canonical
+        self.assertEqual(b.load_json_bytes(prefixed), request)
+        self.assertEqual(b.load_json_bytes(canonical), request)
+        self.assertNotEqual(b.sha256_bytes(prefixed), b.sha256_bytes(canonical))
+        # A second BOM and non-UTF-8 encodings must still fail closed.
+        with self.assertRaises((ValueError, UnicodeError)):
+            b.load_json_bytes(bytes.fromhex("efbbbfefbbbf") + canonical)
+        with self.assertRaises((ValueError, UnicodeError)):
+            b.load_json_bytes(canonical.decode("utf-8").encode("utf-16"))
+        with self.assertRaises(ValueError):
+            b.load_json_bytes(bytes.fromhex("efbbbf") + b"[1,2,3]")
+
     def test_root_id_allows_missing_base_path_and_targets_relative_root(self):
         with tempfile.TemporaryDirectory() as td:
             root = Path(td) / "root"; root.mkdir()

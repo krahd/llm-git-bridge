@@ -76,6 +76,13 @@ To update an existing installation, pull or otherwise update this repository and
 
 Create a raw JSON file named `<id>.json` in the mailbox `requests/` folder:
 
+Prefer direct raw UTF-8 JSON upload. The runtime tolerates one optional UTF-8
+byte-order mark (BOM) from a text export before parsing, but the exact
+uploaded bytes, including that mark, remain part of the request SHA-256 and
+replay identity. Other encodings, multiple BOMs, and non-object JSON requests
+are rejected. Google Docs should not be used as a request-file transport;
+its export format and metadata can introduce unrelated protocol errors.
+
 ```json
 {
   "protocol": 1,
