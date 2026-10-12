@@ -17,16 +17,15 @@ SMOKE_SLEEP="${SMOKE_SLEEP:-2}"
 UID_NOW="$(id -u)"
 STARTED_AGENT=0
 STAGE_ONLY=0
-RETIRE_OLD_AFTER_SMOKE=0
 TMP_REQ=""
 RESULT_TMP=""
 TMP_MARKER=""
 
-usage(){ echo "Usage: install.sh [--stage-only] [--retire-old-after-smoke]"; }
+usage(){ echo "Usage: install.sh [--stage-only]"; }
 while [ "$#" -gt 0 ]; do
   case "$1" in
     --stage-only) STAGE_ONLY=1 ;;
-    --retire-old-after-smoke) RETIRE_OLD_AFTER_SMOKE=1 ;;
+    --retire-old-after-smoke) echo "ERROR: first-install smoke is not production retirement acceptance" >&2; exit 2 ;;
     -h|--help) usage; exit 0 ;;
     *) echo "ERROR: unknown option: $1" >&2; usage >&2; exit 2 ;;
   esac
@@ -493,19 +492,6 @@ print('SHELL_BRIDGE_INSTALLED=1')
 PY
 "${R[@]}" deletefile "${REMOTE}results/${RID}.json" >/dev/null 2>&1 || true
 STARTED_AGENT=0
-
-if [ "$RETIRE_OLD_AFTER_SMOKE" -eq 1 ]; then
-  for old_label in "$OLD_LABEL_1" "$OLD_LABEL_2"; do
-    old_plist="$HOME/Library/LaunchAgents/$old_label.plist"
-    launchctl bootout "gui/${UID_NOW}/${old_label}" >/dev/null 2>&1 || \
-      launchctl bootout "gui/${UID_NOW}" "$old_plist" >/dev/null 2>&1 || true
-    if [ -f "$old_plist" ]; then
-      archive_dir="$STATE_DIR/retired-launchagents"
-      mkdir -p "$archive_dir"; chmod 700 "$archive_dir"
-      mv "$old_plist" "$archive_dir/${old_label}.$(date +%Y%m%d%H%M%S).plist"
-    fi
-  done
-fi
 
 echo "ROOT_ID:   $ROOT_ID"
 echo "REQUESTS:  $REQUESTS_ID"
