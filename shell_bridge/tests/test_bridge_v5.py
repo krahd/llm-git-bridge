@@ -98,6 +98,33 @@ class MailboxLockMigrationTests(unittest.TestCase):
                 third = b.acquire_instance_lock(cfg)
                 third.close()
 
+    def test_cross_process_distinct_tmpdirs_cannot_both_own_one_mailbox(self):
+        with tempfile.TemporaryDirectory() as td:
+            one = Path(td) / "first"
+            two = Path(td) / "second"
+            cfg = {"drive_root_folder_id": "cross-" + Path(td).name}
+            script = (
+                "import sys; sys.path.insert(0,sys.argv[1]); import bridge; "
+                "bridge.tempfile.gettempdir=lambda:sys.argv[2]; "
+                "cfg={'drive_root_folder_id':sys.argv[3]}; "
+                "bridge.acquire_instance_lock(cfg)"
+            )
+            args = [sys.executable, "-c", script,
+                    str(Path(__file__).resolve().parents[1]), str(two),
+                    cfg["drive_root_folder_id"]]
+            with patch.object(b.tempfile, "gettempdir", return_value=str(one)):
+                first = b.acquire_instance_lock(cfg)
+            try:
+                refused = b.subprocess.run(args, capture_output=True, text=True,
+                                           timeout=8)
+                self.assertNotEqual(refused.returncode, 0)
+                self.assertIn("already holds the instance lock", refused.stderr)
+            finally:
+                first.close()
+            accepted = b.subprocess.run(args, capture_output=True, text=True,
+                                        timeout=8)
+            self.assertEqual(accepted.returncode, 0, accepted.stderr)
+
     def test_fixed_lock_is_invariant_to_environment_tmpdir(self):
         with tempfile.TemporaryDirectory() as td:
             cfg = {"drive_root_folder_id": "stable-mailbox-123"}
