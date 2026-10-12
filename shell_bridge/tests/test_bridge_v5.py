@@ -135,6 +135,13 @@ class MailboxLockMigrationTests(unittest.TestCase):
                 self.assertEqual(a, b._stable_instance_lock_path(cfg))
                 self.assertNotEqual(legacy_a, b._instance_lock_path(cfg))
 
+    def test_legacy_lock_path_derivation_does_not_create_directories(self):
+        with tempfile.TemporaryDirectory() as td:
+            root = Path(td) / "nonexistent-TMPDIR"
+            with patch.object(b.tempfile, "gettempdir", return_value=str(root)):
+                candidate = b._instance_lock_path({"drive_root_folder_id": "mailbox"})
+                self.assertFalse(candidate.parent.exists())
+
     def test_lock_file_symlink_and_untrusted_directory_are_rejected(self):
         with tempfile.TemporaryDirectory() as td:
             folder = Path(td) / "private"
