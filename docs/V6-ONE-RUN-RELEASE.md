@@ -12,6 +12,24 @@ cutover. No finite test suite can guarantee that external Google Drive,
 LaunchAgents, or the native approval GUI will behave identically on the user's
 Mac. The entrypoint holds on real uncertainty instead of coercing migration.
 
+## Historical indeterminate requests block mailbox handover
+
+A request whose execution is marked FINISHED can still have status
+`indeterminate`: the bridge may have terminated a child during shutdown,
+lost output to surviving descendants, or been unable to prove its effect.
+Consequently, counting only `started_without_finished=0` is insufficient
+to authorize moving production ownership.
+
+v6 health now separately reports `indeterminate` and
+`unverifiable_finished` journal counters. Before stopping the original
+consumer and again after that shutdown, the cutover controller independently
+inspects the actual local durable journal using
+`verify_quiescent_journal.py`. Any STARTED-without-FINISHED record,
+FINISHED-indeterminate record, malformed marker, dangling symlink or
+uninspectable journal holds the cutover. The verifier does not modify or
+discard past execution evidence. Manual reconciliation is required even
+when Drive has no pending requests and an old heartbeat appears quiescent.
+
 ## Shutdown ownership and incomplete pipe results
 
 The bridge holds all mailbox flock handles until its request worker threads
