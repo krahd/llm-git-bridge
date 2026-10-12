@@ -6,6 +6,9 @@ import sys
 import tempfile
 import types
 import unittest
+from unittest import mock
+
+import bridge
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 import bridge_lock_observer as locks
@@ -24,6 +27,14 @@ class LockDescriptorEvidenceTests(unittest.TestCase):
             with self.subTest(value=invalid):
                 with self.assertRaises(ValueError):
                     locks.lock_path(invalid)
+
+    def test_lock_path_tracks_the_actual_daemon_lock_implementation(self):
+        with tempfile.TemporaryDirectory() as td:
+            with mock.patch.object(bridge.tempfile, "gettempdir", return_value=td):
+                expected = bridge._instance_lock_path(
+                    {"drive_root_folder_id": "production"})
+                observed = locks.lock_path("production")
+                self.assertEqual(expected, observed)
 
     @unittest.skipUnless(sys.platform == "darwin", "Mac lsof integration")
     def test_real_macos_lsof_sees_current_exclusive_lock_holder(self):
