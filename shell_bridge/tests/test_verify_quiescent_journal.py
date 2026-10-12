@@ -112,6 +112,17 @@ class QuiescentJournalTests(unittest.TestCase):
                     verify(self.state)
         (folder / "result.json").write_text(json.dumps(original))
 
+    def test_started_and_finished_request_sha_must_match(self):
+        folder = self.record("started-sha", "completed")
+        (folder / "started.json").write_text(json.dumps(
+            {"request_sha256": hashlib.sha256(b"other").hexdigest()}))
+        with self.assertRaisesRegex(UnresolvedJournalError, "request identities disagree"):
+            verify(self.state)
+        (folder / "started.json").unlink()
+        (folder / "started.json").symlink_to(self.journal / "missing")
+        with self.assertRaisesRegex(UnresolvedJournalError, "symlinked"):
+            verify(self.state)
+
     def test_stale_active_marker_or_symlinked_result_holds(self):
         folder = self.record("active", "completed")
         active = folder / "active.json"
