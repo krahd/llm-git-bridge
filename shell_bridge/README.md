@@ -70,6 +70,13 @@ bash shell_bridge/install.sh
 
 `RCLONE_REMOTE` accepts the remote name with or without the trailing `:`. `ALLOWED_ROOT` must already exist. `--stage-only` writes the installed files/config/LaunchAgent but does not start the agent or run the smoke request.
 
+The installer also reserves a single operator-owned per-user installation lock
+before remote mailbox discovery or local writes. Concurrent invocations cannot
+silently race even if they choose different labels or directories. If an earlier
+installer was forcibly killed, the reservation is intentionally left in place;
+inspect partial installs and journal/LaunchAgent state before clearing it.
+Never automatically steal a stale reservation.
+
 **Do not rerun the installer over an existing live installation.** It
 now rejects any pre-existing bridge install directory, config directory or
 LaunchAgent plist before contacting Drive or writing local files. It also
