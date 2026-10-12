@@ -12,13 +12,12 @@ class InstallScriptTests(unittest.TestCase):
         self.assertIn('LOCAL_EXECUTOR_LABEL:-net.laurenzo.local-executor-bridge', self.text)
         self.assertIn('BASE_PATH="${BASE_PATH:-Local Executor Bridge}"', self.text)
 
-    def test_old_services_are_retired_only_after_new_smoke_test(self):
+    def test_installer_never_retires_legacy_on_fresh_smoke(self):
         self.assertIn('OLD_LABEL_1="com.tom.chatgpt-shell-bridge"', self.text)
         self.assertIn('OLD_LABEL_2="io.llm-git-bridge.daemon"', self.text)
-        self.assertIn('--retire-old-after-smoke', self.text)
-        smoke = self.text.index("SHELL_BRIDGE_INSTALLED=1")
-        retire = self.text.index('if [ "$RETIRE_OLD_AFTER_SMOKE" -eq 1 ]; then')
-        self.assertGreater(retire, smoke)
+        self.assertIn('first-install smoke is not production retirement acceptance', self.text)
+        self.assertNotIn('RETIRE_OLD_AFTER_SMOKE', self.text)
+        self.assertNotIn('mv "$old_plist"', self.text)
 
     def test_launchagent_runs_daemon(self):
         self.assertIn("'ProgramArguments':[python,bridge,'daemon','--config',config]", self.text)
