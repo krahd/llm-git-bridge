@@ -126,6 +126,9 @@ print(sum(1 for x in json.loads(raw) if x.get('IsDir') and x.get('Name')==name))
 PYCOUNT
 )"
   [ "$count" -le 1 ] || fail "multiple Drive folders are named exactly '$BASE_PATH'; keep one live mailbox and archive the others"
+  if [ "$count" -eq 1 ] && [ "$STAGE_ONLY" -eq 0 ]; then
+    fail "direct installation cannot adopt an existing mailbox; stage-only plus guarded owner/journal handover required"
+  fi
   if [ "$count" -eq 0 ]; then
     echo "Creating Drive mailbox: $BASE_PATH"
     rclone mkdir "${REMOTE}${BASE_PATH}"
