@@ -51,8 +51,10 @@ def inspect_services(home: Path, launchctl_listing: str, process_listing: str | 
         if not _belongs_to_bridge_ecosystem(label):
             continue
         # A loaded KeepAlive service without a PID may launch at any time.
+        # A missing PID is a parked *loaded* job, not an uninstalled job.
+        # Keep it in the conservative collision gate: launchd can restart it.
         record = {"label": label, "pid": pid if pid.isdecimal() else None,
-                  "service_status": status}
+                  "running": pid.isdecimal(), "service_status": status}
         plist = home / "Library" / "LaunchAgents" / (label + ".plist")
         try:
             if not _safe_child(plist, home) or not plist.is_file():
@@ -109,18 +111,40 @@ def inspect_services(home: Path, launchctl_listing: str, process_listing: str | 
             if (re.search(r"(?:^|/)bridge\.py\s+daemon\b", argv)
                     and pid not in known_pids):
                 problems.append("unmanaged bridge daemon PID=" + pid)
+    active_collisions = []
+    parked_loaded = sorted(record["label"] for record in records if not record["running"])
+    running_claimants = sorted(
+        ({"label": record["label"], "pid": record["pid"],
+          "drive_root_folder_id": record.get("drive_root_folder_id"),
+          "requests_folder_id": record.get("requests_folder_id"),
+          "results_folder_id": record.get("results_folder_id")}
+         for record in records if record["running"]),
+        key=lambda record: (record["label"], record["pid"]))
     for field in ("drive_root_folder_id", "requests_folder_id", "results_folder_id",
                   "state_dir"):
-        values = {}
+        loaded = {}
+        active = {}
         for record in records:
             val = record.get(field)
-            if val is not None:
-                values.setdefault(val, []).append(record["label"])
-        for labels in values.values():
+            if val is None:
+                continue
+            loaded.setdefault(val, []).append(record["label"])
+            if record["running"]:
+                active.setdefault(val, []).append(record["label"])
+        for labels in loaded.values():
             if len(labels) > 1:
                 problems.append("shared " + field + " between " + ", ".join(sorted(labels)))
+        for labels in active.values():
+            if len(labels) > 1:
+                active_collisions.append(
+                    "active shared " + field + " between " + ", ".join(sorted(labels)))
+    # Do NOT mark the system safe merely because an old job currently has no
+    # PID: loaded launchd jobs can wake and reacquire the same mailbox.
     return {"schema": 1, "kind": "loaded_bridge_ownership",
-            "loaded": records, "problems": sorted(set(problems)),
+            "loaded": records, "running_claimants": running_claimants,
+            "parked_loaded": parked_loaded,
+            "active_collisions": sorted(set(active_collisions)),
+            "problems": sorted(set(problems)),
             "safe_to_stage": not problems, "mutations_performed": False}
 
 

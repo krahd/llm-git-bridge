@@ -5,6 +5,9 @@ on:
   pull_request:
     branches: [main]
   workflow_dispatch:
+concurrency:
+  group: bridge-v6-${{ github.ref }}
+  cancel-in-progress: true
 permissions:
   contents: read
 jobs:
@@ -59,6 +62,7 @@ jobs:
           PYTHONPATH=shell_bridge python3 -m unittest discover -s shell_bridge/tests -p test_ssh_pinned_helper.py -v
           PYTHONPATH=shell_bridge python3 -m unittest discover -s shell_bridge/tests -p test_v6_release_once.py -v
           PYTHONPATH=shell_bridge python3 -m unittest discover -s shell_bridge/tests -p test_verify_v5_production_health.py -v
+          PYTHONPATH=shell_bridge python3 -m unittest discover -s shell_bridge/tests -p test_bridge_service_ownership.py -v
       - name: Run canonical repository unit tests
         env:
           PYTHONDONTWRITEBYTECODE: '1'

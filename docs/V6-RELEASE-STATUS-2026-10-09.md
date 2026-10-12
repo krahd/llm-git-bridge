@@ -447,3 +447,48 @@ production heartbeat publisher PID; then decide whether the proper path is
 an already-v6 upgrade/acceptance or a guarded first v5-to-v6 cutover.
 **Do not run or retry production cutover, archive another service, delete
 old worktrees, or run destructive GC to force the check to pass.**
+
+
+## Mac LaunchAgent inventory reconciled from interactive output (2026-10-11)
+
+The operator ran the read-only `bridge_service_ownership.py` verifier and
+`ps -p 1786 -o pid=,ppid=,comm=` on the actual Mac. The inventory reported
+`safe_to_stage=false` and no mutations. It identified *four* currently
+PID-bearing LaunchAgent jobs using just two mailbox roots:
+
+- **Production root `1PRsQHgVsgXhIYT_8akGFRGdhdlw9Lmk6`:**
+  `net.laurenzo.local-executor-bridge` PID 1786 and
+  `io.llm-git-bridge.daemon` PID 1738, both configured for the same
+  production requests/results IDs and journal state directory. The production
+  heartbeat reported version 6 at build `0b84b2f` and publisher PID 1786.
+  The independent `ps` output confirms PID 1786 is running under Python
+  with parent PID 1. PID 1738's executable and actual mailbox consumption
+  have **not** yet been independently verified.
+- **Staging root `15ql2yACOq7H6qo0IgzosySqW8nHgUKXv`:**
+  `net.laurenzo.local-executor-bridge-v6-manual-bootstrap` PID 1790
+  and `net.laurenzo.local-executor-bridge-v6-candidate-0b84b2f-g2`
+  PID 1768, both configured against the same staging requests/results
+  IDs. Their precise process activities remain unverified.
+- Other listed LaunchAgents have no PID, including
+  `com.tom.chatgpt-shell-bridge` with exit status 1. They remain
+  *loaded*, not necessarily disabled or safe to remove, and could restart.
+  Do not count them as active producers or assume they are harmless.
+
+Previously, the verifier reported all loaded mailbox collisions together.
+A new backward-compatible diagnostic separates `running_claimants`,
+`active_collisions`, and `parked_loaded`, **without relaxing the
+fail-closed safety result** for any loaded job capable of restarting.
+The distinction is essential: active collisions require immediate
+reconciliation; parked jobs require explicit safe restart ownership
+handling before a cutover can be approved.
+
+**Do not stop PIDs 1738, 1786, 1768, or 1790, archive their LaunchAgents,
+change their configs, delete staging roots, or run GC based on this snapshot.**
+There is no proof yet which process holds the on-disk instance lock, whether
+an older daemon ignores that lock, or what happens to pending journal state.
+The next bounded local action is a new read-only Mac inventory of those four
+exact PIDs, their loaded launchd job definitions (redacting credentials),
+owner lock file and build manifests, followed by explicit classification
+of safe-to-stop legacy jobs. No additional remote Mac inspection request has been confirmed delivered.
+A fresh read-only process and manifest inspection on the Mac is required
+before deciding which currently running LaunchAgents are safe to retire.

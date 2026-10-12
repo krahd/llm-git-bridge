@@ -26,9 +26,24 @@ PYTHONDONTWRITEBYTECODE=1 python3 -m unittest discover -s shell_bridge/tests -p 
 printf '\n=== Loaded LaunchAgent and mailbox ownership inventory ===\n'
 report="$(mktemp)"
 if ! PYTHONDONTWRITEBYTECODE=1 python3 shell_bridge/bridge_service_ownership.py > "$report"; then
-  # The inventory is redacted and contains only bridge identifiers.
-  cat "$report"
-  echo "HOLD: at least one loaded bridge is unverifiable or shares a mailbox." >&2
+  # Surface actionable active PIDs separately from loaded-but-not-running jobs.
+  # Both can be unsafe. This is read-only and does not authorize shutdown.
+  python3 - "$report" <<'PYOWNHOLD'
+import json,sys
+report=json.load(open(sys.argv[1],encoding="utf-8"))
+print("RUNNING_BRIDGE_CLAIMANTS:")
+for item in report.get("running_claimants",[]):
+    print(item["label"], "PID", item["pid"],
+          "mailbox", item.get("drive_root_folder_id","unverified"))
+print("ACTIVE_COLLISIONS:")
+for item in report.get("active_collisions",[]):
+    print(item)
+print("PARKED_LOADED_LAUNCHAGENTS:",len(report.get("parked_loaded",[])))
+print("ALL_LOADED_COLLISION_OR_IDENTITY_PROBLEMS:")
+for item in report.get("problems",[]):
+    print(item)
+PYOWNHOLD
+  echo "HOLD: loaded bridge ownership is ambiguous; do not stop any daemon or retire v5." >&2
   exit 5
 fi
 python3 - "$report" <<'PYOWN'
