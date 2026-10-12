@@ -27,6 +27,12 @@ class InstallPreflightGuardTests(unittest.TestCase):
             "mutations_performed": False,
         }
 
+    def test_direct_installer_rejects_preexisting_durable_state(self):
+        self.assertIn('direct install cannot adopt an existing durable journal', INSTALL)
+        self.assertIn('if [ "$STAGE_ONLY" -eq 0 ]', INSTALL)
+        self.assertLess(INSTALL.index('direct install cannot adopt an existing durable journal'),
+                        INSTALL.index("choose_allowed_root\\nchoose_remote"))
+
     def test_legacy_retirement_flag_is_rejected_before_mac_side_effects(self):
         script = Path(__file__).resolve().parents[1] / "install.sh"
         result = subprocess.run(["/bin/bash", str(script), "--retire-old-after-smoke"],
