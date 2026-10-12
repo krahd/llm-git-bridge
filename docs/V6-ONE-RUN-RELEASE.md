@@ -12,6 +12,33 @@ cutover. No finite test suite can guarantee that external Google Drive,
 LaunchAgents, or the native approval GUI will behave identically on the user's
 Mac. The entrypoint holds on real uncertainty instead of coercing migration.
 
+## Live production identity hold (2026-10-11)
+
+Read-only access to the pinned production Drive root returned a fresh
+`health.json` at `2026-10-12T00:57:45Z`. Contrary to the historical
+assumption that the mailbox was reporting v5, that heartbeat declares
+`bridge_version: "6"` and `build_source_commit: "0b84b2f..."`,
+with no active requests and no STARTED-without-FINISHED work. Its
+instance ID still uses the historical production bridge identity.
+
+**This heartbeat does not prove which LaunchAgent owns the mailbox.**
+Another installed version may have published it, or the existing service
+may have been updated in place. Both possibilities require local inventory
+before any further migration or retirement. Do not erase the older release
+worktree, stop a consumer, or blindly re-run the one-paste cutover while
+this discrepancy is unresolved.
+
+The release entrypoint now verifies a fresh **v5** heartbeat with the
+expected instance and root before staging. `cutover.sh` independently
+rechecks the same identity immediately before stopping any service. These
+checks intentionally HOLD on observed v6/unknown production status:
+they protect against mistakenly retiring an unrecognized or already
+migrated bridge. The live Mac LaunchAgent/process inventory, installed
+manifest hashes, and durable journals remain authoritative for final
+reconciliation. After a true already-v6 installation is established,
+use an explicit v6-to-v6 upgrade or acceptance procedure rather than
+misrepresenting it as a v5-to-v6 first cutover.
+
 ## Gates in execution order
 
 1. Validate the clean Git snapshot, run all Python and shell tests, inventory
