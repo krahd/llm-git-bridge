@@ -1620,6 +1620,12 @@ def _instance_lock_path(cfg: dict) -> Path:
     return lock_root / f"{digest}.lock"
 
 
+def _stable_instance_lock_path(cfg: dict) -> Path:
+    # Canonical per-user location, independent of launchd TMPDIR.
+    old_path = _instance_lock_path(cfg)
+    return Path("/tmp") / old_path.parent.name / old_path.name
+
+
 def acquire_instance_lock(cfg: dict):
     lock_file = _instance_lock_path(cfg).open("a+")
     try:
