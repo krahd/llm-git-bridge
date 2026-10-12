@@ -475,7 +475,7 @@ PID-bearing LaunchAgent jobs using just two mailbox roots:
   Do not count them as active producers or assume they are harmless.
 
 Previously, the verifier reported all loaded mailbox collisions together.
-A new backward-compatible diagnostic separates `active_consumers`,
+A new backward-compatible diagnostic separates `running_claimants`,
 `active_collisions`, and `parked_loaded`, **without relaxing the
 fail-closed safety result** for any loaded job capable of restarting.
 The distinction is essential: active collisions require immediate
