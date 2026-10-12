@@ -402,3 +402,48 @@ The operator's supported entrypoint remains the one-paste launcher documented
 in `docs/V6-ONE-RUN-RELEASE.md`, using the latest qualified canonical main.
 Do not instruct the operator to run earlier pinned-commit commands or perform
 independent repeated migration scripts.
+
+
+## Live production-version discrepancy and source checkpoint (2026-10-11)
+
+Latest canonical source at this checkpoint:
+`847e6b4cc613570e8c825d257f6e7b3ad7fb0a60`
+after merging PRs #32, #33, and #34. The Mac qualification
+for the final PR #34 candidate passed in workflow run `38190703568`
+with 392 repository tests, 282 bridge tests in both standard and direct
+sandbox runs (six skipped in the standard run), shell syntax validation,
+native approval Swift typecheck, and an actual bounded read-only inventory
+invocation on a hosted macOS runner. Its Linux job passed 392 canonical
+tests and 37 focused SSH/release/preflight tests.
+
+This **source qualification is not a sunset decision**. The last verified
+read-only Google Drive `health.json` at the pinned production root, updated
+`2026-10-12T00:57:45Z`, declared `bridge_version=6`,
+`build_source_commit=0b84b2f61be8aba4988d9c6b1181903f1febbbb3`,
+`bridge_instance_id=tom-shell-bridge-20260918-a1`, no active requests,
+and zero STARTED-without-FINISHED. That is inconsistent with assuming a
+production v5 binary. The heartbeat does not identify all loaded services;
+there may be an already-upgraded v6, stale legacy components, or shared
+mailbox access. Neither user-Mac process inventory nor fault-injection,
+approval GUI, rollback, or exclusive-owner acceptance has been performed
+by this source-only work.
+
+The v5-to-v6 release controller now rejects a live v6 or unknown
+production heartbeat before preparing any staging state, and cutover checks
+the pinned version/root/instance again before stopping any consumer.
+On version mismatch it attempts the new bounded read-only
+`audit_runtime_processes.sh` diagnostic but still holds without service
+changes. PR #5's diverged process-inventory work was reconciled into PR #34
+and closed as superseded; its original branch remains preserved.
+
+**Exact next bounded action:** From a *local interactive Mac terminal*,
+run the read-only installed-service inventory from a verified bridge source
+worktree and inspect the loaded labels, PIDs, pinned mailbox IDs, installed
+manifests and durable journal. The already prepared prior detached release
+source at commit `81accc8` contains `shell_bridge/bridge_service_ownership.py`,
+which can produce the initial read-only JSON inventory without installing
+or stopping anything. Compare loaded process PID(s) to the last known
+production heartbeat publisher PID; then decide whether the proper path is
+an already-v6 upgrade/acceptance or a guarded first v5-to-v6 cutover.
+**Do not run or retry production cutover, archive another service, delete
+old worktrees, or run destructive GC to force the check to pass.**
