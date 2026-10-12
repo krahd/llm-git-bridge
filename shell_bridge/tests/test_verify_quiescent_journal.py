@@ -27,6 +27,7 @@ class QuiescentJournalTests(unittest.TestCase):
         d.mkdir()
         sha = hashlib.sha256(name.encode()).hexdigest()
         if started:
+            (d / "request.json").write_bytes(name.encode())
             (d / "started.json").write_text(json.dumps({"request_sha256": sha}))
         (d / "result.json").write_text(json.dumps(
             {"protocol": 1, "kind": "result", "id": name, "status": status,
@@ -122,6 +123,24 @@ class QuiescentJournalTests(unittest.TestCase):
         (folder / "started.json").symlink_to(self.journal / "missing")
         with self.assertRaisesRegex(UnresolvedJournalError, "symlinked"):
             verify(self.state)
+
+    def test_missing_modified_or_symlinked_executed_request_blocks_handover(self):
+        folder = self.record("executed", "completed")
+        request = folder / "request.json"
+        request.unlink()
+        with self.assertRaisesRegex(UnresolvedJournalError, "payload is absent"):
+            verify(self.state)
+        request.write_bytes(b"modified")
+        with self.assertRaisesRegex(UnresolvedJournalError, "request bytes disagree"):
+            verify(self.state)
+        request.unlink()
+        request.symlink_to(self.journal / "outside")
+        with self.assertRaisesRegex(UnresolvedJournalError, "payload is absent or symlinked"):
+            verify(self.state)
+
+    def test_rejected_without_started_remains_quiescent_without_raw_request(self):
+        self.record("rejected-no-start", "rejected", started=False)
+        self.assertEqual(verify(self.state)["finished"], 1)
 
     def test_stale_active_marker_or_symlinked_result_holds(self):
         folder = self.record("active", "completed")
