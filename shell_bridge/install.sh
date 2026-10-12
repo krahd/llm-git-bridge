@@ -44,8 +44,10 @@ cleanup(){
     launchctl bootout "gui/${UID_NOW}" "$PLIST" >/dev/null 2>&1 || true
   fi
   if [ "$INSTALL_LOCK_HELD" -eq 1 ]; then
-    rmdir "$INSTALL_LOCK_DIR" ||
+    if ! rmdir "$INSTALL_LOCK_DIR"; then
       echo "HOLD: installer lock not removable; reconcile installed state before retry: $INSTALL_LOCK_DIR" >&2
+      [ "$rc" -ne 0 ] || exit 1
+    fi
   fi
 }
 trap cleanup EXIT
