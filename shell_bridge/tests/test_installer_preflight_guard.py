@@ -31,7 +31,7 @@ class InstallPreflightGuardTests(unittest.TestCase):
         self.assertIn('direct install cannot adopt an existing durable journal', INSTALL)
         self.assertIn('if [ "$STAGE_ONLY" -eq 0 ]', INSTALL)
         self.assertLess(INSTALL.index('direct install cannot adopt an existing durable journal'),
-                        INSTALL.index("choose_allowed_root\\nchoose_remote"))
+                        INSTALL.index("choose_allowed_root" + chr(10) + "choose_remote"))
 
     def test_legacy_retirement_flag_is_rejected_before_mac_side_effects(self):
         script = Path(__file__).resolve().parents[1] / "install.sh"
