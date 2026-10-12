@@ -67,7 +67,51 @@ def _verify_completed_receipt_pair(folder: Path, budget: int) -> int:
             result_data.get("protocol") != 1 or
             result_data.get("kind") != "result"):
         raise UnresolvedJournalError("FINISHED metadata and local result disagree")
+    # Completed shells always persist STARTED before spawning. A separate
+    # request can have a completed result without STARTED only when it was
+    # deduplicated against a verified completed logical operation. Otherwise
+    # losing STARTED erases the only evidence that execution was admitted.
     started = folder / "started.json"
+    if status == "completed" and not started.exists() and not started.is_symlink():
+        source_id = result_data.get("original_request_id")
+        source_sha = result_data.get("original_result_sha256")
+        operation_id = result_data.get("logical_operation_id")
+        if (result_data.get("replayed") is not True
+                or not isinstance(source_id, str)
+                or not re.fullmatch(r"[a-z0-9][a-z0-9._-]{0,127}", source_id)
+                or source_id in (".", "..", folder.name)
+                or not isinstance(operation_id, str)
+                or not re.fullmatch(r"[a-z0-9][a-z0-9._-]{0,127}", operation_id)
+                or not isinstance(source_sha, str)
+                or _SHA256.fullmatch(source_sha) is None):
+            raise UnresolvedJournalError("completed receipt has no STARTED or valid replay proof")
+        source = folder.parent / source_id
+        source_result = source / "result.json"
+        source_started = source / "started.json"
+        source_finished = source / "finished.json"
+        if (source.is_symlink() or not source.is_dir()
+                or any(p.is_symlink() or not p.is_file()
+                       for p in (source_result, source_started, source_finished))):
+            raise UnresolvedJournalError("completed replay source receipt is missing or linked")
+        try:
+            if source_result.stat().st_size > _MAX_RESULT_BYTES:
+                raise UnresolvedJournalError("completed replay source exceeds bounded audit budget")
+            original_raw = source_result.read_bytes()
+            if hashlib.sha256(original_raw).hexdigest() != source_sha:
+                raise UnresolvedJournalError("completed replay source result SHA disagrees")
+            original = json.loads(original_raw)
+        except UnresolvedJournalError:
+            raise
+        except (OSError, UnicodeError, ValueError, TypeError) as exc:
+            raise UnresolvedJournalError("completed replay source result is unreadable") from exc
+        if (not isinstance(original, dict)
+                or original.get("status") != "completed"
+                or original.get("id") != source_id
+                or original.get("kind") != "result"
+                or original.get("protocol") != 1):
+            raise UnresolvedJournalError("completed replay source is not a completed original")
+        # The source STARTED, FINISHED and executed request are independently
+        # checked when every journal entry is visited by verify().
     if started.is_symlink():
         raise UnresolvedJournalError("STARTED marker is symlinked")
     if started.exists():

@@ -142,6 +142,61 @@ class QuiescentJournalTests(unittest.TestCase):
         self.record("rejected-no-start", "rejected", started=False)
         self.assertEqual(verify(self.state)["finished"], 1)
 
+    def test_completed_without_started_is_not_a_prestart_rejection(self):
+        self.record("lost-started", "completed", started=False)
+        with self.assertRaisesRegex(UnresolvedJournalError, "no STARTED"):
+            verify(self.state)
+
+    def test_completed_logical_replay_requires_original_result_evidence(self):
+        original = self.record("original", "completed")
+        replay = self.record("logical-replay", "completed", started=False)
+        original_result = original / "result.json"
+        source_sha = hashlib.sha256(original_result.read_bytes()).hexdigest()
+        replay_result = replay / "result.json"
+        original_replay_data = json.loads(replay_result.read_text())
+        valid_replay = {
+            **original_replay_data,
+            "replayed": True,
+            "logical_operation_id": "logical-key",
+            "original_request_id": "original",
+            "original_result_sha256": source_sha,
+        }
+        replay_result.write_text(json.dumps(valid_replay))
+        self.assertEqual(verify(self.state)["finished"], 2)
+        for modifications, error in (
+            ({"replayed": False}, "replay proof"),
+            ({"original_request_id": "../escape"}, "replay proof"),
+            ({"original_request_id": "logical-replay"}, "replay proof"),
+            ({"logical_operation_id": ""}, "replay proof"),
+            ({"original_result_sha256": "0" * 64}, "SHA disagrees"),
+            ({"original_request_id": "missing"}, "source receipt is missing"),
+        ):
+            with self.subTest(modifications=modifications):
+                replay_result.write_text(json.dumps({**valid_replay, **modifications}))
+                with self.assertRaisesRegex(UnresolvedJournalError, error):
+                    verify(self.state)
+        replay_result.write_text(json.dumps(valid_replay))
+        (original / "started.json").unlink()
+        with self.assertRaisesRegex(UnresolvedJournalError, "no STARTED"):
+            verify(self.state)
+
+    def test_completed_replay_does_not_accept_tampered_original(self):
+        original = self.record("original", "completed")
+        replay = self.record("logical-replay", "completed", started=False)
+        replay_result = replay / "result.json"
+        data = json.loads(replay_result.read_text())
+        data.update({
+            "replayed": True,
+            "logical_operation_id": "logical-key",
+            "original_request_id": "original",
+            "original_result_sha256": hashlib.sha256(
+                (original / "result.json").read_bytes()).hexdigest(),
+        })
+        replay_result.write_text(json.dumps(data))
+        (original / "request.json").write_bytes(b"tampered")
+        with self.assertRaisesRegex(UnresolvedJournalError, "request bytes disagree"):
+            verify(self.state)
+
     def test_stale_active_marker_or_symlinked_result_holds(self):
         folder = self.record("active", "completed")
         active = folder / "active.json"
