@@ -200,7 +200,8 @@ claimants=[r.get("label") for r in report.get("loaded", [])
 if claimants:
     raise SystemExit("HOLD: target mailbox already has loaded consumer(s); stage-only and guarded cutover required")
 shared_state=[r.get("label") for r in report.get("loaded", [])
-              if r.get("state_dir")==state]
+              if isinstance(r.get("state_dir"), str) and
+                 str(Path(r["state_dir"]).expanduser().resolve(strict=False))==state]
 if shared_state:
     raise SystemExit("HOLD: direct install reuses a loaded bridge durable journal directory; stage-only and guarded handover required")
 PYOWNER
