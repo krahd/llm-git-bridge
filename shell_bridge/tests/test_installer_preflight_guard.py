@@ -27,6 +27,13 @@ class InstallPreflightGuardTests(unittest.TestCase):
             "mutations_performed": False,
         }
 
+    def test_direct_installer_cannot_adopt_existing_remote_mailbox(self):
+        self.assertIn("direct installation cannot adopt an existing mailbox", INSTALL)
+        self.assertLess(
+            INSTALL.index("direct installation cannot adopt an existing mailbox"),
+            INSTALL.index('    rclone mkdir "${REMOTE}${BASE_PATH}"'))
+        self.assertIn('if [ "$count" -eq 1 ] && [ "$STAGE_ONLY" -eq 0 ]; then', INSTALL)
+
     def test_direct_installer_rejects_preexisting_durable_state(self):
         self.assertIn('direct install cannot adopt an existing durable journal', INSTALL)
         self.assertIn('if [ "$STAGE_ONLY" -eq 0 ]', INSTALL)
