@@ -489,7 +489,6 @@ an older daemon ignores that lock, or what happens to pending journal state.
 The next bounded local action is a new read-only Mac inventory of those four
 exact PIDs, their loaded launchd job definitions (redacting credentials),
 owner lock file and build manifests, followed by explicit classification
-of safe-to-stop legacy jobs. The actual user-Mac read-only request via
-Library upload was rejected with `container_session_expired`, before
-delivery; no request has been confirmed submitted. Do not replay a request
-without first reconciling its exact ID.
+of safe-to-stop legacy jobs. No additional remote Mac inspection request has been confirmed delivered.
+A fresh read-only process and manifest inspection on the Mac is required
+before deciding which currently running LaunchAgents are safe to retire.
