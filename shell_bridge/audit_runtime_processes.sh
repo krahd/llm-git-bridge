@@ -31,4 +31,9 @@ done
 echo "verified_mailbox_owner_inventory:"
 # This existing verifier redacts arbitrary argv and only prints identity fields.
 PYTHONDONTWRITEBYTECODE=1 python3 "$ROOT/bridge_service_ownership.py"
+echo "os_lock_file_descriptor_evidence:"
+# Informational only: lsof establishes open descriptors, never ownership of
+# an exclusive flock. A diagnostic failure is an explicit unresolved hold.
+PYTHONDONTWRITEBYTECODE=1 python3 "$ROOT/bridge_lock_observer.py" ||
+  echo "LOCK_DESCRIPTOR_EVIDENCE_INCONCLUSIVE=1"
 echo "inventory_only_no_mutation=1"
