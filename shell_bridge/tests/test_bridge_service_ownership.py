@@ -82,10 +82,10 @@ class LoadedBridgeOwnershipTests(unittest.TestCase):
 
     def test_loaded_pid_disappearing_between_launchctl_and_ps_holds(self):
         self.service("bridge-a", "production")
-        listing = "PID\\tStatus\\tLabel\\n1786\\t0\\tbridge-a\\n"
+        listing = "PID\tStatus\tLabel\n1786\t0\tbridge-a\n"
         result = inspect_services(
             self.home, listing,
-            "2000 /usr/bin/python3 /tmp/unrelated.py\\n",
+            "2000 /usr/bin/python3 /tmp/unrelated.py\n",
         )
         self.assertFalse(result["safe_to_stage"])
         self.assertIn(
@@ -96,11 +96,11 @@ class LoadedBridgeOwnershipTests(unittest.TestCase):
 
     def test_process_argv_secrets_not_reported(self):
         self.service("bridge-a", "production")
-        listing = "PID\\tStatus\\tLabel\\n1786\\t0\\tbridge-a\\n"
+        listing = "PID\tStatus\tLabel\n1786\t0\tbridge-a\n"
         result = inspect_services(
             self.home, listing,
             "1786 /usr/bin/python3 /opt/bridge.py daemon --config /tmp/cfg "
-            "--password=NEVER_LOG_THIS\\n",
+            "--password=NEVER_LOG_THIS\n",
         )
         self.assertTrue(result["safe_to_stage"])
         self.assertNotIn("NEVER_LOG_THIS", json.dumps(result))
