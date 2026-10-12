@@ -7,6 +7,7 @@ FINISHED; the actual local journal must be inspected separately.
 """
 from __future__ import annotations
 
+import hashlib
 import json
 import re
 from pathlib import Path
@@ -78,6 +79,24 @@ def _verify_completed_receipt_pair(folder: Path, budget: int) -> int:
             raise UnresolvedJournalError("STARTED identity is unreadable") from exc
         if not isinstance(original, dict) or original.get("request_sha256") != sha:
             raise UnresolvedJournalError("STARTED and FINISHED request identities disagree")
+        # A STARTED marker means this request may have produced side effects.
+        # Do not certify safe handover unless the immutable original request
+        # bytes are still present and match its execution/FINISHED identity.
+        raw_path = folder / "request.json"
+        if raw_path.is_symlink() or not raw_path.is_file():
+            raise UnresolvedJournalError("executed request payload is absent or symlinked")
+        try:
+            size = raw_path.stat().st_size
+            if size > 2 * 1024 * 1024 or size > budget - meta.st_size - finish_stat.st_size:
+                raise UnresolvedJournalError("executed request exceeds bounded audit budget")
+            raw = raw_path.read_bytes()
+        except UnresolvedJournalError:
+            raise
+        except OSError as exc:
+            raise UnresolvedJournalError("executed request payload cannot be read") from exc
+        if hashlib.sha256(raw).hexdigest() != sha:
+            raise UnresolvedJournalError("executed request bytes disagree with STARTED/FINISHED")
+        budget -= len(raw)
     return budget - meta.st_size - finish_stat.st_size
 
 
