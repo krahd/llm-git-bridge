@@ -18,6 +18,20 @@ SOURCE="$(git rev-parse HEAD)"
 [ "${#SOURCE}" -eq 40 ] || fail "invalid source identity"
 [ "$(git rev-parse refs/remotes/origin/main 2>/dev/null)" = "$SOURCE" ] || fail "this worktree is not the freshly fetched canonical origin/main release"
 echo "RELEASE_SOURCE=$SOURCE"
+echo "Phase 0: verify live production is the expected v5 instance before creating staging state"
+LEGACY_CONFIG="$HOME/.config/chatgpt-shell-bridge/config.json"
+LIVE_LEGACY_REMOTE="$(python3 shell_bridge/verify_v5_production_health.py remote "$LEGACY_CONFIG")" ||
+  fail "cannot identify the pinned legacy production remote"
+LIVE_V5_HEALTH="$(mktemp)" || fail "cannot create a private production-health diagnostic"
+trap 'rm -f "$LIVE_V5_HEALTH"' EXIT
+if ! rclone --drive-root-folder-id 1PRsQHgVsgXhIYT_8akGFRGdhdlw9Lmk6 --timeout 20s \
+  copyto "${LIVE_LEGACY_REMOTE}health.json" "$LIVE_V5_HEALTH"; then
+  fail "cannot read pinned production heartbeat; do not assume that v5 still owns the mailbox"
+fi
+python3 shell_bridge/verify_v5_production_health.py verify "$LEGACY_CONFIG" "$LIVE_V5_HEALTH" ||
+  fail "production is not verified as v5; reconcile installed owners before release"
+rm -f "$LIVE_V5_HEALTH"
+trap - EXIT
 case "${V6_ENABLE_OUTBOUND_SSH:-0}" in
   0|1) ;;
   *) fail "V6_ENABLE_OUTBOUND_SSH must be exactly 0 or 1" ;;
