@@ -17,6 +17,7 @@ class RuntimeProcessInventoryTests(unittest.TestCase):
             "launchctl print", "launchctl list", "ps -axo pid=,ppid=,comm=",
             "bridge_service_ownership.py", "inventory_only_no_mutation=1",
             "bridge_process_inventory_v2", "known_approval_apps:",
+            "bridge_lock_observer.py", "LOCK_DESCRIPTOR_EVIDENCE_INCONCLUSIVE=1",
         ):
             self.assertIn(expected, text)
         for prohibited in (
