@@ -1660,8 +1660,13 @@ def acquire_instance_lock(cfg: dict):
     # Hold the historical TMPDIR lock AND a fixed /tmp lock until shutdown.
     # Legacy binaries can coexist during a migration; the release owner audit
     # must still rule out a legacy daemon with a DIFFERENT TMPDIR.
-    paths = sorted(set((_instance_lock_path(cfg), _stable_instance_lock_path(cfg))),
-                   key=str)
+    # /tmp and /private/tmp can name the same directory on macOS.
+    # Deduplicate by canonical parent identity to avoid double-flocking an inode.
+    unique_paths = {}
+    for path in (_instance_lock_path(cfg), _stable_instance_lock_path(cfg)):
+        identity = path.parent.resolve(strict=False) / path.name
+        unique_paths.setdefault(identity, path)
+    paths = sorted(unique_paths.values(), key=str)
     files = []
     try:
         for path in paths:
