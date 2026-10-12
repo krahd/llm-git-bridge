@@ -103,14 +103,23 @@ def inspect_services(home: Path, launchctl_listing: str, process_listing: str | 
         records.append(record)
     if process_listing is not None:
         known_pids = {item["pid"] for item in records if item.get("pid")}
+        observed_pids = set()
         for line in process_listing.splitlines():
             part = line.strip().split(None, 1)
             if len(part) != 2 or not part[0].isdecimal():
                 continue
             pid, argv = part
+            observed_pids.add(pid)
             if (re.search(r"(?:^|/)bridge\.py\s+daemon\b", argv)
                     and pid not in known_pids):
                 problems.append("unmanaged bridge daemon PID=" + pid)
+        for record in records:
+            pid = record.get("pid")
+            if pid is not None and pid not in observed_pids:
+                # launchctl and ps are independent snapshots. A process which
+                # disappeared between them is *not* proof of safe ownership.
+                problems.append("launchd PID missing from process inventory: "
+                                + record["label"] + " PID=" + pid)
     active_collisions = []
     parked_loaded = sorted(record["label"] for record in records if not record["running"])
     running_claimants = sorted(
