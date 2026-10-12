@@ -1679,7 +1679,7 @@ def acquire_instance_lock(cfg: dict):
         for handle in files:
             handle.seek(0)
             handle.truncate()
-            handle.write("pid=" + str(os.getpid()) + "\\n")
+            handle.write("pid=" + str(os.getpid()) + chr(10))
             handle.flush()
         return _HeldMailboxLocks(files)
     except BaseException:
