@@ -16,11 +16,15 @@ class WorkerDrainBeforeUnlockTests(unittest.TestCase):
         # The direct child exits successfully, but a detached grandchild still
         # holds both streams. A three-second reader join must be recorded as
         # indeterminate, never as a trustworthy complete output/receipt.
+        # os._exit prevents Python's subprocess atexit machinery from
+        # delaying the direct parent until its child exits.
         script = (
-            "import subprocess,sys;"
-            "subprocess.Popen([sys.executable,'-c','import time;time.sleep(5)'],"
-            "stdin=subprocess.DEVNULL,stdout=sys.stdout,stderr=sys.stderr,"
-            "start_new_session=True)"
+            "import os,time" + chr(10) +
+            "pid=os.fork()" + chr(10) +
+            "if pid: os._exit(0)" + chr(10) +
+            "os.setsid()" + chr(10) +
+            "time.sleep(6)" + chr(10) +
+            "os._exit(0)" + chr(10)
         )
         with tempfile.TemporaryDirectory() as td:
             value = bridge.run_shell(Path(td), "ignored", b"", 8,
