@@ -63,7 +63,7 @@ class UniqueReleaseResultTests(unittest.TestCase):
         self.assertIn("production smoke result is missing or duplicated", cutover)
         self.assertIn('verify_unique_result.py" "$RID"', cutover)
         self.assertLess(cutover.index("production smoke result is missing or duplicated"),
-                        cutover.index("V6_PRODUCTION_PROVISIONAL"))
+                        cutover.index("CUTOVER_COMMITTED=1"))
 
 
 if __name__ == "__main__":
