@@ -177,7 +177,7 @@ class QuiescentJournalTests(unittest.TestCase):
                     verify(self.state)
         replay_result.write_text(json.dumps(valid_replay))
         (original / "started.json").unlink()
-        with self.assertRaisesRegex(UnresolvedJournalError, "source receipt is missing"):
+        with self.assertRaisesRegex(UnresolvedJournalError, "no STARTED"):
             verify(self.state)
 
     def test_completed_replay_does_not_accept_tampered_original(self):
