@@ -30,7 +30,7 @@ if ! rclone --drive-root-folder-id 1PRsQHgVsgXhIYT_8akGFRGdhdlw9Lmk6 --timeout 2
 fi
 if ! python3 shell_bridge/verify_v5_production_health.py verify "$LEGACY_CONFIG" "$LIVE_V5_HEALTH"; then
   echo "Read-only live LaunchAgent/mailbox inventory (no service changes):" >&2
-  PYTHONDONTWRITEBYTECODE=1 python3 shell_bridge/bridge_service_ownership.py >&2 || true
+  bash shell_bridge/audit_runtime_processes.sh >&2 || true
   fail "production is not verified as v5; reconcile installed owners before release"
 fi
 rm -f "$LIVE_V5_HEALTH"
