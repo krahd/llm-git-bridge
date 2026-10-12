@@ -80,6 +80,51 @@ class V5InstanceLockTests(unittest.TestCase):
             second.close()
 
 
+class MailboxLockMigrationTests(unittest.TestCase):
+    def test_different_tmpdirs_share_one_fixed_mailbox_lock(self):
+        with tempfile.TemporaryDirectory() as td:
+            one = Path(td) / "a"
+            two = Path(td) / "b"
+            cfg = {"drive_root_folder_id": "migration-" + Path(td).name}
+            with patch.object(b.tempfile, "gettempdir", return_value=str(one)):
+                first = b.acquire_instance_lock(cfg)
+            try:
+                with patch.object(b.tempfile, "gettempdir", return_value=str(two)):
+                    with self.assertRaisesRegex(RuntimeError, "another shell-bridge instance"):
+                        b.acquire_instance_lock(cfg)
+            finally:
+                first.close()
+            with patch.object(b.tempfile, "gettempdir", return_value=str(two)):
+                third = b.acquire_instance_lock(cfg)
+                third.close()
+
+    def test_fixed_lock_is_invariant_to_environment_tmpdir(self):
+        with tempfile.TemporaryDirectory() as td:
+            cfg = {"drive_root_folder_id": "stable-mailbox-123"}
+            with patch.object(b.tempfile, "gettempdir", return_value=str(Path(td) / "one")):
+                a = b._stable_instance_lock_path(cfg)
+                legacy_a = b._instance_lock_path(cfg)
+            with patch.object(b.tempfile, "gettempdir", return_value=str(Path(td) / "two")):
+                self.assertEqual(a, b._stable_instance_lock_path(cfg))
+                self.assertNotEqual(legacy_a, b._instance_lock_path(cfg))
+
+    def test_lock_file_symlink_and_untrusted_directory_are_rejected(self):
+        with tempfile.TemporaryDirectory() as td:
+            folder = Path(td) / "private"
+            folder.mkdir(mode=0o700)
+            target = Path(td) / "untouched"
+            target.write_text("preserve")
+            symlink = folder / "lock"
+            symlink.symlink_to(target)
+            with self.assertRaises(OSError):
+                b._open_instance_lock_file(symlink)
+            self.assertEqual(target.read_text(), "preserve")
+            symlink.unlink()
+            folder.chmod(0o755)
+            with self.assertRaisesRegex(RuntimeError, "not exclusively owned"):
+                b._open_instance_lock_file(folder / "another.lock")
+
+
 class V5RcloneTests(unittest.TestCase):
     def test_rclone_timeout_is_bounded(self):
         with tempfile.TemporaryDirectory() as td:
