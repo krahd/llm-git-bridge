@@ -105,6 +105,14 @@ registered_operation_from_config(c,"bridge-mailbox-inspect","inspect",Path(sys.a
 print("PINNED_READ_ONLY_APPROVAL_HELPER=1")
 PYREG
 
+unique_result_canary(){
+  local root="$1" rid="$2" listing
+  listing="$(rclone --drive-root-folder-id "$root" --timeout 20s lsjson "${REMOTE}results" --files-only --max-depth 1 --include "$rid.json")" ||
+    fail "cannot enumerate result identities for $rid"
+  printf '%s' "$listing" | python3 shell_bridge/verify_unique_result.py "$rid" ||
+    fail "Drive result filename is missing or duplicated for $rid"
+}
+
 approval_canary(){
   local root="$1" allowed="$2" decision="$3" prefix="$4"
   local rid request_file result_file attempts found=0
@@ -134,6 +142,7 @@ approval_canary(){
     echo "HOLD: approval response missing/ambiguous, request=$rid" >&2
     rm -f "$request_file" "$result_file"; return 1
   fi
+  unique_result_canary "$root" "$rid"
   if ! PYTHONDONTWRITEBYTECODE=1 python3 shell_bridge/verify_v6_approval.py verify "$request_file" "$rid" "$result_file" "$decision"; then
     echo "HOLD: approval result failed identity/decision verification for $rid" >&2
     rm -f "$request_file" "$result_file"; return 1
@@ -162,6 +171,7 @@ ssh_status_canary(){
     echo "HOLD: pinned SSH smoke result not received, ID $rid" >&2
     rm -f "$request_file" "$result_file"; return 1
   fi
+  unique_result_canary "$root" "$rid"
   if ! python3 shell_bridge/verify_v6_pinned_ssh.py verify "$request_file" "$rid" "$result_file"; then
     echo "HOLD: pinned SSH smoke denied or unverified, ID $rid" >&2
     rm -f "$request_file" "$result_file"; return 1
