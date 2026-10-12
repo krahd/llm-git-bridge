@@ -12,6 +12,22 @@ cutover. No finite test suite can guarantee that external Google Drive,
 LaunchAgents, or the native approval GUI will behave identically on the user's
 Mac. The entrypoint holds on real uncertainty instead of coercing migration.
 
+## Shutdown ownership and incomplete pipe results
+
+The bridge holds all mailbox flock handles until its request worker threads
+have joined on graceful daemon shutdown. The former five-second join timeout
+could release the exclusive owner lock while a worker remained active or was
+still persisting its result. Forced process termination remains a separate
+OS/journal-recovery concern; this change does not qualify a `kill -9` or
+uninspected service bootout as safe.
+
+If a spawned subprocess exits but stdout/stderr/stdin reader/writer threads
+cannot fully drain within the bounded collection window, the request is
+recorded as **indeterminate**, not successfully completed. A detached child
+may inherit the parent's pipes and survive the original process exit. The
+bridge must not call that a verified completed request or replay its effects
+without journal reconciliation.
+
 ## Duplicate Drive result evidence is a release hold
 
 Google Drive permits multiple files with the same name. The live staging
