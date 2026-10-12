@@ -116,6 +116,41 @@ class LoadedBridgeOwnershipTests(unittest.TestCase):
         self.assertTrue(report["safe_to_stage"])
         self.assertIsNone(report["loaded"][0]["pid"])
 
+    def test_active_duplicate_consumers_are_reported_separately(self):
+        a, b, dormant = "bridge-production-v6", "bridge-production-legacy", "bridge-old"
+        for label in (a, b, dormant):
+            self.service(label, "production")
+        listing = ("PID\\tStatus\\tLabel\\n"
+                   f"1786\\t0\\t{a}\\n"
+                   f"1738\\t0\\t{b}\\n"
+                   f"-\\t1\\t{dormant}\\n")
+        result = inspect_services(self.home, listing)
+        self.assertFalse(result["safe_to_stage"])
+        self.assertEqual(result["schema"], 1)
+        self.assertEqual(
+            {r["pid"] for r in result["active_consumers"]},
+            {"1786", "1738"})
+        self.assertEqual(result["parked_loaded"], [dormant])
+        self.assertTrue(any("active shared requests_folder_id" in p
+                            for p in result["active_collisions"]))
+        self.assertTrue(any("shared requests_folder_id" in p
+                            for p in result["problems"]))
+        self.assertEqual(len(result["loaded"]), 3)
+        self.assertFalse(result["mutations_performed"])
+
+    def test_only_parked_loaded_jobs_remain_a_conservative_hold(self):
+        a, b = "bridge-old-one", "bridge-old-two"
+        self.service(a, "same")
+        self.service(b, "same")
+        listing = f"PID\\tStatus\\tLabel\\n-\\t1\\t{a}\\n-\\t1\\t{b}\\n"
+        result = inspect_services(self.home, listing)
+        self.assertFalse(result["safe_to_stage"])
+        self.assertEqual(result["active_consumers"], [])
+        self.assertEqual(result["active_collisions"], [])
+        self.assertEqual(result["parked_loaded"], sorted((a, b)))
+        self.assertTrue(any("shared drive_root_folder_id" in p
+                            for p in result["problems"]))
+
     def test_unloaded_old_configs_do_not_generate_false_collisions(self):
         self.service("bridge-a", "same")
         self.service("bridge-b", "same")
