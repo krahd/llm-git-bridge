@@ -66,6 +66,18 @@ def _verify_completed_receipt_pair(folder: Path, budget: int) -> int:
             result_data.get("protocol") != 1 or
             result_data.get("kind") != "result"):
         raise UnresolvedJournalError("FINISHED metadata and local result disagree")
+    started = folder / "started.json"
+    if started.is_symlink():
+        raise UnresolvedJournalError("STARTED marker is symlinked")
+    if started.exists():
+        if not started.is_file() or started.stat().st_size > 65536:
+            raise UnresolvedJournalError("STARTED marker is not a bounded regular file")
+        try:
+            original = json.loads(started.read_text(encoding="utf-8"))
+        except (OSError, UnicodeError, ValueError, TypeError) as exc:
+            raise UnresolvedJournalError("STARTED identity is unreadable") from exc
+        if not isinstance(original, dict) or original.get("request_sha256") != sha:
+            raise UnresolvedJournalError("STARTED and FINISHED request identities disagree")
     return budget - meta.st_size - finish_stat.st_size
 
 
