@@ -120,10 +120,10 @@ class LoadedBridgeOwnershipTests(unittest.TestCase):
         a, b, dormant = "bridge-production-v6", "bridge-production-legacy", "bridge-old"
         for label in (a, b, dormant):
             self.service(label, "production")
-        listing = ("PID\\tStatus\\tLabel\\n"
-                   f"1786\\t0\\t{a}\\n"
-                   f"1738\\t0\\t{b}\\n"
-                   f"-\\t1\\t{dormant}\\n")
+        listing = ("PID\tStatus\tLabel\n"
+                   f"1786\t0\t{a}\n"
+                   f"1738\t0\t{b}\n"
+                   f"-\t1\t{dormant}\n")
         result = inspect_services(self.home, listing)
         self.assertFalse(result["safe_to_stage"])
         self.assertEqual(result["schema"], 1)
@@ -142,7 +142,7 @@ class LoadedBridgeOwnershipTests(unittest.TestCase):
         a, b = "bridge-old-one", "bridge-old-two"
         self.service(a, "same")
         self.service(b, "same")
-        listing = f"PID\\tStatus\\tLabel\\n-\\t1\\t{a}\\n-\\t1\\t{b}\\n"
+        listing = f"PID\tStatus\tLabel\n-\t1\t{a}\n-\t1\t{b}\n"
         result = inspect_services(self.home, listing)
         self.assertFalse(result["safe_to_stage"])
         self.assertEqual(result["running_claimants"], [])
