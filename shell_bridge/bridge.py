@@ -974,9 +974,12 @@ def run_shell(cwd: Path, command: str, stdin: bytes, timeout: int, shell: str = 
         if p.poll() is None:
             _terminate_process_group(p)
             p.wait()
-        for t in readers:
-            t.join(timeout=3)
-        writer_thread.join(timeout=3)
+        # One absolute deadline for all streams: joining stdout for three
+        # seconds and then stderr for another three hides inherited-pipe
+        # descendants by giving them twice the intended drain window.
+        drain_deadline = time.monotonic() + 3.0
+        for t in [*readers, writer_thread]:
+            t.join(timeout=max(0.0, drain_deadline - time.monotonic()))
     # A detached grandchild may have inherited the stdout/stderr pipes even
     # after the recorded child process exited. Incomplete pipes MUST NOT be
     # reported as a verified completed result, especially for effects whose
