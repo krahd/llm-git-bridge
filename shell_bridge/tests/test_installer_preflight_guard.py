@@ -27,6 +27,16 @@ class InstallPreflightGuardTests(unittest.TestCase):
             "mutations_performed": False,
         }
 
+    def test_legacy_retirement_flag_is_rejected_before_mac_side_effects(self):
+        script = Path(__file__).resolve().parents[1] / "install.sh"
+        result = subprocess.run(["/bin/bash", str(script), "--retire-old-after-smoke"],
+                                capture_output=True, text=True, timeout=8)
+        self.assertEqual(result.returncode, 2)
+        self.assertIn("not production retirement acceptance", result.stderr)
+        self.assertNotIn('RETIRE_OLD_AFTER_SMOKE', INSTALL)
+        self.assertNotIn('retired-launchagents', INSTALL)
+        self.assertNotIn('mv "$old_plist"', INSTALL)
+
     def test_new_mailbox_without_loaded_owner_is_allowed(self):
         self.assertEqual(self.run_guard(self.report()).returncode, 0)
 
