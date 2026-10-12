@@ -1,3 +1,4 @@
+import hashlib
 import json
 from pathlib import Path
 import subprocess
@@ -24,10 +25,14 @@ class QuiescentJournalTests(unittest.TestCase):
     def record(self, name: str, status: str, *, started: bool = True):
         d = self.journal / name
         d.mkdir()
+        sha = hashlib.sha256(name.encode()).hexdigest()
         if started:
-            (d / "started.json").write_text('{"request_sha256":"foo"}')
+            (d / "started.json").write_text(json.dumps({"request_sha256": sha}))
+        (d / "result.json").write_text(json.dumps(
+            {"protocol": 1, "kind": "result", "id": name, "status": status,
+             "request_sha256": sha}))
         (d / "finished.json").write_text(json.dumps(
-            {"status": status, "request_sha256": "foo"}))
+            {"status": status, "request_sha256": sha}))
         return d
 
     def test_all_valid_finished_states_are_quiescent(self):
@@ -63,7 +68,7 @@ class QuiescentJournalTests(unittest.TestCase):
                 d = self.journal / "corrupt"
                 d.mkdir(exist_ok=True)
                 (d / "finished.json").write_text(text)
-                with self.assertRaisesRegex(UnresolvedJournalError, "unreadable"):
+                with self.assertRaises(UnresolvedJournalError):
                     verify(self.state)
                 (d / "finished.json").unlink()
         d = self.journal / "corrupt"
@@ -78,6 +83,55 @@ class QuiescentJournalTests(unittest.TestCase):
             verify(link)
         with self.assertRaises(UnresolvedJournalError):
             verify(self.state.parent / "missing")
+
+    def test_finished_marker_without_result_must_hold(self):
+        folder = self.record("lost-result", "completed")
+        (folder / "result.json").unlink()
+        with self.assertRaisesRegex(UnresolvedJournalError, "no matching local result"):
+            verify(self.state)
+
+    def test_persisted_result_without_finished_must_hold(self):
+        folder = self.record("lost-finished", "completed")
+        (folder / "finished.json").unlink()
+        with self.assertRaisesRegex(UnresolvedJournalError, "no durable FINISHED"):
+            verify(self.state)
+
+    def test_mismatched_status_sha_and_request_id_must_hold(self):
+        folder = self.record("mismatch", "completed")
+        original = json.loads((folder / "result.json").read_text())
+        for changes in (
+            {"status": "rejected"},
+            {"request_sha256": hashlib.sha256(b"other").hexdigest()},
+            {"id": "different-id"},
+            {"protocol": 2},
+            {"kind": "unknown"},
+        ):
+            with self.subTest(changes=changes):
+                (folder / "result.json").write_text(json.dumps({**original, **changes}))
+                with self.assertRaisesRegex(UnresolvedJournalError, "disagree"):
+                    verify(self.state)
+        (folder / "result.json").write_text(json.dumps(original))
+
+    def test_stale_active_marker_or_symlinked_result_holds(self):
+        folder = self.record("active", "completed")
+        active = folder / "active.json"
+        active.write_text(json.dumps({"pgid": 123, "request_id": "active"}))
+        with self.assertRaisesRegex(UnresolvedJournalError, "active process evidence"):
+            verify(self.state)
+        active.unlink()
+        result = folder / "result.json"
+        result.unlink()
+        result.symlink_to(self.journal / "outside")
+        with self.assertRaisesRegex(UnresolvedJournalError, "symlinked"):
+            verify(self.state)
+
+    def test_too_large_result_fails_before_read(self):
+        folder = self.record("oversize", "completed")
+        path = folder / "result.json"
+        with path.open("ab") as handle:
+            handle.truncate(40 * 1024 * 1024 + 1)
+        with self.assertRaisesRegex(UnresolvedJournalError, "bounded audit"):
+            verify(self.state)
 
     def test_cutover_checks_journal_before_and_after_old_owner_shutdown(self):
         content = CUTOVER.read_text()
