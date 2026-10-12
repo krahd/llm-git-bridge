@@ -65,6 +65,7 @@ jobs:
           PYTHONPATH=shell_bridge python3 -m unittest discover -s shell_bridge/tests -p test_bridge_service_ownership.py -v
           PYTHONPATH=shell_bridge python3 -m unittest discover -s shell_bridge/tests -p test_bridge_lock_observer.py -v
           PYTHONPATH=shell_bridge python3 -m unittest discover -s shell_bridge/tests -p test_verify_unique_result.py -v
+          PYTHONPATH=shell_bridge python3 -m unittest discover -s shell_bridge/tests -p test_installer_preflight_guard.py -v
       - name: Run canonical repository unit tests
         env:
           PYTHONDONTWRITEBYTECODE: '1'
