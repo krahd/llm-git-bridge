@@ -140,7 +140,7 @@ def inspect_services(home: Path, launchctl_listing: str, process_listing: str | 
                     "active shared " + field + " between " + ", ".join(sorted(labels)))
     # Do NOT mark the system safe merely because an old job currently has no
     # PID: loaded launchd jobs can wake and reacquire the same mailbox.
-    return {"schema": 2, "kind": "loaded_bridge_ownership",
+    return {"schema": 1, "kind": "loaded_bridge_ownership",
             "loaded": records, "active_consumers": active_consumers,
             "parked_loaded": parked_loaded,
             "active_collisions": sorted(set(active_collisions)),
