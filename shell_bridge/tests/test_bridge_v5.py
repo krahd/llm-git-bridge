@@ -125,6 +125,37 @@ class MailboxLockMigrationTests(unittest.TestCase):
                                         timeout=8)
             self.assertEqual(accepted.returncode, 0, accepted.stderr)
 
+    def test_legacy_named_mailbox_and_pinned_id_share_stable_lock(self):
+        with tempfile.TemporaryDirectory() as td:
+            named = {"remote": "chatgpt-git-bridge:",
+                     "base_path": "Local Executor Bridge"}
+            canonical = {**named, "drive_root_folder_id": "production-root"}
+            with patch.object(b.tempfile, "gettempdir",
+                              return_value=str(Path(td) / "one")):
+                first = b.acquire_instance_lock(canonical)
+            try:
+                with patch.object(b.tempfile, "gettempdir",
+                                  return_value=str(Path(td) / "two")):
+                    with self.assertRaisesRegex(RuntimeError, "another shell-bridge instance"):
+                        b.acquire_instance_lock(named)
+            finally:
+                first.close()
+            with patch.object(b.tempfile, "gettempdir",
+                              return_value=str(Path(td) / "two")):
+                second = b.acquire_instance_lock(named)
+                second.close()
+
+    def test_config_rejects_noncanonical_drive_root_identifier(self):
+        with tempfile.TemporaryDirectory() as td:
+            config = Path(td) / "config.json"
+            base = {"remote": "chatgpt-git-bridge:", "base_path": "mailbox",
+                    "allowed_root": td, "state_dir": td, "shell": sys.executable}
+            for value in (True, 5, {}, "a/b", "with space", "X" * 129):
+                with self.subTest(value=value):
+                    config.write_text(json.dumps({**base, "drive_root_folder_id": value}))
+                    with self.assertRaises(ValueError):
+                        b.load_config(config)
+
     def test_fixed_lock_is_invariant_to_environment_tmpdir(self):
         with tempfile.TemporaryDirectory() as td:
             cfg = {"drive_root_folder_id": "stable-mailbox-123"}
