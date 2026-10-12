@@ -213,9 +213,16 @@ fi
 R=(rclone --drive-root-folder-id "$ROOT_ID")
 TMP_HEALTH="$(mktemp)"
 "${R[@]}" copyto "${REMOTE}health.json" "$TMP_HEALTH" >/dev/null 2>&1 || fail "cannot read current production health.json"
-python3 - "$TMP_HEALTH" <<'PYHEALTH'
+python3 - "$TMP_HEALTH" "$ROOT_ID" "$TARGET_INSTANCE" <<'PYHEALTH'
 import datetime,json,sys,time
 h=json.load(open(sys.argv[1],encoding='utf-8'))
+if h.get('kind')!='shell_bridge_health':
+    raise SystemExit('production health record is not a bridge heartbeat')
+if h.get('drive_root_folder_id')!=sys.argv[2] or h.get('bridge_instance_id')!=sys.argv[3]:
+    raise SystemExit('production heartbeat does not match the pinned legacy mailbox/instance')
+version=h.get('bridge_version')
+if isinstance(version,bool) or str(version)!='5':
+    raise SystemExit('production mailbox is not owned by v5; reconcile before cutting over')
 active=h.get('active_requests')
 if not isinstance(active,list): raise SystemExit('health.json has no active_requests list')
 if active: raise SystemExit('production bridge is not quiescent; active requests: '+', '.join(map(str,active)))
