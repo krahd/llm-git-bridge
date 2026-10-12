@@ -12,9 +12,9 @@ VERIFY_OWNER = INSTALL[BEGIN:END]
 
 
 class InstallPreflightGuardTests(unittest.TestCase):
-    def run_guard(self, report, root="root123"):
+    def run_guard(self, report, root="root123", state="/tmp/isolated-new-state"):
         return subprocess.run(
-            [sys.executable, "-c", VERIFY_OWNER, json.dumps(report), root],
+            [sys.executable, "-c", VERIFY_OWNER, json.dumps(report), root, state],
             capture_output=True, text=True, timeout=6)
 
     @staticmethod
@@ -41,6 +41,17 @@ class InstallPreflightGuardTests(unittest.TestCase):
         owner = {"label": "io.llm-git-bridge.daemon",
                  "pid": None, "drive_root_folder_id": "root123"}
         self.assertNotEqual(self.run_guard(self.report([owner])).returncode, 0)
+
+    def test_live_durable_journal_is_never_shared_even_with_different_mailbox(self):
+        owner = {"label": "existing-v6", "pid": "1738",
+                 "drive_root_folder_id": "other-mailbox",
+                 "state_dir": "/tmp/existing-journal"}
+        result = self.run_guard(self.report([owner]), state="/tmp/existing-journal")
+        self.assertNotEqual(result.returncode, 0)
+        self.assertIn("durable journal", result.stderr)
+        self.assertEqual(
+            self.run_guard(self.report([owner]), state="/tmp/new-journal").returncode,
+            0)
 
     def test_unrelated_loaded_mailbox_is_not_target_collision(self):
         owner = {"label": "bridge-other", "pid": "2000",
