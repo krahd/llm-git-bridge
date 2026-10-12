@@ -12,6 +12,27 @@ cutover. No finite test suite can guarantee that external Google Drive,
 LaunchAgents, or the native approval GUI will behave identically on the user's
 Mac. The entrypoint holds on real uncertainty instead of coercing migration.
 
+## Non-disruptive instance-lock descriptor evidence
+
+`shell_bridge/audit_runtime_processes.sh` additionally invokes
+`bridge_lock_observer.py` to inspect open file descriptors for the
+mailbox-scoped locks used by bridge v6. It derives lock paths using the
+same per-user temporary directory and SHA-256 mailbox identity scheme
+as the running bridge, without calling the lock-acquisition routine or
+creating/changing lock files. It returns candidate PIDs and explicitly
+marks whether `lsof` could inspect an existing lock path.
+
+**An open descriptor is not proof of an exclusive `flock` owner.**
+Absence of an observed descriptor is not proof that an older bridge,
+different version, or restartable LaunchAgent cannot consume that mailbox.
+The observer never authorizes shutdown, deletion, GC, rollback or v5
+retirement. If descriptor inspection fails, treat it as unknown and
+preserve the fail-closed LaunchAgent ownership gate.
+
+This is a local diagnostic invoked only where Mac access is available;
+passing the macOS-hosted CI regression suite is not live-user-Mac
+acceptance.
+
 ## Read-only reconciliation of an already-v6 heartbeat
 
 From an exact, current canonical source worktree on the Mac, run
