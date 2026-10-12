@@ -77,7 +77,9 @@ rejects a direct install when loaded LaunchAgent ownership is ambiguous or
 the target mailbox already has a loaded consumer, and rechecks just before
 activation. An active v6-to-v6 change must be staged under fresh, isolated
 paths with `--stage-only` and subsequently handed over by a separately
-qualified, recoverable cutover procedure. The original installation, journal
+qualified, recoverable cutover procedure. The deprecated
+`--retire-old-after-smoke` switch is now rejected outright; a fresh
+install's smoke test can never retire another LaunchAgent. The original installation, journal
 and rollback artifacts must remain intact. The v5-first-cutover controller
 is **not** a v6-to-v6 upgrader and must not be run against a production
 heartbeat already reporting v6.
