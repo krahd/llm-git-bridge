@@ -54,6 +54,8 @@ def _verify_completed_receipt_pair(folder: Path, budget: int) -> int:
         raise UnresolvedJournalError("FINISHED/result pair is malformed")
     status = finish_data.get("status")
     sha = finish_data.get("request_sha256")
+    if status == "indeterminate" or result_data.get("status") == "indeterminate":
+        raise UnresolvedJournalError("journal contains indeterminate completion")
     if (status not in ("completed", "rejected") or
             not isinstance(sha, str) or _SHA256.fullmatch(sha) is None or
             result_data.get("status") != status or
