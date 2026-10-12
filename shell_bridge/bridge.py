@@ -1726,8 +1726,12 @@ def _result_state_counts(cfg: dict) -> dict:
         if d.is_symlink() or not d.is_dir():
             out["unverifiable_finished"] += 1
             continue
-        started = (d / "started.json").exists()
+        started_marker = d / "started.json"
         result = d / "finished.json"
+        if started_marker.is_symlink() or result.is_symlink():
+            out["unverifiable_finished"] += 1
+            continue
+        started = started_marker.exists()
         finished = result.exists()
         if started and not finished:
             out["started_without_finished"] += 1
