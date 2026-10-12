@@ -149,6 +149,16 @@ PYMARKER
 
 choose_allowed_root
 choose_remote
+# Never rewrite or launch a v6 instance while an unresolved legacy or other
+# v6 LaunchAgent may claim the mailbox. This is read-only and happens BEFORE
+# even creating/adopting remote mailbox directories.
+OWNER_INSPECTOR="$(cd "$(dirname "$0")" && pwd -P)/bridge_service_ownership.py"
+if [ "$STAGE_ONLY" -eq 0 ]; then
+  [ -f "$OWNER_INSPECTOR" ] && [ ! -L "$OWNER_INSPECTOR" ] ||
+    fail "read-only LaunchAgent ownership inspector unavailable"
+  PYTHONDONTWRITEBYTECODE=1 python3 "$OWNER_INSPECTOR" >/dev/null ||
+    fail "loaded bridge ownership is ambiguous; stage an isolated build, do not run an in-place install"
+fi
 ensure_mailbox
 
 # Inspect only rclone's redacted view; never print OAuth material.
