@@ -14,7 +14,7 @@ for label in com.tom.chatgpt-shell-bridge io.llm-git-bridge.daemon net.laurenzo.
   fi
 done
 echo "dynamic_bridge_launchagents:"
-launchctl list | awk '/net\\.laurenzo\\.local-executor-bridge-v6|local-executor-bridge-v6-candidate/ {
+launchctl list | awk '/net[.]laurenzo[.]local-executor-bridge-v6|local-executor-bridge-v6-candidate/ {
   if (count++ < 24) print $1, $3
 }'
 echo "bridge_processes_no_arguments:"
