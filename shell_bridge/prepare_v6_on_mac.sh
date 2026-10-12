@@ -31,8 +31,8 @@ if ! PYTHONDONTWRITEBYTECODE=1 python3 shell_bridge/bridge_service_ownership.py 
   python3 - "$report" <<'PYOWNHOLD'
 import json,sys
 report=json.load(open(sys.argv[1],encoding="utf-8"))
-print("LIVE_BRIDGE_CONSUMERS:")
-for item in report.get("active_consumers",[]):
+print("RUNNING_BRIDGE_CLAIMANTS:")
+for item in report.get("running_claimants",[]):
     print(item["label"], "PID", item["pid"],
           "mailbox", item.get("drive_root_folder_id","unverified"))
 print("ACTIVE_COLLISIONS:")
