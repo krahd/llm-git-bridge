@@ -12,6 +12,24 @@ cutover. No finite test suite can guarantee that external Google Drive,
 LaunchAgents, or the native approval GUI will behave identically on the user's
 Mac. The entrypoint holds on real uncertainty instead of coercing migration.
 
+## Duplicate Drive result evidence is a release hold
+
+Google Drive permits multiple files with the same name. The live staging
+mailbox yielded two independently persisted result records for one request ID,
+with matching request hashes but different durations. The reason for the
+duplicate generation has not been reconciled; never infer exclusive execution
+from one successful result fetch.
+
+The release controller now independently lists the exact canary result name
+and demands **exactly one existing Drive file ID** for each staging/production
+native approval, pinned SSH status and production smoke. Zero, multiple, or
+ambiguous results fail closed before acceptance. This is a diagnostic
+cardinality gate, **not** an exactly-once guarantee: another producer could
+still publish after the check, and asynchronous/indeterminate journal states
+remain governed by their own reconciliation requirements. Do not operate
+two loaded bridge services against the same mailbox merely because this gate
+has passed once.
+
 ## Non-disruptive instance-lock descriptor evidence
 
 `shell_bridge/audit_runtime_processes.sh` additionally invokes
