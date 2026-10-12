@@ -974,9 +974,17 @@ def run_shell(cwd: Path, command: str, stdin: bytes, timeout: int, shell: str = 
         if p.poll() is None:
             _terminate_process_group(p)
             p.wait()
-        for t in readers:
-            t.join(timeout=3)
-        writer_thread.join(timeout=3)
+        # One absolute deadline for all streams: joining stdout for three
+        # seconds and then stderr for another three hides inherited-pipe
+        # descendants by giving them twice the intended drain window.
+        drain_deadline = time.monotonic() + 3.0
+        for t in [*readers, writer_thread]:
+            t.join(timeout=max(0.0, drain_deadline - time.monotonic()))
+    # A detached grandchild may have inherited the stdout/stderr pipes even
+    # after the recorded child process exited. Incomplete pipes MUST NOT be
+    # reported as a verified completed result, especially for effects whose
+    # receipt could be lost and whose replay would be dangerous.
+    streams_incomplete = any(t.is_alive() for t in readers) or writer_thread.is_alive()
 
     finished = time.time()
     stdout = bytes(stdout_buf)
@@ -987,6 +995,7 @@ def run_shell(cwd: Path, command: str, stdin: bytes, timeout: int, shell: str = 
         "exit_code": p.returncode,
         "timed_out": timed_out,
         "aborted_by_daemon_shutdown": aborted,
+        "streams_incomplete": streams_incomplete,
         "output_limited": limit_event.is_set(),
         "duration_seconds": round(finished - started, 6),
         "stdout_b64": base64.b64encode(stdout).decode("ascii"),
@@ -1419,10 +1428,13 @@ def _process_one_request(name: str, cfg: dict, preloaded_raw: bytes | None = Non
             sandbox_deny_home_reads=bool(write_plan.get("deny_home_reads", False)),
             argv_override=trusted_argv,
         )
-        if exec_result.get("aborted_by_daemon_shutdown"):
+        if exec_result.get("aborted_by_daemon_shutdown") or exec_result.get("streams_incomplete"):
+            reason = ("daemon shutdown aborted a STARTED request; request was not replayed"
+                      if exec_result.get("aborted_by_daemon_shutdown") else
+                      "stdout/stderr/stdin drain incomplete after child exit; effect is indeterminate")
             result = result_envelope(v["id"], request_sha, "indeterminate", {
                 "cwd": str(v["cwd"]),
-                "message": "daemon shutdown aborted a STARTED request; request was not replayed",
+                "message": reason,
                 **exec_result,
             })
         else:
@@ -1704,18 +1716,41 @@ def acquire_instance_lock(cfg: dict):
 
 def _result_state_counts(cfg: dict) -> dict:
     root = Path(cfg["state_dir"]).expanduser() / "requests"
-    out = {"started_without_finished": 0, "finished": 0}
+    out = {"started_without_finished": 0, "finished": 0,
+           "indeterminate": 0, "unverifiable_finished": 0}
     if not root.exists():
         return out
-    for d in root.iterdir():
-        if not d.is_dir():
+    try:
+        children = list(root.iterdir())
+    except OSError:
+        out["unverifiable_finished"] += 1
+        return out
+    for d in children:
+        if d.is_symlink() or not d.is_dir():
+            out["unverifiable_finished"] += 1
             continue
-        started = (d / "started.json").exists()
-        finished = (d / "finished.json").exists()
+        started_marker = d / "started.json"
+        result = d / "finished.json"
+        if started_marker.is_symlink() or result.is_symlink():
+            out["unverifiable_finished"] += 1
+            continue
+        started = started_marker.exists()
+        finished = result.exists()
         if started and not finished:
             out["started_without_finished"] += 1
         if finished:
             out["finished"] += 1
+            try:
+                if result.is_symlink() or result.stat().st_size > 65536:
+                    raise ValueError("unsafe finished marker")
+                record = json.loads(result.read_text(encoding="utf-8"))
+                status = record.get("status") if isinstance(record, dict) else None
+                if status == "indeterminate":
+                    out["indeterminate"] += 1
+                elif status not in ("completed", "rejected"):
+                    out["unverifiable_finished"] += 1
+            except (OSError, UnicodeError, ValueError, TypeError):
+                out["unverifiable_finished"] += 1
     return out
 
 
@@ -1997,6 +2032,18 @@ def _signal_shutdown(_signum, _frame):
         _terminate_pgid(pgid)
 
 
+def _drain_workers_before_unlock(threads: set[threading.Thread]) -> None:
+    """Never release the mailbox lock while a request worker can still run.
+
+    A five-second join timeout was unsafe: a worker may still be publishing a
+    result or holding a side-effecting child process when a new daemon acquires
+    the released lock. We deliberately prefer a held service during shutdown
+    to two concurrently executing mailbox consumers.
+    """
+    for worker in list(threads):
+        worker.join()
+
+
 def daemon(config_path: Path) -> None:
     global _WAKE_LEASE
     cfg = load_config(config_path)
@@ -2054,14 +2101,16 @@ def daemon(config_path: Path) -> None:
     finally:
         _SHUTDOWN.set()
         _signal_shutdown(signal.SIGTERM, None)
-        deadline = time.monotonic() + 5
-        for t in list(threads):
-            t.join(timeout=max(0.0, deadline - time.monotonic()))
-        wake.close()
-        _WAKE_LEASE = None
-        lock_file.close()
-        for sig, handler in old_handlers.items():
-            signal.signal(sig, handler)
+        try:
+            # This intentionally has no duration cap. A still-running request
+            # worker makes a clean ownership handover impossible.
+            _drain_workers_before_unlock(threads)
+        finally:
+            wake.close()
+            _WAKE_LEASE = None
+            lock_file.close()
+            for sig, handler in old_handlers.items():
+                signal.signal(sig, handler)
 
 
 def once(config_path: Path) -> None:
