@@ -113,7 +113,7 @@ def inspect_services(home: Path, launchctl_listing: str, process_listing: str | 
                 problems.append("unmanaged bridge daemon PID=" + pid)
     active_collisions = []
     parked_loaded = sorted(record["label"] for record in records if not record["running"])
-    active_consumers = sorted(
+    running_claimants = sorted(
         ({"label": record["label"], "pid": record["pid"],
           "drive_root_folder_id": record.get("drive_root_folder_id"),
           "requests_folder_id": record.get("requests_folder_id"),
@@ -141,7 +141,7 @@ def inspect_services(home: Path, launchctl_listing: str, process_listing: str | 
     # Do NOT mark the system safe merely because an old job currently has no
     # PID: loaded launchd jobs can wake and reacquire the same mailbox.
     return {"schema": 1, "kind": "loaded_bridge_ownership",
-            "loaded": records, "active_consumers": active_consumers,
+            "loaded": records, "running_claimants": running_claimants,
             "parked_loaded": parked_loaded,
             "active_collisions": sorted(set(active_collisions)),
             "problems": sorted(set(problems)),
