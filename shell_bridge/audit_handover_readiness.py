@@ -77,7 +77,13 @@ def audit_inventory(inventory: dict, home: Path, *,
     owner_problems = inventory.get("problems", [])
     if not isinstance(owner_problems, list):
         owner_problems = ["invalid ownership problem list"]
-    local_holds = bool(owner_problems or journal_problems or
+    descriptor_issues = any(
+        item.get("lock_evidence_state") == "unverified" or
+        bool(item.get("unrecognized_open_pids"))
+        for item in lock_evidence.get("lock_evidence", [])
+    )
+    local_holds = bool(inventory.get("safe_to_stage") is not True or
+                       owner_problems or journal_problems or descriptor_issues or
                        any(item.get("status") != "verified" for item in journals) or
                        lock_evidence.get("reason"))
     return {
