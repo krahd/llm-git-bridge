@@ -5,9 +5,11 @@ import subprocess
 import sys
 import tempfile
 import unittest
+from unittest.mock import patch
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 import bridge
+import verify_quiescent_journal
 from verify_quiescent_journal import verify, UnresolvedJournalError
 
 CUTOVER = Path(__file__).resolve().parents[1] / "cutover.sh"
@@ -216,6 +218,37 @@ class QuiescentJournalTests(unittest.TestCase):
         with path.open("ab") as handle:
             handle.truncate(48 * 1024 * 1024 + 1)
         with self.assertRaisesRegex(UnresolvedJournalError, "bounded audit"):
+            verify(self.state)
+
+    def test_more_than_ten_thousand_request_folders_are_not_truncated(self):
+        # Regression: the existing production journal has >10,000 entries.
+        # Empty directories carry no FINISHED claim and exercise enumeration
+        # without inflating CI with 30,000 synthetic receipt files.
+        self.record("completed", "completed")
+        for index in range(10001):
+            (self.journal / ("empty-%05d" % index)).mkdir()
+        counters = verify(self.state)
+        self.assertEqual(counters["finished"], 1)
+        self.assertEqual(counters["started_without_finished"], 0)
+
+    def test_large_journal_holds_at_bounded_entry_limit(self):
+        for index in range(4):
+            self.record("req-%d" % index, "completed")
+        with patch.object(verify_quiescent_journal, "_MAX_JOURNAL_ENTRIES", 3):
+            with self.assertRaisesRegex(UnresolvedJournalError, "entry audit limit"):
+                verify(self.state)
+
+    def test_large_journal_holds_at_wall_clock_budget(self):
+        self.record("completed", "completed")
+        with patch.object(verify_quiescent_journal, "_MAX_JOURNAL_AUDIT_SECONDS", -1):
+            with self.assertRaisesRegex(UnresolvedJournalError, "wall-clock audit limit"):
+                verify(self.state)
+
+    def test_unfinished_started_remains_unsafe_in_streaming_scan(self):
+        folder = self.journal / "pending-effect"
+        folder.mkdir()
+        (folder / "started.json").write_text("{}")
+        with self.assertRaisesRegex(UnresolvedJournalError, "unresolved STARTED"):
             verify(self.state)
 
     def test_cutover_checks_journal_before_and_after_old_owner_shutdown(self):

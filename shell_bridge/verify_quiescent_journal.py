@@ -9,11 +9,11 @@ from __future__ import annotations
 
 import hashlib
 import json
+import os
 import re
 from pathlib import Path
 import sys
-
-from bridge import _result_state_counts
+import time
 
 
 class UnresolvedJournalError(ValueError):
@@ -23,6 +23,10 @@ class UnresolvedJournalError(ValueError):
 _SHA256 = re.compile(r"[0-9a-f]{64}\Z")
 _MAX_RESULT_BYTES = 48 * 1024 * 1024
 _MAX_TOTAL_BYTES = 256 * 1024 * 1024
+# Permit large, established production journals without claiming an incomplete
+# audit is safe. Each journal is fully checked or held at a bounded limit.
+_MAX_JOURNAL_ENTRIES = 100000
+_MAX_JOURNAL_AUDIT_SECONDS = 120
 
 
 def _verify_completed_receipt_pair(folder: Path, budget: int) -> int:
@@ -150,31 +154,51 @@ def verify(state: Path) -> dict:
     journal = state / "requests"
     if journal.is_symlink():
         raise UnresolvedJournalError("journal path is a symlink")
+    counters = {"started_without_finished": 0, "finished": 0,
+                "indeterminate": 0, "unverifiable_finished": 0}
     if journal.exists():
         if not journal.is_dir():
             raise UnresolvedJournalError("journal is not a directory")
-        try:
-            # Bound this safety check; a giant journal is not evidence of
-            # quiescence, and never truncate a listing to claim success.
-            with __import__("os").scandir(journal) as entries:
-                count = sum(1 for _ in entries)
-        except OSError as exc:
-            raise UnresolvedJournalError("journal cannot be enumerated") from exc
-        if count > 10000:
-            raise UnresolvedJournalError("journal has too many entries for bounded audit")
         remaining = _MAX_TOTAL_BYTES
-        for folder in journal.iterdir():
-            if folder.is_symlink() or not folder.is_dir():
-                raise UnresolvedJournalError("journal contains non-directory or linked entry")
-            remaining = _verify_completed_receipt_pair(folder, remaining)
-    counters = _result_state_counts({"state_dir": str(state)})
-    if any(counters.get(key) != 0 for key in
-           ("started_without_finished", "indeterminate", "unverifiable_finished")):
-        raise UnresolvedJournalError(
-            "journal contains unresolved, indeterminate or unreadable requests: " +
-            json.dumps(counters, sort_keys=True))
+        started_at = time.monotonic()
+        try:
+            # One streaming pass avoids materialising a large collection of
+            # path objects or reading every FINISHED marker a second time.
+            # Never truncate the directory to claim safe quiescence.
+            with os.scandir(journal) as entries:
+                for count, entry in enumerate(entries, start=1):
+                    if count > _MAX_JOURNAL_ENTRIES:
+                        raise UnresolvedJournalError(
+                            "journal exceeds bounded entry audit limit")
+                    if count % 128 == 0 and (
+                            time.monotonic() - started_at > _MAX_JOURNAL_AUDIT_SECONDS):
+                        raise UnresolvedJournalError(
+                            "journal exceeds bounded wall-clock audit limit")
+                    if entry.is_symlink() or not entry.is_dir(follow_symlinks=False):
+                        raise UnresolvedJournalError(
+                            "journal contains non-directory or linked entry")
+                    folder = Path(entry.path)
+                    started = folder / "started.json"
+                    finished = folder / "finished.json"
+                    # Verify receipt pairing first to retain a specific
+                    # missing-FINISHED or linked-receipt diagnosis. Then
+                    # reject dangling STARTED evidence even if no result was
+                    # ever persisted. Never infer a replayable effect.
+                    remaining = _verify_completed_receipt_pair(folder, remaining)
+                    if started.is_symlink():
+                        raise UnresolvedJournalError("STARTED marker is symlinked")
+                    if started.exists() and not finished.exists():
+                        raise UnresolvedJournalError(
+                            "journal contains unresolved STARTED without FINISHED")
+                    if finished.exists():
+                        counters["finished"] += 1
+        except UnresolvedJournalError:
+            raise
+        except OSError as exc:
+            raise UnresolvedJournalError("journal cannot be fully enumerated") from exc
+        if time.monotonic() - started_at > _MAX_JOURNAL_AUDIT_SECONDS:
+            raise UnresolvedJournalError("journal exceeds bounded wall-clock audit limit")
     return counters
-
 
 def main(args: list[str]) -> int:
     if len(args) != 2:
