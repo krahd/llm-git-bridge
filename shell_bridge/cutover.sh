@@ -54,6 +54,9 @@ rollback() {
         if ! PYTHONDONTWRITEBYTECODE=1 python3 "$(cd "$(dirname "$0")" && pwd)/verify_quiescent_journal.py" "$LEGACY_STATE_DIR" >/dev/null; then
           V6_UNSAFE_TO_RESTORE=1
         fi
+        if ! PYTHONDONTWRITEBYTECODE=1 python3 "$(cd "$(dirname "$0")" && pwd)/verify_pending_approvals.py" "$LEGACY_STATE_DIR" >/dev/null; then
+          V6_UNSAFE_TO_RESTORE=1
+        fi
         if [ "$V6_UNSAFE_TO_RESTORE" -eq 0 ]; then
           CURRENT_OWNERS="$(PYTHONDONTWRITEBYTECODE=1 python3 "$OWNER_SCRIPT")" ||
             V6_UNSAFE_TO_RESTORE=1
@@ -310,6 +313,11 @@ PENDING="$("${R[@]}" lsf "${REMOTE}requests" --files-only)" || fail "cannot list
 PENDING="$(printf '%s\n' "$PENDING" | sed '/^[[:space:]]*$/d')"
 [ -z "$PENDING" ] || fail "production request mailbox is not empty; finish or reconcile pending requests first"
 
+if [ "$CUTOVER_SOURCE_VERSION" = 6 ]; then
+  PYTHONDONTWRITEBYTECODE=1 python3 "$(cd "$(dirname "$0")" && pwd)/verify_pending_approvals.py" "$LEGACY_STATE_DIR" ||
+    fail "v6 source approval queue cannot be certified empty before shutdown"
+fi
+
 # Historical FINISHED files can still be indeterminate. A clean heartbeat
 # STARTED-without-FINISHED counter is insufficient for a safe handover.
 python3 "$(cd "$(dirname "$0")" && pwd)/verify_quiescent_journal.py" "$LEGACY_STATE_DIR" ||
@@ -405,6 +413,15 @@ fi
 PENDING_AFTER_STOP="$("${R[@]}" lsf "${REMOTE}requests" --files-only)" || fail "cannot list production request mailbox after stopping legacy consumers"
 PENDING_AFTER_STOP="$(printf '%s\n' "$PENDING_AFTER_STOP" | sed '/^[[:space:]]*$/d')"
 [ -z "$PENDING_AFTER_STOP" ] || fail "a request arrived during cutover drain; restoring legacy consumers before retry"
+
+# Stop/drain may have changed approval or durable request state.
+# A pending approval cannot be assumed absent merely because heartbeat
+# reported zero active requests before old launchd shutdown.
+if [ "$CUTOVER_SOURCE_VERSION" = 6 ]; then
+  V6_UNSAFE_TO_RESTORE=1
+  PYTHONDONTWRITEBYTECODE=1 python3 "$(cd "$(dirname "$0")" && pwd)/verify_pending_approvals.py" "$LEGACY_STATE_DIR" ||
+    fail "v6 approval queue changed during the source handover"
+fi
 
 # Stop/drain may have altered durable state since the first snapshot.
 # Re-read local FINISHED/STARTED markers after the old owner has stopped.
