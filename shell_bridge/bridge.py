@@ -1473,6 +1473,69 @@ def canonical_operation_payload(v: dict, cfg: dict) -> str:
     return sha256_bytes(json.dumps(payload, sort_keys=True, separators=(",", ":"), default=str).encode("utf-8"))
 
 
+
+def _verified_logical_original(state: Path, request_id: str,
+                               operation_id: str,
+                               expected_sha: str | None = None) -> dict | None:
+    """Read a terminal logical source only when the request and markers agree.
+
+    The separate write-ahead admission does not authenticate arbitrary local
+    result bytes. A malformed/torn source must never be promoted into a
+    successful replay. This is a bounded, read-only check; it cannot decide
+    whether an indeterminate shell had external effects.
+    """
+    if not ID_RE.fullmatch(request_id):
+        return None
+    folder = state / "requests" / request_id
+    raw_path = folder / "request.json"
+    started = folder / "started.json"
+    active = folder / "active.json"
+    finished = folder / "finished.json"
+    result = folder / "result.json"
+    if (folder.is_symlink() or not folder.is_dir()
+            or any(p.is_symlink() for p in
+                   (raw_path, started, active, finished, result))
+            or active.exists()
+            or any(not p.is_file() for p in (raw_path, finished, result))):
+        return None
+    try:
+        if (raw_path.stat().st_size > 2 * 1024 * 1024
+                or finished.stat().st_size > 65536
+                or result.stat().st_size > 48 * 1024 * 1024):
+            return None
+        raw = raw_path.read_bytes()
+        request_sha = sha256_bytes(raw)
+        request_data = load_json_bytes(raw)
+        finish_data = load_json_bytes(finished.read_bytes())
+        result_data = load_json_bytes(result.read_bytes())
+        if not all(isinstance(x, dict) for x in
+                   (request_data, finish_data, result_data)):
+            return None
+        status = result_data.get("status")
+        if (request_data.get("id") != request_id
+                or request_data.get("operation_id") != operation_id
+                or status not in ("completed", "rejected", "indeterminate")
+                or result_data.get("kind") != "result"
+                or result_data.get("protocol") != 1
+                or result_data.get("id") != request_id
+                or result_data.get("request_sha256") != request_sha
+                or finish_data.get("request_sha256") != request_sha
+                or finish_data.get("status") != status
+                or (expected_sha is not None and expected_sha != request_sha)):
+            return None
+        # Completed execution cannot lack STARTED. A pre-STARTED rejection
+        # or an admission-only indeterminate may legitimately lack it.
+        if status == "completed" and not started.is_file():
+            return None
+        if started.exists():
+            if (not started.is_file() or started.stat().st_size > 65536
+                    or _stored_sha(started) != request_sha):
+                return None
+        return result_data
+    except (OSError, UnicodeError, ValueError, TypeError, RecursionError):
+        return None
+
+
 def process_one(name: str, cfg: dict) -> None:
     """Deduplicate logical operations across different late-arriving Drive IDs.
 
@@ -1563,7 +1626,9 @@ def process_one(name: str, cfg: dict) -> None:
                                 original_active, original_request))):
                         return
                     if original_path.is_file() and original_finished.is_file():
-                        _publish_stored(original_path, name, cfg)
+                        if _verified_logical_original(
+                                state, prior_id, operation_id, sha256_bytes(raw)) is not None:
+                            _publish_stored(original_path, name, cfg)
                         return
                     if original_path.exists() or original_finished.exists():
                         # A partially written terminal pair requires forensic
@@ -1603,16 +1668,16 @@ def process_one(name: str, cfg: dict) -> None:
                 original_dir = state / "requests" / prior_id
                 terminal_path = original_dir / "result.json"
                 finished = original_dir / "finished.json"
-                if terminal_path.is_file() and finished.is_file():
-                    prior = load_json_bytes(terminal_path.read_bytes())
-                    status = prior.get("status", "indeterminate")
+                prior = _verified_logical_original(state, prior_id, operation_id)
+                if prior is not None:
+                    status = prior["status"]
                     details = {k: value for k, value in prior.items() if k not in
                                {"id", "protocol", "kind", "processed_at", "request_sha256", "status"}}
                     details.update({"logical_operation_id": operation_id, "original_request_id": prior_id,
                                     "replayed": True, "original_result_sha256": sha256_file(terminal_path)})
                 else:
                     status, details = "indeterminate", {
-                        "message": "logical operation was admitted without a verified FINISHED result; no replay",
+                        "message": "logical operation source has no verifiable terminal/request pair; no replay",
                         "logical_operation_id": operation_id, "original_request_id": prior_id,
                     }
             request_sha = sha256_bytes(raw)
