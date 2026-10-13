@@ -134,4 +134,42 @@ class LogicalOperationTests(unittest.TestCase):
         self.assertFalse((receipt / "finished.json").exists())
 
 
+
+    def run_without_remote_conflict_publish(self, ids):
+        def persist_conflict(result, local, name, cfg):
+            b.atomic_write(local, json.dumps(result).encode("utf-8"))
+        with patch.object(b, "_write_upload_delete", side_effect=persist_conflict):
+            self.run_requests(ids)
+
+    def test_conflicting_original_id_preserves_admission_and_source(self):
+        self.admit_only()
+        changed = json.loads(self.requests["original.json"])
+        changed["command"] = "printf CHANGED"
+        self.requests["original.json"] = json.dumps(changed).encode("utf-8")
+        self.run_without_remote_conflict_publish(["original"])
+        self.assertEqual(self.execute_count, 0)
+        folder = self.state / "requests" / "original"
+        self.assertFalse((folder / "result.json").exists())
+        self.assertFalse((folder / "finished.json").exists())
+        conflict = json.loads((folder / "logical-conflict-result.json").read_text())
+        self.assertEqual(conflict["status"], "rejected")
+
+    def test_conflicting_retransmission_cannot_overwrite_terminal_replay(self):
+        self.payload("first")
+        self.payload("second")
+        self.run_requests(["first", "second"])
+        self.assertEqual(self.execute_count, 1)
+        folder = self.state / "requests" / "second"
+        old_result = (folder / "result.json").read_bytes()
+        old_finished = (folder / "finished.json").read_bytes()
+        changed = json.loads(self.requests["second.json"])
+        changed["command"] = "printf CHANGED"
+        self.requests["second.json"] = json.dumps(changed).encode("utf-8")
+        self.run_without_remote_conflict_publish(["second"])
+        self.assertEqual(self.execute_count, 1)
+        self.assertEqual((folder / "result.json").read_bytes(), old_result)
+        self.assertEqual((folder / "finished.json").read_bytes(), old_finished)
+        self.assertEqual(json.loads((folder / "logical-conflict-result.json").read_text())
+                         ["status"], "rejected")
+
 if __name__=='__main__':unittest.main()
