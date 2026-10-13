@@ -77,7 +77,11 @@ def audit_inventory(inventory: dict, home: Path, *,
     owner_problems = inventory.get("problems", [])
     if not isinstance(owner_problems, list):
         owner_problems = ["invalid ownership problem list"]
+    local_holds = bool(owner_problems or journal_problems or
+                       any(item.get("status") != "verified" for item in journals) or
+                       lock_evidence.get("reason"))
     return {
+        "local_holds_detected": local_holds,
         "schema": 1,
         "kind": "bridge_local_handover_readonly_audit",
         "running_claimants": inventory.get("running_claimants", []),
@@ -113,9 +117,10 @@ def main() -> int:
         print("LOCAL_HANDOVER_AUDIT_UNAVAILABLE: " + type(exc).__name__, file=sys.stderr)
         return 2
     print(json.dumps(report, sort_keys=True))
-    # This is a diagnosis only. Even clean local journals cannot authorize
-    # cutover without independently verified mailbox/build/rollback gates.
-    return 0
+    # A syntactically successful diagnostic is not a clean local audit.
+    # Code 3 indicates actionable conflicts/holds; code 0 only means
+    # no *local* holds. Neither code authorizes service mutation.
+    return 3 if report["local_holds_detected"] else 0
 
 
 if __name__ == "__main__":
