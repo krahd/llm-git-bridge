@@ -11,6 +11,9 @@ OLD_LABELS=("com.tom.chatgpt-shell-bridge" "io.llm-git-bridge.daemon" "net.laure
 SMOKE_ATTEMPTS="${SMOKE_ATTEMPTS:-30}"
 SMOKE_SLEEP="${SMOKE_SLEEP:-2}"
 RETIRE_OLD_AFTER_SMOKE="${RETIRE_OLD_AFTER_SMOKE:-0}"
+# Default remains the original v5-first cutover. Only the separate v6
+# wrapper may explicitly select the v6-to-v6 handover mode.
+CUTOVER_SOURCE_VERSION="${CUTOVER_SOURCE_VERSION:-5}"
 UID_NOW="$(id -u)"
 ROLLBACK_FILE=""
 TMP_REQ=""
@@ -87,6 +90,15 @@ trap rollback EXIT
 [ "$(uname -s)" = Darwin ] || fail "macOS required"
 need python3; need rclone; need launchctl
 [ "$RETIRE_OLD_AFTER_SMOKE" = 0 ] || fail "legacy retirement requires separate verified production acceptance; RETIRE_OLD_AFTER_SMOKE must be 0"
+case "$CUTOVER_SOURCE_VERSION" in
+  5) ;;
+  6)
+    [ -t 0 ] || fail "v6-to-v6 handover requires out-of-band interactive local Terminal"
+    [ -z "${CHATGPT_SHELL_BRIDGE_REQUEST_ID:-}" ] ||
+      fail "v6-to-v6 handover cannot be submitted through any bridge mailbox"
+    ;;
+  *) fail "unsupported source version; use explicit v6-to-v6 wrapper" ;;
+esac
 [ -f "$NEW_PLIST" ] || fail "staged v6 plist missing: $NEW_PLIST"
 [ -f "$NEW_CONFIG" ] || fail "staged v6 config missing: $NEW_CONFIG"
 [ -f "$NEW_INSTALL_DIR/bridge.py" ] || fail "staged v6 bridge missing: $NEW_INSTALL_DIR/bridge.py"
@@ -213,7 +225,7 @@ fi
 R=(rclone --drive-root-folder-id "$ROOT_ID")
 TMP_HEALTH="$(mktemp)"
 "${R[@]}" copyto "${REMOTE}health.json" "$TMP_HEALTH" >/dev/null 2>&1 || fail "cannot read current production health.json"
-python3 - "$TMP_HEALTH" "$ROOT_ID" "$TARGET_INSTANCE" <<'PYHEALTH'
+python3 - "$TMP_HEALTH" "$ROOT_ID" "$TARGET_INSTANCE" "$CUTOVER_SOURCE_VERSION" <<'PYHEALTH'
 import datetime,json,sys,time
 h=json.load(open(sys.argv[1],encoding='utf-8'))
 if h.get('kind')!='shell_bridge_health':
@@ -221,8 +233,8 @@ if h.get('kind')!='shell_bridge_health':
 if h.get('drive_root_folder_id')!=sys.argv[2] or h.get('bridge_instance_id')!=sys.argv[3]:
     raise SystemExit('production heartbeat does not match the pinned legacy mailbox/instance')
 version=h.get('bridge_version')
-if isinstance(version,bool) or str(version)!='5':
-    raise SystemExit('production mailbox is not owned by v5; reconcile before cutting over')
+if isinstance(version,bool) or str(version)!=sys.argv[4]:
+    raise SystemExit('production mailbox version does not match explicitly selected source mode; reconcile before cutting over')
 active=h.get('active_requests')
 if not isinstance(active,list): raise SystemExit('health.json has no active_requests list')
 if active: raise SystemExit('production bridge is not quiescent; active requests: '+', '.join(map(str,active)))
@@ -262,6 +274,50 @@ PENDING="$(printf '%s\n' "$PENDING" | sed '/^[[:space:]]*$/d')"
 # STARTED-without-FINISHED counter is insufficient for a safe handover.
 python3 "$(cd "$(dirname "$0")" && pwd)/verify_quiescent_journal.py" "$LEGACY_STATE_DIR" ||
   fail "legacy durable journal contains unresolved or indeterminate effects"
+
+if [ "$CUTOVER_SOURCE_VERSION" = 6 ]; then
+  # Existing v6 state includes both historical request receipts and workspace
+  # continuity. Never silently adopt a second journal for a source upgrade.
+  python3 - "$STATE_DIR" "$LEGACY_STATE_DIR" <<'PYUPGRADESTATE' ||
+    fail "v6-to-v6 candidate does not preserve the live durable state path"
+from pathlib import Path
+import sys
+a,b=(Path(v).expanduser().resolve(strict=False) for v in sys.argv[1:])
+raise SystemExit(0 if a == b else 1)
+PYUPGRADESTATE
+
+  # The original v5 cutover script predates v6 production. An explicitly
+  # selected v6 source must also pass the separate PID-bound source gate.
+  # This is pre-stop evidence ONLY, never post-stop/takeover authority.
+  SOURCE_GATE="$(cd "$(dirname "$0")" && pwd)/v6_to_v6_preflight.py"
+  [ -f "$SOURCE_GATE" ] && [ ! -L "$SOURCE_GATE" ] ||
+    fail "v6-to-v6 pre-stop source gate is unavailable"
+  PYTHONDONTWRITEBYTECODE=1 python3 - "$SOURCE_GATE" "$OWNERSHIP"       "$NEW_LABEL" "$NEW_CONFIG" "$TMP_HEALTH" "$STAGED_SOURCE_COMMIT" "$ROOT_ID" <<'PYV6GATE' ||
+    fail "v6-to-v6 source pre-stop identity and quiescence gate did not pass"
+import importlib.util,json,sys
+path,raw,new,config_path,health_path,commit,root=sys.argv[1:]
+spec=importlib.util.spec_from_file_location("v6_to_v6_preflight",path)
+module=importlib.util.module_from_spec(spec)
+spec.loader.exec_module(module)
+inventory=json.loads(raw)
+owners=[r for r in inventory.get("loaded",[])
+        if r.get("drive_root_folder_id")==root]
+if len(owners)!=1:
+    raise SystemExit("HOLD: v6 source must be one loaded mailbox owner")
+source=owners[0]
+candidate=json.load(open(config_path,encoding="utf-8"))
+health=json.load(open(health_path,encoding="utf-8"))
+source_cfg={k:source.get(k) for k in module._ID_FIELDS}
+report=module.assess(
+    inventory,source.get("label"),new,source_cfg,candidate,health,
+    journal_verified=True,pending_mailbox_files=[],
+    candidate_source_commit=commit,candidate_manifest_verified=True)
+if not report["prestop_evidence_consistent"]:
+    raise SystemExit("HOLD: v6 pre-stop gates: "+",".join(report["blockers"]))
+if report["activation_authorized"] is not False:
+    raise SystemExit("HOLD: pre-stop gate attempted to authorize cutover")
+PYV6GATE
+fi
 
 ROLLBACK_FILE="$(mktemp)"
 for label in "${OLD_LABELS[@]}"; do
