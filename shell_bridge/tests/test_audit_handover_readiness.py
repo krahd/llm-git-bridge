@@ -91,6 +91,27 @@ class LocalHandoverReadOnlyTests(unittest.TestCase):
         self.assertFalse(result["exclusive_lock_proved"])
         self.assertFalse(result["retirement_authorized"])
 
+    def test_false_owner_safety_flag_is_a_hold_even_without_details(self):
+        inventory = self.inventory()
+        inventory["problems"] = []
+        report = audit_inventory(inventory, self.home,
+                                 verify=lambda _: {"finished": 0},
+                                 inspect_locks=lambda _: {"lock_evidence": []})
+        self.assertTrue(report["local_holds_detected"])
+
+    def test_unrecognized_open_lock_descriptor_is_a_hold(self):
+        inventory = self.inventory()
+        inventory["problems"] = []
+        inventory["safe_to_stage"] = True
+        report = audit_inventory(
+            inventory, self.home, verify=lambda _: {"finished": 0},
+            inspect_locks=lambda _: {"lock_evidence": [{
+                "lock_evidence_state": "open_descriptors_observed",
+                "unrecognized_open_pids": ["9876"],
+            }]},
+        )
+        self.assertTrue(report["local_holds_detected"])
+
     def test_local_hold_requires_nonzero_exit(self):
         import audit_handover_readiness as module
         from unittest.mock import patch
