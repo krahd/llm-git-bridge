@@ -12,6 +12,7 @@ import os
 from pathlib import Path
 import plistlib
 import sys
+import stat
 
 
 class RestartRegistrationHold(ValueError):
@@ -27,6 +28,35 @@ def bridge_label(label: str) -> bool:
         or s.startswith("net.laurenzo.mac-executor-bridge")
         or (s.startswith("net.laurenzo.") and "bridge" in s)
     )
+
+
+def _read_private_bridge_config(path: Path, home: Path) -> dict:
+    # An untrusted or mutable config makes the future-login mailbox identity
+    # contingent on agent-writable state. Never certify an arbitrary path
+    # merely because its JSON currently contains another mailbox ID.
+    root = home / ".config"
+    if (not path.is_absolute() or path.name != "config.json" or
+            path.parent.parent != root or
+            not path.is_relative_to(root)):
+        raise ValueError("bridge config is outside managed private config")
+    for item in (root, path.parent, path):
+        info = item.lstat()
+        if (info.st_uid != os.getuid() or stat.S_ISLNK(info.st_mode) or
+                info.st_mode & 0o022):
+            raise ValueError("bridge config path is linked or writable by others")
+    fd = os.open(path, os.O_RDONLY | os.O_NOFOLLOW)
+    with os.fdopen(fd, "rb") as handle:
+        meta = os.fstat(handle.fileno())
+        if (not stat.S_ISREG(meta.st_mode) or meta.st_uid != os.getuid()
+                or meta.st_mode & 0o077 or meta.st_size > 2 * 1024 * 1024):
+            raise ValueError("bridge config is not a private bounded file")
+        raw = handle.read(meta.st_size + 1)
+        if len(raw) != meta.st_size:
+            raise ValueError("bridge config changed during inspection")
+    data = json.loads(raw)
+    if not isinstance(data, dict):
+        raise ValueError("bridge config is malformed")
+    return data
 
 
 def inspect_agents(directory: Path, source_label: str, root_id: str,
@@ -90,13 +120,7 @@ def inspect_agents(directory: Path, source_label: str, root_id: str,
                         cfg = Path(args[index + 1])
                     else:
                         cfg = Path(alternatives[0])
-                    if not cfg.is_absolute() or cfg.is_symlink() or not cfg.is_file():
-                        raise ValueError("bridge config is unavailable or linked")
-                    if cfg.stat().st_size > 2 * 1024 * 1024:
-                        raise ValueError("bridge config exceeds bound")
-                    data = json.loads(cfg.read_text(encoding="utf-8"))
-                    if not isinstance(data, dict):
-                        raise ValueError("bridge config is malformed")
+                    data = _read_private_bridge_config(cfg, directory.parent.parent)
                     if data.get("drive_root_folder_id") == root_id:
                         owners.append(label)
                 except (OSError, ValueError, TypeError,
