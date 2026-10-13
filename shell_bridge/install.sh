@@ -17,16 +17,18 @@ SMOKE_SLEEP="${SMOKE_SLEEP:-2}"
 UID_NOW="$(id -u)"
 STARTED_AGENT=0
 STAGE_ONLY=0
+UPGRADE_STAGE=0
 TMP_REQ=""
 RESULT_TMP=""
 TMP_MARKER=""
 INSTALL_LOCK_DIR=""
 INSTALL_LOCK_HELD=0
 
-usage(){ echo "Usage: install.sh [--stage-only]"; }
+usage(){ echo "Usage: install.sh [--stage-only | --upgrade-stage-only]"; }
 while [ "$#" -gt 0 ]; do
   case "$1" in
     --stage-only) STAGE_ONLY=1 ;;
+    --upgrade-stage-only) STAGE_ONLY=1; UPGRADE_STAGE=1 ;;
     --retire-old-after-smoke) echo "ERROR: first-install smoke is not production retirement acceptance" >&2; exit 2 ;;
     -h|--help) usage; exit 0 ;;
     *) echo "ERROR: unknown option: $1" >&2; usage >&2; exit 2 ;;
@@ -54,6 +56,15 @@ trap cleanup EXIT
 
 [ "$(uname -s)" = Darwin ] || { echo "ERROR: this installer is for macOS" >&2; exit 1; }
 need python3; need rclone; need git; need launchctl
+if [ "$UPGRADE_STAGE" -eq 1 ]; then
+  [ -n "${SOURCE_CONFIG_FILE:-}" ] && [ -n "${RCLONE_REMOTE:-}" ] &&
+  [ -n "$ALLOWED_ROOT" ] && [ -n "$STATE_DIR" ] && [ -n "$BASE_PATH" ] || {
+    echo "ERROR: upgrade staging requires source config, remote, mailbox path, allowed root and existing state" >&2; exit 2;
+  }
+  [ -f "$SOURCE_CONFIG_FILE" ] && [ ! -L "$SOURCE_CONFIG_FILE" ] || {
+    echo "ERROR: live source config unavailable or symlinked" >&2; exit 2;
+  }
+fi
 [ -x "$SHELL_BIN" ] || { echo "ERROR: shell is not executable: $SHELL_BIN" >&2; exit 1; }
 
 fail(){ echo "ERROR: $*" >&2; exit 1; }
@@ -164,6 +175,9 @@ PYCOUNT
   if [ "$count" -eq 1 ] && [ "$STAGE_ONLY" -eq 0 ]; then
     fail "direct installation cannot adopt an existing mailbox; stage-only plus guarded owner/journal handover required"
   fi
+  if [ "$UPGRADE_STAGE" -eq 1 ] && [ "$count" -ne 1 ]; then
+    fail "upgrade stage requires exactly one pre-existing production mailbox"
+  fi
   if [ "$count" -eq 0 ]; then
     echo "Creating Drive mailbox: $BASE_PATH"
     rclone mkdir "${REMOTE}${BASE_PATH}"
@@ -257,8 +271,10 @@ if [ "$STAGE_ONLY" -eq 0 ]; then
 fi
 
 R=(rclone --drive-root-folder-id "$ROOT_ID")
-"${R[@]}" mkdir "${REMOTE}requests"
-"${R[@]}" mkdir "${REMOTE}results"
+if [ "$UPGRADE_STAGE" -ne 1 ]; then
+  "${R[@]}" mkdir "${REMOTE}requests"
+  "${R[@]}" mkdir "${REMOTE}results"
+fi
 DIRS_JSON="$("${R[@]}" lsjson "$REMOTE" --dirs-only --max-depth 1)"
 read -r REQUESTS_ID RESULTS_ID < <(python3 - "$DIRS_JSON" <<'PY'
 import json,sys
@@ -267,11 +283,26 @@ print(m.get('requests',''),m.get('results',''))
 PY
 )
 [ -n "$REQUESTS_ID" ] && [ -n "$RESULTS_ID" ] || { echo "ERROR: request/result folder IDs unavailable" >&2; exit 1; }
+if [ "$UPGRADE_STAGE" -eq 1 ]; then
+  # Do not touch the existing state or remote mailbox when preparing a
+  # replacement. All identities must exactly match the trusted source.
+  PYTHONDONTWRITEBYTECODE=1 python3 "$(cd "$(dirname "$0")" && pwd)/verify_upgrade_stage_source.py" \
+    "$SOURCE_CONFIG_FILE" "$REMOTE" "$BASE_PATH" "$ROOT_ID" \
+    "$REQUESTS_ID" "$RESULTS_ID" "$INSTANCE_ID" "$STATE_DIR" \
+    "$ALLOWED_ROOT" "$SHELL_BIN" ||
+    fail "upgrade candidate identities differ from the existing production service"
+fi
 
 echo "Using verified Drive remote: $REMOTE"
 echo "Pinned Drive root ID: $ROOT_ID"
-mkdir -p "$INSTALL_DIR" "$CONFIG_DIR" "$STATE_DIR" "$HOME/Library/LaunchAgents"
-chmod 700 "$INSTALL_DIR" "$CONFIG_DIR" "$STATE_DIR"
+if [ "$UPGRADE_STAGE" -eq 1 ]; then
+  # Existing production state is *read only* for the entire staging path.
+  mkdir -p "$INSTALL_DIR" "$CONFIG_DIR" "$HOME/Library/LaunchAgents"
+  chmod 700 "$INSTALL_DIR" "$CONFIG_DIR"
+else
+  mkdir -p "$INSTALL_DIR" "$CONFIG_DIR" "$STATE_DIR" "$HOME/Library/LaunchAgents"
+  chmod 700 "$INSTALL_DIR" "$CONFIG_DIR" "$STATE_DIR"
+fi
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
 cp "$SCRIPT_DIR/bridge.py" "$INSTALL_DIR/bridge.py"
 cp "$SCRIPT_DIR/workspace.py" "$INSTALL_DIR/workspace.py"
@@ -303,12 +334,12 @@ with open(manifest_path,'w',encoding='utf-8') as f:
 PYMAN
 chmod 600 "$INSTALL_DIR/install-manifest.json"
 
-python3 - "$CONFIG_DIR/config.json" "$REMOTE" "$BASE_PATH" "$ROOT_ID" "$REQUESTS_ID" "$RESULTS_ID" "$INSTANCE_ID" "$ALLOWED_ROOT" "$STATE_DIR" "$SHELL_BIN" "$INSTALL_DIR" <<'PY'
+python3 - "$CONFIG_DIR/config.json" "$REMOTE" "$BASE_PATH" "$ROOT_ID" "$REQUESTS_ID" "$RESULTS_ID" "$INSTANCE_ID" "$ALLOWED_ROOT" "$STATE_DIR" "$SHELL_BIN" "$INSTALL_DIR" "${SOURCE_CONFIG_FILE:-}" "$UPGRADE_STAGE" <<'PY'
 import hashlib,json,os,sys
 from pathlib import Path
-path,remote,base,root_id,req_id,res_id,instance,allowed,state,shell,install_dir=sys.argv[1:]
+path,remote,base,root_id,req_id,res_id,instance,allowed,state,shell,install_dir,source,upgrade=sys.argv[1:]
 try:
-    old=json.load(open(path,encoding='utf-8'))
+    old=json.load(open(source if upgrade=='1' else path,encoding='utf-8'))
 except Exception:
     old={}
 cfg=dict(old)
