@@ -43,6 +43,17 @@ class SingleRunReleaseContractTests(unittest.TestCase):
         self.assertNotIn("git clean -", SCRIPT)
         self.assertNotIn("launchctl bootout", SCRIPT)
 
+    def test_preflight_rejects_split_brain_before_any_staging(self):
+        audit = SCRIPT.index('python3 shell_bridge/audit_handover_readiness.py')
+        heartbeat = SCRIPT.index('verify_v5_production_health.py remote')
+        stage = SCRIPT.index('install.sh --upgrade-stage-only')
+        isolated = SCRIPT.index('prepare_v6_on_mac.sh')
+        self.assertLess(audit, heartbeat)
+        self.assertLess(audit, stage)
+        self.assertLess(audit, isolated)
+        self.assertIn('if ! PYTHONDONTWRITEBYTECODE=1 python3 shell_bridge/audit_handover_readiness.py >/dev/null; then', SCRIPT)
+        self.assertIn('do not create staging or cut over', SCRIPT)
+
     def test_first_cutover_keeps_candidate_inert_until_accepted(self):
         stage = SCRIPT.index('PROD_PLIST="$PROD_INSTALL/launchagent.plist"')
         stage_only = SCRIPT.index('install.sh --upgrade-stage-only')
