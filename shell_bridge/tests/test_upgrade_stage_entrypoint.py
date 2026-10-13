@@ -26,7 +26,7 @@ class ProductionUpgradeStagingGuardTests(unittest.TestCase):
         self.assertIn('verify_upgrade_stage_source.py', text)
         self.assertLess(text.index('if [ "$STAGE_ONLY" -eq 1 ]; then\n  echo'),
                         text.index('launchctl bootstrap "gui/'))
-        self.assertIn("source if upgrade=='1' else path", text)
+        self.assertIn("os.environ['SOURCE_CONFIG_FILE'] if os.environ.get('UPGRADE_STAGE')=='1' else path", text)
 
     def test_staging_wrapper_has_fixed_source_and_no_service_actions(self):
         text = (ROOT / "stage_v6_upgrade.sh").read_text()
