@@ -69,9 +69,9 @@ class V5StateContinuityTests(unittest.TestCase):
             self.assertNotEqual(self.check(home, Path("relative"), Path("relative")).returncode, 0)
             outside = Path(td) / "unrelated"
             outside.mkdir()
-            # Existing deployments may intentionally keep the durable state on
-            # a separate mounted volume. Exact matching nonlinked paths remain valid.
-            self.assertEqual(self.check(home, outside, outside).returncode, 0)
+            # Until independently qualified external-volume handover exists,
+            # v5-to-v6 state must stay beneath the running user's home.
+            self.assertNotEqual(self.check(home, outside, outside).returncode, 0)
 
     def test_gate_occurs_before_first_source_stop_and_candidate_bootstrap(self):
         c = self.source
