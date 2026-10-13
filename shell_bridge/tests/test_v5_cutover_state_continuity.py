@@ -1,87 +1,76 @@
-"""The v5->v6 cutover may never fork request journals, with or without workspaces."""
-import os
+"""v5-to-v6 must preserve exactly the same durable request journal."""
 from pathlib import Path
-import re
 import subprocess
 import sys
 import tempfile
 import unittest
 
-CUTOVER = Path(__file__).resolve().parents[1] / "cutover.sh"
+ROOT = Path(__file__).resolve().parents[1]
+sys.path.insert(0, str(ROOT))
+from verify_v5_state_continuity import V5StateHold, verify
+
+CUTOVER = ROOT / "cutover.sh"
 
 
 class V5StateContinuityTests(unittest.TestCase):
-    @classmethod
-    def setUpClass(cls):
-        cls.source = CUTOVER.read_text()
-        match = re.search(
-            r'SAME_STATE="\$\(python3 - "\$STATE_DIR" "\$LEGACY_STATE_DIR" <<\x27PYSTATE\x27\n(.*?)\nPYSTATE',
-            cls.source, re.S,
-        )
-        if not match:
-            raise AssertionError("expected durable v5 state identity gate")
-        cls.checker = match.group(1)
-
-    def check(self, home, candidate, original):
-        env = os.environ.copy()
-        env["HOME"] = str(home)
-        return subprocess.run(
-            [sys.executable, "-c", self.checker, str(candidate), str(original)],
-            env=env, capture_output=True, text=True, timeout=5,
-        )
-
-    def test_same_journal_without_workspace_directory_is_required_and_allowed(self):
+    def test_same_journal_with_no_workspace_directory(self):
         with tempfile.TemporaryDirectory() as td:
             home = Path(td) / "home"
-            root = home / ".local/state/production"
-            root.mkdir(parents=True)
-            self.assertFalse((root / "workspaces").exists())
-            self.assertEqual(self.check(home, root, root).returncode, 0)
+            source = home / ".local" / "state" / "production"
+            source.mkdir(parents=True)
+            self.assertFalse((source / "workspaces").exists())
+            verify(source, source, home=home)
 
-    def test_different_journal_rejected_even_without_workspace_directory(self):
+    def test_other_state_fails_even_without_workspaces(self):
         with tempfile.TemporaryDirectory() as td:
             home = Path(td) / "home"
-            root = home / ".local/state/production"
-            root.mkdir(parents=True)
-            other = home / ".local/state/candidate"
-            other.mkdir()
-            self.assertNotEqual(self.check(home, other, root).returncode, 0)
+            source = home / ".local" / "state" / "production"
+            source.mkdir(parents=True)
+            new = source.parent / "candidate"
+            new.mkdir()
+            with self.assertRaises(V5StateHold):
+                verify(new, source, home=home)
 
-    def test_symlinked_state_or_ancestor_rejected(self):
+    def test_symlinked_state_and_ancestor_fail(self):
         with tempfile.TemporaryDirectory() as td:
             home = Path(td) / "home"
-            root = home / ".local/state/production"
-            root.mkdir(parents=True)
-            link = home / ".local/state/linked"
-            link.symlink_to(root, target_is_directory=True)
-            self.assertNotEqual(self.check(home, link, link).returncode, 0)
-            parent = home / "statealias"
-            parent.symlink_to(root.parent, target_is_directory=True)
-            child = parent / "production"
-            self.assertNotEqual(self.check(home, child, child).returncode, 0)
+            source = home / ".local" / "state" / "production"
+            source.mkdir(parents=True)
+            linked = source.parent / "linked"
+            linked.symlink_to(source, target_is_directory=True)
+            with self.assertRaises(V5StateHold):
+                verify(linked, linked, home=home)
+            parent = home / "state-alias"
+            parent.symlink_to(source.parent, target_is_directory=True)
+            with self.assertRaises(V5StateHold):
+                verify(parent / source.name, parent / source.name, home=home)
 
-    def test_path_alias_relative_and_outside_home_rejected(self):
+    def test_relative_alias_and_external_state_fail(self):
         with tempfile.TemporaryDirectory() as td:
             home = Path(td) / "home"
-            root = home / ".local/state/production"
-            root.mkdir(parents=True)
-            self.assertNotEqual(self.check(home, root / ".." / "production", root).returncode, 0)
-            self.assertNotEqual(self.check(home, Path("relative"), Path("relative")).returncode, 0)
-            outside = Path(td) / "unrelated"
+            source = home / ".local" / "state" / "production"
+            source.mkdir(parents=True)
+            with self.assertRaises(V5StateHold):
+                verify(Path("relative"), Path("relative"), home=home)
+            with self.assertRaises(V5StateHold):
+                verify(source / ".." / source.name, source, home=home)
+            outside = Path(td) / "external"
             outside.mkdir()
-            # Until independently qualified external-volume handover exists,
-            # v5-to-v6 state must stay beneath the running user's home.
-            self.assertNotEqual(self.check(home, outside, outside).returncode, 0)
+            with self.assertRaises(V5StateHold):
+                verify(outside, outside, home=home)
 
-    def test_gate_occurs_before_first_source_stop_and_candidate_bootstrap(self):
-        c = self.source
-        gate = c.index('SAME_STATE="$(python3 - "$STATE_DIR" "$LEGACY_STATE_DIR"')
-        old_stop = c.index("# Stop old consumers first.")
-        candidate = c.index('launchctl bootstrap "gui/$' + '{UID_NOW}" "$NEW_PLIST"')
-        self.assertLess(gate, old_stop)
-        self.assertLess(old_stop, candidate)
-        self.assertIn("v5 durable journal and workspace state identity differs", c)
-        self.assertIn("stage v6 with STATE_DIR=", c)
+    def test_cli_and_shell_qualify_before_first_stop(self):
+        source = CUTOVER.read_text()
+        gate = source.index('python3 "$STATE_GATE" "$STATE_DIR" "$LEGACY_STATE_DIR"')
+        stop = source.index("# Stop old consumers first.")
+        start = source.index('launchctl bootstrap "gui/$' + '{UID_NOW}" "$NEW_PLIST"')
+        self.assertLess(gate, stop)
+        self.assertLess(stop, start)
+        self.assertIn("stage v6 with STATE_DIR=", source)
+        self.assertIn("verify_v5_state_continuity.py", source)
+        syntax = subprocess.run(["bash", "-n", str(CUTOVER)],
+                                capture_output=True, text=True, timeout=5)
+        self.assertEqual(syntax.returncode, 0, syntax.stderr)
 
 
 if __name__ == "__main__":
