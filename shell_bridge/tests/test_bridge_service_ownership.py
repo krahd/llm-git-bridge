@@ -130,6 +130,29 @@ class LoadedBridgeOwnershipTests(unittest.TestCase):
         self.assertTrue(report["safe_to_stage"])
         self.assertEqual(report["loaded"], [])
 
+    def test_native_approval_ui_agent_does_not_claim_the_mailbox(self):
+        # A native approval menu uses a local-executor-prefixed identifier,
+        # but it cannot consume requests unless a daemon is independently
+        # found in the process inventory.
+        label = "net.laurenzo.local-executor-approval.123"
+        result = inspect_services(
+            self.home,
+            "PID\tStatus\tLabel\n201\t0\t" + label + "\n",
+            "201 /usr/bin/python3 /opt/approval_helper.py\n",
+        )
+        self.assertEqual(result["loaded"], [])
+        self.assertTrue(result["safe_to_stage"])
+
+    def test_disguised_mailbox_daemon_under_approval_label_is_still_rejected(self):
+        label = "net.laurenzo.local-executor-approval.123"
+        result = inspect_services(
+            self.home,
+            "PID\tStatus\tLabel\n201\t0\t" + label + "\n",
+            "201 /usr/bin/python3 /tmp/bridge.py daemon --config /tmp/config.json\n",
+        )
+        self.assertFalse(result["safe_to_stage"])
+        self.assertIn("unmanaged bridge daemon PID=201", result["problems"])
+
     def test_unknown_loaded_bridge_blocks(self):
         result = self.check("net.laurenzo.unexpected-bridge")
         self.assertFalse(result["safe_to_stage"])
