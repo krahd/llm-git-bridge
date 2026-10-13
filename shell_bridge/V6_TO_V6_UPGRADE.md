@@ -27,13 +27,30 @@ The original `cutover.sh` continues to default to v5-first cutover.
 - The controller is an interactive Mac Terminal, never a request processed
   by the bridge being replaced or by the unsafe staging mailbox.
 
-The source transition performs a second mailbox drain and a second journal
-integrity check **after** the old owner stops and **before** the candidate
-starts. A failure before candidate bootstrap attempts to restore the old
-owner. Once the new owner might have executed a command, failure leaves a
-reconciliation hold instead of automatically restarting the old consumer.
-The first successful smoke test results in a **provisional** replacement only,
-not retirement or deletion of older files, receipts, or LaunchAgents.
+The source transition first inspects all directly installed LaunchAgent
+plists for a *future-login* claimant to the production mailbox. It must find
+exactly one old source and no dormant alternative that would reactivate after
+login. Before source bootout it reversibly archives that old plist in a
+private `retired-v6-<source-commit>` directory, while retaining all binaries,
+configuration and journals. The controller performs a second mailbox drain
+and a second journal integrity and approval-queue check **after** the old
+owner stops and **before** the candidate starts.
+
+Only after the candidate publishes exact-build/PID-bound fresh health does
+the controller atomically register its already-staged plist under the direct
+`~/Library/LaunchAgents` directory and independently recheck exclusive
+ownership before a smoke request. No file is overwritten. An ambiguous
+post-admission failure quarantines that new registration and leaves the old
+archived with a durable hold; it does not restart an old daemon that might
+duplicate effects. A proven failure *before* new admission may restore the
+old plist after rechecking source journal, approval queue and loaded owners.
+
+The first successful smoke produces **provisional** v6 service continuity
+with a recorded startup-registration plan, not permanent retirement or a
+tested reboot. The journal receipt explicitly records `reboot_verified=0`.
+End-to-end native Allow/Reject, SSH/pinned-terminal scope, crash containment,
+and actual logout/login restart behavior must still be accepted separately
+before declaring durable production retirement.
 
 ## Operator input contract (do not run against the current Mac state)
 

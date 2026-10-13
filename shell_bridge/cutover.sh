@@ -24,6 +24,13 @@ PROVISIONAL_ACTIVATION=0
 STARTED_NEW=0
 OLD_CONSUMERS_STOPPED=0
 V6_UNSAFE_TO_RESTORE=0
+V6_ARCHIVE_STARTED=0
+V6_TARGET_PERSISTED=0
+V6_OLD_LABEL=""
+V6_OLD_SOURCE_PLIST=""
+V6_ARCHIVE_DIR=""
+V6_PERSIST_PLIST=""
+V6_REGISTRAR="$(cd "$(dirname "$0")" && pwd)/v6_restart_registration.py"
 
 fail(){ echo "ERROR: $*" >&2; exit 1; }
 need(){ command -v "$1" >/dev/null 2>&1 || fail "missing required command: $1"; }
@@ -32,6 +39,12 @@ rollback() {
   rc=$?
   if [ "$rc" -ne 0 ] && [ "$CUTOVER_COMMITTED" -eq 0 ]; then
     if [ "$STARTED_NEW" -eq 1 ]; then
+      if [ "$CUTOVER_SOURCE_VERSION" = 6 ] && [ "$V6_TARGET_PERSISTED" -eq 1 ]; then
+        # Prevent an ambiguous new daemon from auto-starting again at next
+        # login. The original source remains archived, not replayed.
+        python3 "$V6_REGISTRAR" quarantine "$V6_PERSIST_PLIST" "$V6_ARCHIVE_DIR/failed-candidate-$NEW_LABEL.plist" "$NEW_LABEL" ||
+          printf 'CRITICAL: v6 restart registration could not be quarantined.\n' >&2
+      fi
       # v6 might have executed an effect before publishing its result. A
       # successful process shutdown is not evidence that its journal is safe
       # for v5. Hold both consumers rather than blindly replaying requests.
@@ -74,6 +87,12 @@ for item in inventory.get('loaded',[]):
 PYROLLBACKOWN
           fi
         fi
+      fi
+      if [ "$CUTOVER_SOURCE_VERSION" = 6 ] && [ "$V6_UNSAFE_TO_RESTORE" -eq 0 ] && [ "$V6_ARCHIVE_STARTED" -eq 1 ]; then
+        # Only before new-v6 admission, and after rechecking live journal,
+        # approval queue and loaded owners, restore the original login plist.
+        python3 "$V6_REGISTRAR" restore "$V6_ARCHIVE_DIR/$V6_OLD_LABEL.plist" "$V6_OLD_SOURCE_PLIST" "$V6_OLD_LABEL" ||
+          V6_UNSAFE_TO_RESTORE=1
       fi
       if [ "$CUTOVER_SOURCE_VERSION" = 6 ] && [ "$V6_UNSAFE_TO_RESTORE" -eq 1 ]; then
         # An unexpected claimant appeared after the source stopped. Restoring
@@ -365,6 +384,27 @@ if report["activation_authorized"] is not False:
 PYV6GATE
 fi
 
+if [ "$CUTOVER_SOURCE_VERSION" = 6 ]; then
+  [ -f "$V6_REGISTRAR" ] && [ ! -L "$V6_REGISTRAR" ] ||
+    fail "v6 login restart registration helper is unavailable"
+  LOGIN_GATE="$(cd "$(dirname "$0")" && pwd)/verify_v6_login_claimants.py"
+  [ -f "$LOGIN_GATE" ] && [ ! -L "$LOGIN_GATE" ] ||
+    fail "read-only future-login owner inspector is unavailable"
+  [ "${#OLD_LABELS[@]}" -eq 1 ] ||
+    fail "v6-to-v6 handover requires exactly one source registration"
+  V6_OLD_LABEL="${OLD_LABELS[0]}"
+  V6_OLD_SOURCE_PLIST="$HOME/Library/LaunchAgents/$V6_OLD_LABEL.plist"
+  V6_ARCHIVE_DIR="$HOME/Library/LaunchAgents/retired-v6-${EXPECTED_SOURCE_COMMIT:0:12}"
+  V6_PERSIST_PLIST="$HOME/Library/LaunchAgents/$NEW_LABEL.plist"
+  # The candidate must remain outside auto-loaded LaunchAgents until it
+  # proves exact-build/PID and is the only possible mailbox consumer.
+  case "$NEW_PLIST" in "$HOME/Library/LaunchAgents/"*) fail "v6 candidate plist must be staged inertly" ;; esac
+  [ ! -e "$V6_PERSIST_PLIST" ] && [ ! -L "$V6_PERSIST_PLIST" ] ||
+    fail "v6 replacement already has a persistent registration"
+  PYTHONDONTWRITEBYTECODE=1 python3 "$LOGIN_GATE" "$HOME/Library/LaunchAgents" "$V6_OLD_LABEL" "$ROOT_ID" >/dev/null ||
+    fail "source is not the only potential login owner of production mailbox"
+fi
+
 ROLLBACK_FILE="$(mktemp)"
 for label in "${OLD_LABELS[@]}"; do
   plist="$HOME/Library/LaunchAgents/$label.plist"
@@ -373,6 +413,16 @@ for label in "${OLD_LABELS[@]}"; do
     printf '%s|%s\n' "$label" "$plist" >> "$ROLLBACK_FILE"
   fi
 done
+
+# A future login during the handover must not wake the old mailbox owner.
+# Reversibly archive its startup plist BEFORE stopping the process. Any
+# ambiguous failed transition preserves a HOLD, not two login registrations.
+if [ "$CUTOVER_SOURCE_VERSION" = 6 ]; then
+  OLD_CONSUMERS_STOPPED=1
+  V6_ARCHIVE_STARTED=1
+  python3 "$V6_REGISTRAR" archive "$V6_OLD_SOURCE_PLIST" "$V6_ARCHIVE_DIR" "$V6_OLD_LABEL" ||
+    fail "could not archive v6 source restart registration safely"
+fi
 
 # Stop old consumers first. Only then may v6 attach to the same production mailbox.
 for label in "${OLD_LABELS[@]}"; do
@@ -459,6 +509,12 @@ if [ "${LIVE_HEALTH_CONFIRMED:-0}" != 1 ]; then
   fail "production daemon exact build, PID, or heartbeat not verified; rollback remains guarded"
 fi
 if [ "$CUTOVER_SOURCE_VERSION" = 6 ]; then
+  # Only after exact PID/build identity is confirmed, publish the already
+  # staged candidate plist as the single future-login production registration.
+  # Mark intent first because file creation and acknowledgement can diverge.
+  V6_TARGET_PERSISTED=1
+  python3 "$V6_REGISTRAR" publish "$NEW_PLIST" "$V6_PERSIST_PLIST" "$NEW_LABEL" ||
+    fail "candidate login restart registration could not be verified"
   # A fresh PID-bound health record is still not evidence that no second
   # LaunchAgent joined the mailbox during startup. Re-snapshot launchd after
   # successful candidate health verification and before the smoke request.
@@ -536,6 +592,12 @@ if [ -s "$ROLLBACK_FILE" ]; then
   chmod 600 "$STATE_DIR/cutover-rollback-services.tsv"
 fi
 printf 'source=%s\nlabel=%s\nsmoke_id=%s\nstate=provisional\n' "$STAGED_SOURCE_COMMIT" "$NEW_LABEL" "$RID" > "$STATE_DIR/cutover-provisional.txt"
+if [ "$CUTOVER_SOURCE_VERSION" = 6 ]; then
+  printf 'old_label=%s\nold_archived=%s\nnew_label=%s\nnew_persisted=%s\nreboot_verified=0\n' \
+    "$V6_OLD_LABEL" "$V6_ARCHIVE_DIR/$V6_OLD_LABEL.plist" "$NEW_LABEL" "$V6_PERSIST_PLIST" \
+    > "$STATE_DIR/v6-upgrade-restart-registration.txt"
+  chmod 600 "$STATE_DIR/v6-upgrade-restart-registration.txt"
+fi
 chmod 600 "$STATE_DIR/cutover-provisional.txt"
 CUTOVER_COMMITTED=1
 

@@ -18,6 +18,12 @@ IDENTITY = ("bridge_instance_id", "drive_root_folder_id",
             "requests_folder_id", "results_folder_id", "state_dir")
 def _belongs_to_bridge_ecosystem(label: str) -> bool:
     value = label.lower()
+    # The native menu approval app can have its own LaunchAgent. It is not
+    # a mailbox daemon and has no --config mailbox identity to inspect.
+    # A disguised bridge.py daemon under this label is still detected as
+    # an unmanaged process by the independent ps inventory.
+    if value.startswith("net.laurenzo.local-executor-approval"):
+        return False
     return (
         value.startswith("io.llm-git-bridge.")
         or value.startswith("com.tom.chatgpt-shell-bridge")
