@@ -65,6 +65,14 @@ class V6UpgradeControllerTests(unittest.TestCase):
                         c.index("# End-to-end production smoke:"))
         self.assertIn("v6 replacement is not the exclusive loaded mailbox owner", c)
         self.assertIn("v6_upgrade_owner_race_hold", c)
+        rollback = c.split("rollback() {", 1)[1].split("trap rollback EXIT", 1)[0]
+        # Restoring an old v6 process after an ambiguous stop also requires
+        # a *fresh* locally verified journal and rechecked loaded ownership.
+        self.assertIn("PYROLLBACKOWN", rollback)
+        self.assertIn("verify_quiescent_journal.py", rollback)
+        self.assertLess(rollback.index("verify_quiescent_journal.py"),
+                        rollback.index("restoring previously active bridge service"))
+        self.assertIn("V6_UNSAFE_TO_RESTORE=1", rollback)
 
 
 if __name__ == "__main__":
