@@ -85,6 +85,17 @@ class FutureLoginOwnerTests(unittest.TestCase):
         with self.assertRaises(RestartRegistrationHold):
             inspect_agents(self.agents, self.label, "PROD")
 
+    def test_agent_writable_plist_registration_is_not_trusted(self):
+        source = self.agents / (self.label + ".plist")
+        source.chmod(0o666)
+        with self.assertRaises(RestartRegistrationHold):
+            inspect_agents(self.agents, self.label, "PROD")
+
+    def test_world_writable_launchagents_directory_is_not_trusted(self):
+        self.agents.chmod(0o777)
+        with self.assertRaises(RestartRegistrationHold):
+            inspect_agents(self.agents, self.label, "PROD")
+
     def test_public_readable_config_is_not_trusted(self):
         self.cfg.chmod(0o644)
         with self.assertRaises(RestartRegistrationHold):
