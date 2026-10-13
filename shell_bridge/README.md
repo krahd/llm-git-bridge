@@ -136,6 +136,12 @@ Even zero findings from triage do not authorize cutover.
 
 ### Guarded v6-to-v6 replacement: source pre-stop contract
 
+For an existing v6 installation, use the separately controlled
+`stage_v6_upgrade.sh` / `install.sh --upgrade-stage-only` workflow described
+in [V6_UPGRADE_STAGING.md](V6_UPGRADE_STAGING.md). It prepares a fresh
+candidate without changing the running state directory, remote mailbox, or
+launchd job. Staging is **not** activation.
+
 The existing `cutover.sh` is the **v5-first** cutover, not a v6-to-v6
 upgrader; do not run it on production already reporting bridge version 6.
 The `v6_to_v6_preflight.py` module supplies a separately tested, pure
