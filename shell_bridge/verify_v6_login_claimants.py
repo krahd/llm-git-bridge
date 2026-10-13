@@ -11,8 +11,6 @@ import json
 import os
 from pathlib import Path
 import plistlib
-import re
-import stat
 import sys
 
 
@@ -59,10 +57,12 @@ def inspect_agents(directory: Path, source_label: str, root_id: str,
                     if suspect:
                         raise RestartRegistrationHold("irregular bridge LaunchAgent registration")
                     continue
+                is_bridge_command = False
                 try:
                     if entry.stat(follow_symlinks=False).st_size > 65536:
                         raise ValueError("plist too large")
-                    with open(entry.path, "rb") as stream:
+                    fd = os.open(entry.path, os.O_RDONLY | os.O_NOFOLLOW)
+                    with os.fdopen(fd, "rb") as stream:
                         value = plistlib.load(stream)
                     if not isinstance(value, dict):
                         raise ValueError("invalid plist object")
@@ -100,7 +100,7 @@ def inspect_agents(directory: Path, source_label: str, root_id: str,
                         owners.append(label)
                 except (OSError, ValueError, TypeError,
                         plistlib.InvalidFileException) as exc:
-                    if suspect or "bridge.py" in " ".join(value.get("ProgramArguments", [])) if isinstance(value, dict) else suspect:
+                    if suspect or is_bridge_command:
                         raise RestartRegistrationHold(
                             "unverifiable bridge LaunchAgent registration") from exc
     except RestartRegistrationHold:
