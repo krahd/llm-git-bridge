@@ -272,7 +272,9 @@ if h.get('drive_root_folder_id')!=sys.argv[2] or h.get('bridge_instance_id')!=sy
     raise SystemExit('production heartbeat does not match the pinned legacy mailbox/instance')
 version=h.get('bridge_version')
 if isinstance(version,bool) or str(version)!=sys.argv[4]:
-    raise SystemExit('production mailbox version does not match explicitly selected source mode; reconcile before cutting over')
+    if sys.argv[4]=='5':
+        raise SystemExit('production mailbox is not owned by v5; reconcile before cutting over')
+    raise SystemExit('production mailbox is not owned by v6; reconcile before cutting over')
 active=h.get('active_requests')
 if not isinstance(active,list): raise SystemExit('health.json has no active_requests list')
 if active: raise SystemExit('production bridge is not quiescent; active requests: '+', '.join(map(str,active)))
