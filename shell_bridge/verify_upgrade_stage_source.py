@@ -71,10 +71,9 @@ def verify(source_path: Path, expected: dict, *, home: Path | None = None) -> No
         left, right = source[key], expected[key]
         if key == "remote":
             left, right = _remote(left), _remote(right)
-        if key in ("state_dir", "allowed_root"):
-            # Aliases must not disguise a different journal or allowed root.
-            left = str(Path(left).resolve(strict=False))
-            right = str(Path(right).resolve(strict=False))
+        # Exact durable state and allowed-root strings are required. A
+        # symlink/relative alias could change targets between stage and
+        # cutover, even if it resolves to the same path at inspection time.
         if left != right:
             raise StageSourceError("replacement differs from source " + key)
     state = Path(source["state_dir"])
