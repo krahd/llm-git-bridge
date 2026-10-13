@@ -68,7 +68,8 @@ rollback() {
       # semantics for v5 as for v6; never replay unknown effects.
       if [ "$CUTOVER_SOURCE_VERSION" = 5 ]; then
         V5_UNSAFE_TO_RESTORE=1
-        if PYTHONDONTWRITEBYTECODE=1 python3 "$(cd "$(dirname "$0")" && pwd)/verify_quiescent_journal.py" "$LEGACY_STATE_DIR" >/dev/null; then
+        if PYTHONDONTWRITEBYTECODE=1 python3 "$(cd "$(dirname "$0")" && pwd)/verify_quiescent_journal.py" "$LEGACY_STATE_DIR" >/dev/null &&
+           PYTHONDONTWRITEBYTECODE=1 python3 "$(cd "$(dirname "$0")" && pwd)/verify_pending_approvals.py" "$LEGACY_STATE_DIR" >/dev/null; then
           V5_CURRENT_OWNERS="$(PYTHONDONTWRITEBYTECODE=1 python3 "$OWNER_SCRIPT")" || V5_CURRENT_OWNERS=""
           if [ -n "$V5_CURRENT_OWNERS" ]; then
             if python3 - "$V5_CURRENT_OWNERS" "$ROOT_ID" "${OLD_LABELS[@]}" <<'PYV5RESTORE'
@@ -123,12 +124,12 @@ PYROLLBACKOWN
         # An unresolved journal or another owner appeared after the source
         # stopped. Restarting either v5 or v6 could duplicate effects.
         mkdir -p "$STATE_DIR"; chmod 700 "$STATE_DIR" || true
-        printf '%s\n' "v6_upgrade_owner_race_hold $(date -u +%Y-%m-%dT%H:%M:%SZ)" > "$STATE_DIR/cutover-reconciliation-required"
+        printf '%s\n' "pre_admission_source_restoration_hold $(date -u +%Y-%m-%dT%H:%M:%SZ)" > "$STATE_DIR/cutover-reconciliation-required"
         if [ -n "$ROLLBACK_FILE" ] && [ -s "$ROLLBACK_FILE" ]; then
           cp -p "$ROLLBACK_FILE" "$STATE_DIR/cutover-rollback-services.tsv"
           chmod 600 "$STATE_DIR/cutover-rollback-services.tsv"
         fi
-        printf 'CRITICAL: new owner appeared; keep old v6 stopped until local journal/mailbox reconciliation.\n' >&2
+        printf 'CRITICAL: source rollback evidence is unsafe or incomplete; keep old consumer stopped until journal/owner reconciliation.\n' >&2
       else
         # No new-v6 admission was possible and the last owner snapshot was
         # exclusive; restore only the original source service.
