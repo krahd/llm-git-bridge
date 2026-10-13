@@ -320,15 +320,15 @@ import sys
 candidate,source=(Path(v).expanduser() for v in sys.argv[1:])
 if not candidate.is_absolute() or not source.is_absolute() or candidate != source:
     raise SystemExit(1)
-# A linked alias can redirect to a different journal between admission and
-# bootstrap. Neither the state directory nor any user-home ancestor may link.
-home=Path.home()
-if home not in source.parents:
-    raise SystemExit(1)
+# A linked alias can redirect to another journal between admission and
+# bootstrap. Inspect every path component, including external volumes, not
+# only the final state directory; nonlinked exact external paths are valid.
 at=source
-while at!=home:
+while True:
     if at.is_symlink():
         raise SystemExit(1)
+    if at==at.parent:
+        break
     at=at.parent
 print('1')
 PYSTATE
