@@ -69,7 +69,8 @@ class V5RestorationGuardTests(unittest.TestCase):
                         v.index('python3 "$OWNER_SCRIPT"'))
         restore = b.index('launchctl bootstrap "gui/${UID_NOW}" "$plist"')
         self.assertLess(b.index('V5_UNSAFE_TO_RESTORE" -eq 1'), restore)
-        self.assertIn("pre_admission_source_restoration_hold", b)
+        self.assertIn("v5_pre_admission_rollback_hold", b)
+        self.assertIn("v6_upgrade_owner_race_hold", b)
         self.assertIn("cutover-reconciliation-required", b)
         self.assertIn("cutover-rollback-services.tsv", b)
 
