@@ -23,6 +23,7 @@ CUTOVER_COMMITTED=0
 PROVISIONAL_ACTIVATION=0
 STARTED_NEW=0
 OLD_CONSUMERS_STOPPED=0
+V6_UNSAFE_TO_RESTORE=0
 
 fail(){ echo "ERROR: $*" >&2; exit 1; }
 need(){ command -v "$1" >/dev/null 2>&1 || fail "missing required command: $1"; }
@@ -46,6 +47,17 @@ rollback() {
         chmod 600 "$STATE_DIR/cutover-rollback-services.tsv"
       fi
     elif [ "$OLD_CONSUMERS_STOPPED" -eq 1 ]; then
+      if [ "$CUTOVER_SOURCE_VERSION" = 6 ] && [ "$V6_UNSAFE_TO_RESTORE" -eq 1 ]; then
+        # An unexpected claimant appeared after the source stopped. Restoring
+        # the old daemon would risk concurrent execution of the same request.
+        mkdir -p "$STATE_DIR"; chmod 700 "$STATE_DIR" || true
+        printf '%s\n' "v6_upgrade_owner_race_hold $(date -u +%Y-%m-%dT%H:%M:%SZ)" > "$STATE_DIR/cutover-reconciliation-required"
+        if [ -n "$ROLLBACK_FILE" ] && [ -s "$ROLLBACK_FILE" ]; then
+          cp -p "$ROLLBACK_FILE" "$STATE_DIR/cutover-rollback-services.tsv"
+          chmod 600 "$STATE_DIR/cutover-rollback-services.tsv"
+        fi
+        printf 'CRITICAL: new owner appeared; keep old v6 stopped until local journal/mailbox reconciliation.\n' >&2
+      else
       # No v6 admission was possible; restoring the original consumer does
       # not introduce a v6/v5 duplicate-execution race.
       echo "Cutover failed after stopping legacy consumers; restoring previously active bridge service(s)." >&2
@@ -75,6 +87,7 @@ rollback() {
           cp -p "$ROLLBACK_FILE" "$STATE_DIR/cutover-rollback-services.tsv"
           chmod 600 "$STATE_DIR/cutover-rollback-services.tsv"
         fi
+      fi
       fi
     fi
   fi
@@ -342,6 +355,29 @@ for label in "${OLD_LABELS[@]}"; do
     fail "legacy service is still loaded after bootout: $label"
   fi
 done
+
+# Re-read loaded ownership after stopping the source. A new/parked
+# consumer which wakes during the stop window must not be joined by the new
+# v6 instance, and must not trigger automatic old-v6 restoration.
+if [ "$CUTOVER_SOURCE_VERSION" = 6 ]; then
+  V6_UNSAFE_TO_RESTORE=1
+  POST_STOP_OWNERSHIP="$(PYTHONDONTWRITEBYTECODE=1 python3 "$OWNER_SCRIPT")" ||
+    fail "v6 ownership changed or is unverifiable after source shutdown"
+  python3 - "$POST_STOP_OWNERSHIP" "$ROOT_ID" <<'PYPOSTOWN'
+import json,sys
+inventory=json.loads(sys.argv[1]); root=sys.argv[2]
+if inventory.get('safe_to_stage') is not True or inventory.get('problems'):
+    raise SystemExit('HOLD: ambiguous loaded bridge ownership after stop')
+if any(r.get('drive_root_folder_id')==root or
+       r.get('requests_folder_id') in (None,) or
+       r.get('results_folder_id') in (None,)
+       for r in []):
+    raise SystemExit('HOLD: unreachable owner identity guard')
+if any(r.get('drive_root_folder_id')==root for r in inventory.get('loaded',[])):
+    raise SystemExit('HOLD: another loaded bridge claimed production during handover')
+PYPOSTOWN
+  V6_UNSAFE_TO_RESTORE=0
+fi
 
 # Close the drain race: after legacy consumers are stopped, refuse to attach v6
 # if a request arrived while the stop sequence was in progress. Rollback will
