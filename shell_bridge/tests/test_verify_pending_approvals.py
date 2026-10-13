@@ -63,7 +63,9 @@ class ApprovalQueueDrainTests(unittest.TestCase):
     def test_controller_checks_before_after_and_rollback(self):
         c = (ROOT / "cutover.sh").read_text()
         marker = "verify_pending_approvals.py"
-        self.assertEqual(c.count(marker), 3)
+        # Both v5 and v6 restorations must verify approvals, in addition to
+        # the pre-stop and post-stop v6 admission checks.
+        self.assertEqual(c.count(marker), 4)
         stop = c.index("# Stop old consumers first.")
         before = c.index(marker)
         after = c.index(marker, stop)
