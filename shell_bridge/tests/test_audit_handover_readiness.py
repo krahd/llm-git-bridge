@@ -52,6 +52,7 @@ class LocalHandoverReadOnlyTests(unittest.TestCase):
         self.assertEqual(report["unique_journal_dirs_checked"], 2)
         self.assertEqual(len([r for r in report["journals"] if r["status"] == "hold"]), 1)
         self.assertEqual(report["ownership_problems"], ["shared production state"])
+        self.assertTrue(report["local_holds_detected"])
         self.assertFalse(report["exclusive_lock_proved"])
         self.assertFalse(report["lock_descriptor_evidence"]["exclusive_lock_proved"])
         self.assertFalse(report["remote_mailbox_quiescence_verified"])
@@ -73,7 +74,35 @@ class LocalHandoverReadOnlyTests(unittest.TestCase):
         )
         self.assertEqual(set(observed), {self.prod, self.stage})
         self.assertEqual(len(result["journal_problems"]), 3)
+        self.assertTrue(result["local_holds_detected"])
         self.assertFalse(result["retirement_authorized"])
+
+    def test_clean_local_inventory_does_not_authorize_cutover(self):
+        inventory = self.inventory()
+        inventory["problems"] = []
+        inventory["safe_to_stage"] = True
+        inventory["loaded"] = inventory["loaded"][:1]
+        result = audit_inventory(
+            inventory, self.home,
+            verify=lambda _: {"finished": 0, "started_without_finished": 0},
+            inspect_locks=lambda _: {"lock_evidence": [], "exclusive_lock_proved": True},
+        )
+        self.assertFalse(result["local_holds_detected"])
+        self.assertFalse(result["exclusive_lock_proved"])
+        self.assertFalse(result["retirement_authorized"])
+
+    def test_local_hold_requires_nonzero_exit(self):
+        import audit_handover_readiness as module
+        from unittest.mock import patch
+        from io import StringIO
+        inventory = self.inventory()
+        with patch.object(module.subprocess, "run") as run, \
+             patch.object(module, "inspect_services", return_value=inventory), \
+             patch.object(module, "audit_inventory", return_value={
+                 "local_holds_detected": True}), \
+             patch("sys.stdout", new_callable=StringIO):
+            run.return_value.returncode = 0
+            self.assertEqual(module.main(), 3)
 
     def test_too_many_service_records_rejected_before_journal_traversal(self):
         inventory = self.inventory()
