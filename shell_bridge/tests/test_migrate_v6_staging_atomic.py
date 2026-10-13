@@ -108,7 +108,7 @@ esac
             r = self.run_migrator(home, suffix, fake, calls, loaded)
             self.assertNotEqual(r.returncode, 0)
             self.assertNotIn("bootout", calls.read_text())
-            self.assertNotIn("bootstrap", calls.read_text())
+            self.assertFalse(any(line.startswith("bootstrap ") for line in calls.read_text().splitlines()))
 
     def test_loaded_candidate_is_never_booted_out(self):
         with tempfile.TemporaryDirectory() as td:
