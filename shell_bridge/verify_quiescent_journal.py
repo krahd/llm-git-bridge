@@ -148,10 +148,91 @@ def _verify_completed_receipt_pair(folder: Path, budget: int) -> int:
     return budget - meta.st_size - finish_stat.st_size
 
 
+
+def _verify_logical_admissions(state: Path, budget: int, started_at: float) -> None:
+    """Fail closed on admission-only logical operations invisible to request counters.
+
+    An admission is persisted *before* STARTED. A crash in that interval can
+    leave an operation reserved with no request journal folder at all. The
+    request-only gate would previously certify such a state as quiescent.
+    This check never repairs, deletes, replays or reclassifies an admission.
+    """
+    operations = state / "operations"
+    if operations.is_symlink():
+        raise UnresolvedJournalError("logical operation directory is symlinked")
+    if not operations.exists():
+        return
+    if not operations.is_dir():
+        raise UnresolvedJournalError("logical operation path is not a directory")
+    try:
+        with os.scandir(operations) as entries:
+            for count, entry in enumerate(entries, start=1):
+                if count > _MAX_JOURNAL_ENTRIES:
+                    raise UnresolvedJournalError("logical admissions exceed bounded entry audit limit")
+                if count % 128 == 0 and time.monotonic() - started_at > _MAX_JOURNAL_AUDIT_SECONDS:
+                    raise UnresolvedJournalError("logical admissions exceed bounded wall-clock audit limit")
+                if (entry.is_symlink() or not entry.is_dir(follow_symlinks=False)
+                        or _SHA256.fullmatch(entry.name) is None):
+                    raise UnresolvedJournalError("logical admission directory is malformed or linked")
+                folder = Path(entry.path)
+                marker = folder / "admitted.json"
+                if marker.is_symlink() or not marker.is_file():
+                    raise UnresolvedJournalError("logical operation is missing an immutable admission")
+                if marker.stat().st_size > 65536 or marker.stat().st_size > budget:
+                    raise UnresolvedJournalError("logical admission exceeds bounded audit budget")
+                data = json.loads(marker.read_text(encoding="utf-8"))
+                budget -= marker.stat().st_size
+                if not isinstance(data, dict):
+                    raise UnresolvedJournalError("logical admission metadata is malformed")
+                operation_id = data.get("operation_id")
+                original_id = data.get("original_request_id")
+                digest = data.get("payload_sha256")
+                if (not isinstance(operation_id, str)
+                        or re.fullmatch(r"[a-z0-9][a-z0-9._-]{0,127}", operation_id) is None
+                        or hashlib.sha256(operation_id.encode("ascii")).hexdigest() != entry.name
+                        or not isinstance(original_id, str)
+                        or re.fullmatch(r"[a-z0-9][a-z0-9._-]{0,127}", original_id) is None
+                        or original_id in (".", "..")
+                        or not isinstance(digest, str) or _SHA256.fullmatch(digest) is None):
+                    raise UnresolvedJournalError("logical admission identity is malformed")
+                source = state / "requests" / original_id
+                request = source / "request.json"
+                finished = source / "finished.json"
+                result = source / "result.json"
+                if (source.is_symlink() or not source.is_dir()
+                        or any(p.is_symlink() or not p.is_file()
+                               for p in (request, finished, result))):
+                    raise UnresolvedJournalError("logical admission has no complete source receipt")
+                size = request.stat().st_size
+                if size > 2 * 1024 * 1024 or size > budget:
+                    raise UnresolvedJournalError("logical admission request exceeds audit budget")
+                raw = request.read_bytes()
+                budget -= len(raw)
+                original = json.loads(raw)
+                finish_data = json.loads(finished.read_text(encoding="utf-8"))
+                if (not isinstance(original, dict) or not isinstance(finish_data, dict)
+                        or original.get("id") != original_id
+                        or original.get("operation_id") != operation_id
+                        or hashlib.sha256(raw).hexdigest() != finish_data.get("request_sha256")):
+                    raise UnresolvedJournalError("logical admission/source request identities disagree")
+                # The request journal pass has already verified the FINISHED/
+                # result pair and refused indeterminate or dangling STARTED.
+                # We cannot reproduce the canonical execution-scope digest
+                # without the original runtime config: retain it but do not
+                # claim full semantic re-verification from this state-only gate.
+    except UnresolvedJournalError:
+        raise
+    except (OSError, UnicodeError, ValueError, TypeError) as exc:
+        raise UnresolvedJournalError("logical admission inventory is unreadable") from exc
+    if time.monotonic() - started_at > _MAX_JOURNAL_AUDIT_SECONDS:
+        raise UnresolvedJournalError("logical admissions exceed bounded wall-clock audit limit")
+
+
 def verify(state: Path) -> dict:
     if state.is_symlink() or not state.is_dir():
         raise UnresolvedJournalError("state path is missing or symlinked")
     journal = state / "requests"
+    audit_started_at = time.monotonic()
     if journal.is_symlink():
         raise UnresolvedJournalError("journal path is a symlink")
     counters = {"started_without_finished": 0, "finished": 0,
@@ -198,6 +279,8 @@ def verify(state: Path) -> dict:
             raise UnresolvedJournalError("journal cannot be fully enumerated") from exc
         if time.monotonic() - started_at > _MAX_JOURNAL_AUDIT_SECONDS:
             raise UnresolvedJournalError("journal exceeds bounded wall-clock audit limit")
+    _verify_logical_admissions(state, remaining if journal.exists() else _MAX_TOTAL_BYTES,
+                               audit_started_at)
     return counters
 
 def main(args: list[str]) -> int:
