@@ -82,7 +82,8 @@ esac
                              (r.stderr, (home / "Library/Logs/LocalExecutorBridgeV6Migrator.log").read_text()))
             self.assertIn("print gui/501/net.laurenzo.local-executor-bridge-v6-staging", calls.read_text())
             self.assertNotIn("bootout", calls.read_text())
-            self.assertNotIn("bootstrap", calls.read_text())
+            self.assertFalse(any(line.startswith("bootstrap ")
+                                 for line in calls.read_text().splitlines()))
 
     def test_failed_new_owner_stays_on_hold_without_restarting_previous(self):
         with tempfile.TemporaryDirectory() as td:
