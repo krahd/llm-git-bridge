@@ -291,8 +291,7 @@ python3 "$(cd "$(dirname "$0")" && pwd)/verify_quiescent_journal.py" "$LEGACY_ST
 if [ "$CUTOVER_SOURCE_VERSION" = 6 ]; then
   # Existing v6 state includes both historical request receipts and workspace
   # continuity. Never silently adopt a second journal for a source upgrade.
-  python3 - "$STATE_DIR" "$LEGACY_STATE_DIR" <<'PYUPGRADESTATE' ||
-    fail "v6-to-v6 candidate does not preserve the live durable state path"
+  python3 - "$STATE_DIR" "$LEGACY_STATE_DIR" <<'PYUPGRADESTATE' || fail "v6-to-v6 candidate does not preserve the live durable state path"
 from pathlib import Path
 import sys
 a,b=(Path(v).expanduser().resolve(strict=False) for v in sys.argv[1:])
@@ -305,8 +304,7 @@ PYUPGRADESTATE
   SOURCE_GATE="$(cd "$(dirname "$0")" && pwd)/v6_to_v6_preflight.py"
   [ -f "$SOURCE_GATE" ] && [ ! -L "$SOURCE_GATE" ] ||
     fail "v6-to-v6 pre-stop source gate is unavailable"
-  PYTHONDONTWRITEBYTECODE=1 python3 - "$SOURCE_GATE" "$OWNERSHIP"       "$NEW_LABEL" "$NEW_CONFIG" "$TMP_HEALTH" "$STAGED_SOURCE_COMMIT" "$ROOT_ID" <<'PYV6GATE' ||
-    fail "v6-to-v6 source pre-stop identity and quiescence gate did not pass"
+  PYTHONDONTWRITEBYTECODE=1 python3 - "$SOURCE_GATE" "$OWNERSHIP"       "$NEW_LABEL" "$NEW_CONFIG" "$TMP_HEALTH" "$STAGED_SOURCE_COMMIT" "$ROOT_ID" <<'PYV6GATE' || fail "v6-to-v6 source pre-stop identity and quiescence gate did not pass"
 import importlib.util,json,sys
 path,raw,new,config_path,health_path,commit,root=sys.argv[1:]
 spec=importlib.util.spec_from_file_location("v6_to_v6_preflight",path)
@@ -422,8 +420,7 @@ if [ "$CUTOVER_SOURCE_VERSION" = 6 ]; then
   # successful candidate health verification and before the smoke request.
   V6_ACTIVATED_OWNERSHIP="$(PYTHONDONTWRITEBYTECODE=1 python3 "$OWNER_SCRIPT")" ||
     fail "v6 activation ownership is unverifiable"
-  python3 - "$V6_ACTIVATED_OWNERSHIP" "$ROOT_ID" "$NEW_LABEL" <<'PYFINALOWN' ||
-    fail "v6 replacement is not the exclusive loaded mailbox owner"
+  python3 - "$V6_ACTIVATED_OWNERSHIP" "$ROOT_ID" "$NEW_LABEL" <<'PYFINALOWN' || fail "v6 replacement is not the exclusive loaded mailbox owner"
 import json,sys
 inventory=json.loads(sys.argv[1]); root,label=sys.argv[2:]
 if inventory.get('safe_to_stage') is not True or inventory.get('problems'):
