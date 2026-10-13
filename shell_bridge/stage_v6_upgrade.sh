@@ -18,8 +18,15 @@ case "$EXPECTED_SOURCE_COMMIT" in *[!a-f0-9]*|'') fail "invalid pinned revision"
 ROOT="$(cd "$(dirname "$0")/.." && pwd -P)"
 [ "$(git -C "$ROOT" rev-parse HEAD)" = "$EXPECTED_SOURCE_COMMIT" ] ||
   fail "staging checkout is not the pinned source revision"
-for path in shell_bridge/install.sh shell_bridge/bridge.py \
-            shell_bridge/approval_gui.swift shell_bridge/verify_upgrade_stage_source.py; do
+for path in shell_bridge/install.sh shell_bridge/stage_v6_upgrade.sh \
+            shell_bridge/bridge.py shell_bridge/workspace.py \
+            shell_bridge/approval_helper.py shell_bridge/trusted_operations.py \
+            shell_bridge/bridge_mailbox_inspector.py \
+            shell_bridge/ssh_pinned_helper.py shell_bridge/approval_gui.swift \
+            shell_bridge/assets/bridge-menubar.png \
+            shell_bridge/verify_upgrade_stage_source.py; do
+  git -C "$ROOT" ls-files --error-unmatch -- "$path" >/dev/null ||
+    fail "untracked installation input is not covered by the pinned revision"
   git -C "$ROOT" diff --quiet HEAD -- "$path" ||
     fail "source checkout has modified installation inputs"
 done
