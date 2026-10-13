@@ -1545,7 +1545,7 @@ def _verified_logical_original(state: Path, request_id: str,
                     or _stored_sha(started) != request_sha):
                 return None
         return result_data
-    except (OSError, UnicodeError, ValueError, TypeError, RecursionError):
+    except (OSError, UnicodeError, ValueError, TypeError, KeyError, RecursionError):
         return None
 
 
