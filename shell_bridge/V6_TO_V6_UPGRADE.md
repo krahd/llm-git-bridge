@@ -20,6 +20,10 @@ The original `cutover.sh` continues to default to v5-first cutover.
   without indeterminate completions, missing STARTED/FINISHED evidence or
   unbounded audit failures. The production remote request mailbox is
   independently and completely confirmed empty.
+- The local operator-approval queue is independently confirmed absent or
+  empty **before stop, after stop and before any old-v6 restoration**. Linked,
+  unreadable and expired-but-retained approval records do not count as empty;
+  the heartbeat's `active_requests` field alone does not prove this.
 - The controller is an interactive Mac Terminal, never a request processed
   by the bridge being replaced or by the unsafe staging mailbox.
 
