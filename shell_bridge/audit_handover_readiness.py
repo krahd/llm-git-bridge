@@ -8,21 +8,27 @@ installed build identity, approval acceptance, or cutover authorization.
 from __future__ import annotations
 
 import json
+import re
 from pathlib import Path
 import subprocess
 import sys
 
 from bridge_lock_observer import inspect as inspect_lock_descriptors
+from inspect_indeterminate_journal import (InventoryUnavailable,
+                                            inspect as inspect_unresolved_requests)
 from bridge_service_ownership import inspect_services
 from verify_quiescent_journal import UnresolvedJournalError, verify as verify_journal
 
 
 MAX_LOADED_SERVICES = 64
 MAX_UNIQUE_STATES = 64
+_REQUEST_ID = re.compile(r"[a-z0-9][a-z0-9._-]{0,127}\\Z")
+
 
 
 def audit_inventory(inventory: dict, home: Path, *,
-                    verify=verify_journal, inspect_locks=inspect_lock_descriptors) -> dict:
+                    verify=verify_journal, inspect_locks=inspect_lock_descriptors,
+                    inspect_unresolved=inspect_unresolved_requests) -> dict:
     """Aggregate bounded local evidence without mutating or granting authority."""
     loaded = inventory.get("loaded")
     if not isinstance(loaded, list) or len(loaded) > MAX_LOADED_SERVICES:
@@ -64,8 +70,45 @@ def audit_inventory(inventory: dict, home: Path, *,
             journals.append({"state_dir": str(state), "status": "verified",
                              "counters": counters})
         except (UnresolvedJournalError, OSError, ValueError) as exc:
-            journals.append({"state_dir": str(state), "status": "hold",
-                             "reason": str(exc)[:400]})
+            item = {"state_dir": str(state), "status": "hold",
+                    "reason": str(exc)[:400]}
+            if isinstance(exc, UnresolvedJournalError):
+                # A historical ambiguous receipt previously forced another
+                # operator Terminal command just to learn which request was
+                # involved. Include a bounded redacted forensic *summary*
+                # in this same read-only audit. Never downgrade its HOLD.
+                try:
+                    raw = inspect_unresolved(state)
+                    examples = []
+                    for example in raw.get("examples", [])[:40]:
+                        request_id = example.get("request_id")
+                        if not isinstance(request_id, str) or not _REQUEST_ID.fullmatch(request_id):
+                            request_id = "<invalid-request-id>"
+                        labels = example.get("labels", [])
+                        if not isinstance(labels, list):
+                            labels = []
+                        examples.append({"request_id": request_id,
+                                         "labels": [x for x in labels
+                                                    if x in {"indeterminate",
+                                                             "started_without_finished",
+                                                             "active_marker", "linked_marker",
+                                                             "unverifiable_finished",
+                                                             "unverifiable_result",
+                                                             "receipt_pair_mismatch"}]})
+                    item["unresolved_inventory"] = {
+                        "status": "scanned" if raw.get("complete_scan") is True else "unavailable",
+                        "scanned": raw.get("scanned", 0),
+                        "issue_count": raw.get("issue_count", 0),
+                        "indeterminate_count": raw.get("indeterminate_count", 0),
+                        "started_without_finished_count": raw.get("started_without_finished_count", 0),
+                        "examples": examples,
+                        "examples_truncated": raw.get("examples_truncated", False),
+                        "replay_authorized": False,
+                    }
+                except (InventoryUnavailable, OSError, ValueError):
+                    item["unresolved_inventory"] = {
+                        "status": "unavailable", "replay_authorized": False}
+            journals.append(item)
     try:
         lock_evidence = inspect_locks(inventory)
     except (OSError, ValueError, subprocess.TimeoutExpired):
