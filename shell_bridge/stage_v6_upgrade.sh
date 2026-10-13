@@ -56,7 +56,10 @@ LABEL="net.laurenzo.local-executor-bridge-v6-$UPGRADE_SUFFIX"
 LOCAL_EXECUTOR_LABEL="$LABEL"
 INSTALL_DIR="$HOME/.local/share/local-executor-bridge-v6-$UPGRADE_SUFFIX"
 CONFIG_DIR="$HOME/.config/local-executor-bridge-v6-$UPGRADE_SUFFIX"
-PLIST="$HOME/Library/LaunchAgents/$LABEL.plist"
+# Park the prepared plist outside ~/Library/LaunchAgents. A LaunchAgent
+# sitting there may be automatically loaded on a later login even when
+# install.sh did not explicitly bootstrap it.
+PLIST="$INSTALL_DIR/launchagent.plist"
 export LOCAL_EXECUTOR_LABEL INSTALL_DIR CONFIG_DIR PLIST
 [ ! -e "$INSTALL_DIR" ] && [ ! -e "$CONFIG_DIR" ] && [ ! -e "$PLIST" ] ||
   fail "fresh candidate path already exists; do not overwrite it"
