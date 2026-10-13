@@ -66,6 +66,16 @@ def inspect_agents(directory: Path, source_label: str, root_id: str,
             not source_label or not root_id or
             not bridge_label(source_label)):
         raise RestartRegistrationHold("invalid LaunchAgents source or mailbox")
+    # A mutable registration directory can replace a trusted plist between
+    # inspection and the next login. The user must own both directories.
+    try:
+        for folder in (directory.parent, directory):
+            meta = folder.lstat()
+            if (not stat.S_ISDIR(meta.st_mode) or meta.st_uid != os.getuid()
+                    or meta.st_mode & 0o022):
+                raise RestartRegistrationHold("LaunchAgents registration directory is not private")
+    except OSError as exc:
+        raise RestartRegistrationHold("LaunchAgents registration ownership unavailable") from exc
     owners: list[str] = []
     checked = 0
     try:
@@ -107,6 +117,9 @@ def inspect_agents(directory: Path, source_label: str, root_id: str,
                         for a in args)
                     if not suspect and not is_bridge_command:
                         continue
+                    meta = entry.stat(follow_symlinks=False)
+                    if meta.st_uid != os.getuid() or meta.st_mode & 0o022:
+                        raise ValueError("bridge LaunchAgent registration is writable by others")
                     if value.get("Label") != label:
                         raise ValueError("launchd label and filename differ")
                     indexes = [i for i, x in enumerate(args) if x == "--config"]
