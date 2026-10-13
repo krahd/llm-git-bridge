@@ -253,19 +253,23 @@ PROD_LABEL="net.laurenzo.local-executor-bridge-v6-production-${SOURCE:0:12}"
 PROD_INSTALL="$HOME/.local/share/local-executor-bridge-v6-production-${SOURCE:0:12}"
 PROD_CONFIG_DIR="$HOME/.config/local-executor-bridge-v6-production-${SOURCE:0:12}"
 PROD_CONFIG="$PROD_CONFIG_DIR/config.json"
-PROD_PLIST="$HOME/Library/LaunchAgents/$PROD_LABEL.plist"
+# Never stage a RunAtLoad plist inside the auto-loaded LaunchAgents folder.
+# It may start on a future login before a safe old/new ownership handover.
+PROD_PLIST="$PROD_INSTALL/launchagent.plist"
+PROD_PERSIST_PLIST="$HOME/Library/LaunchAgents/$PROD_LABEL.plist"
 if launchctl print "gui/$(id -u)/$PROD_LABEL" >/dev/null 2>&1 ||
    [ -e "$PROD_INSTALL" ] || [ -L "$PROD_INSTALL" ] ||
    [ -e "$PROD_CONFIG_DIR" ] || [ -L "$PROD_CONFIG_DIR" ] ||
-   [ -e "$PROD_PLIST" ] || [ -L "$PROD_PLIST" ]; then
-  fail "production v6 installation is already present; never overwrite/replay"
+   [ -e "$PROD_PLIST" ] || [ -L "$PROD_PLIST" ] ||
+   [ -e "$PROD_PERSIST_PLIST" ] || [ -L "$PROD_PERSIST_PLIST" ]; then
+  fail "production v6 installation or persistent registration is already present; never overwrite/replay"
 fi
-REGISTER_MAILBOX_INSPECTOR=1 \
+SOURCE_CONFIG_FILE="$LEGACY_CONFIG" REGISTER_MAILBOX_INSPECTOR=1 \
 RCLONE_REMOTE="$PROD_REMOTE" BASE_PATH="$PROD_BASE" \
 ALLOWED_ROOT="$PROD_ALLOWED" STATE_DIR="$PROD_STATE" \
 LOCAL_EXECUTOR_LABEL="$PROD_LABEL" INSTALL_DIR="$PROD_INSTALL" \
 CONFIG_DIR="$PROD_CONFIG_DIR" PLIST="$PROD_PLIST" \
-bash shell_bridge/install.sh --stage-only
+bash shell_bridge/install.sh --upgrade-stage-only
 python3 - "$PROD_CONFIG" "$PROD_ROOT" "$PROD_REQ" "$PROD_RES" "$PROD_STATE" "$PROD_INSTANCE" <<'PYMATCH'
 import json,sys
 c=json.load(open(sys.argv[1],encoding="utf-8"))
@@ -377,6 +381,18 @@ for ((i=0;i<${#OLD_PLISTS[@]};i++)); do
   [ -f "${OLD_ARCHIVED[i]}" ] && [ ! -e "${OLD_PLISTS[i]}" ] ||
     fail "legacy archive postcondition failed"
 done
+# Old v5 login registrations have now been archived reversibly. Publish the
+# new, exact staged plist as the *only* future-login production owner. The
+# v6 binary is already running and has passed native approval, build/PID
+# and unique owner acceptance. A publish failure preserves a HOLD rather
+# than silently putting both versions back into LaunchAgents.
+REGISTRATION_HELPER="$ROOT/shell_bridge/v6_restart_registration.py"
+[ -f "$REGISTRATION_HELPER" ] && [ ! -L "$REGISTRATION_HELPER" ] ||
+  fail "no verified v6 restart registration helper; retain old archive and provisional bridge"
+PYTHONDONTWRITEBYTECODE=1 python3 "$REGISTRATION_HELPER" publish "$PROD_PLIST" "$PROD_PERSIST_PLIST" "$PROD_LABEL" ||
+  fail "v6 production future-login registration failed; preserve old archive and provisional service"
+[ -f "$PROD_PERSIST_PLIST" ] && [ ! -L "$PROD_PERSIST_PLIST" ] ||
+  fail "new v6 LaunchAgent persistence cannot be verified"
 python3 - "$PROD_STATE/v6-release-acceptance.json" "$SOURCE" "$PROD_LABEL" "$ARCHIVE_DIR" <<'PYACCEPT'
 import json,os,sys,tempfile,time
 path,source,label,archive=sys.argv[1:]
@@ -386,6 +402,8 @@ receipt={
     "native_operator_approval_verified":True,
     "v5_launchagents_archived":archive,
     "legacy_state_preserved":True,
+    "v6_launchagent_registered_for_next_login":True,
+    "reboot_verified":False,
     # The reversible LaunchAgent archive prevents dual consumers on login,
     # but does not certify crash/lost-result or cross-version journal recovery.
     "recovery_fault_injection_live_verified":False,
@@ -404,6 +422,7 @@ finally:
     if os.path.exists(tmp):os.unlink(tmp)
 PYACCEPT
 echo "V6_PRODUCTION_PROVISIONAL_HANDED_OVER_WITH_RECOVERY_PENDING=1"
-echo "Reversible v5 LaunchAgent archive prevents dual consumers after login; legacy binary, config, journals and rollback evidence preserved."
+echo "Reversible v5 LaunchAgent archive and verified new v6 registration prevent two configured future-login mailbox owners; old state preserved."
+echo "REBOOT_VERIFIED=0: no actual logout/login acceptance has been performed."
 echo "V5_SUNSET_READY=0: complete live crash/lost-result recovery and independent client acceptance before permanent retirement."
 
