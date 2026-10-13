@@ -107,12 +107,23 @@ def inspect_agents(directory: Path, source_label: str, root_id: str,
                         value = plistlib.load(stream)
                     if not isinstance(value, dict):
                         raise ValueError("invalid plist object")
+                    program = value.get("Program")
+                    if program is not None and not isinstance(program, str):
+                        if suspect:
+                            raise ValueError("bridge process Program field is invalid")
+                        continue
+                    program_claims_bridge = isinstance(program, str) and (
+                        "bridge.py" in program or "shell_bridge" in program)
+                    # Set the suspicious-program flag *before* validating
+                    # ProgramArguments: otherwise an unknown-label
+                    # Program-only bridge could be discarded in the catch.
+                    is_bridge_command = program_claims_bridge
                     args = value.get("ProgramArguments")
                     if not isinstance(args, list) or not all(isinstance(a, str) for a in args):
-                        if suspect:
+                        if suspect or program_claims_bridge:
                             raise ValueError("bridge process args unavailable")
                         continue
-                    is_bridge_command = any(
+                    is_bridge_command = program_claims_bridge or any(
                         "bridge.py" in a or "shell_bridge" in a
                         for a in args)
                     if not suspect and not is_bridge_command:
