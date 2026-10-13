@@ -54,6 +54,17 @@ class V6UpgradeControllerTests(unittest.TestCase):
         self.assertLess(c.index("STARTED_NEW=1"), start)
         self.assertIn("cutover-reconciliation-required", c)
         self.assertIn("CUTOVER_COMMITTED=1", c)
+        # A newly indeterminate journal after stopping v6 cannot silently
+        # restart the original service, and a second loaded owner must block
+        # acceptance before a production smoke request is submitted.
+        second_journal = c.rindex('verify_quiescent_journal.py" "$LEGACY_STATE_DIR"')
+        hold_mark = c.rindex("V6_UNSAFE_TO_RESTORE=1")
+        self.assertLess(hold_mark, second_journal)
+        self.assertIn("V6_ACTIVATED_OWNERSHIP=", c)
+        self.assertLess(c.index("V6_ACTIVATED_OWNERSHIP="),
+                        c.index("# End-to-end production smoke:"))
+        self.assertIn("v6 replacement is not the exclusive loaded mailbox owner", c)
+        self.assertIn("v6_upgrade_owner_race_hold", c)
 
 
 if __name__ == "__main__":
