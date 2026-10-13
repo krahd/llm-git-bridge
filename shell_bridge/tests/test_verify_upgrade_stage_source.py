@@ -21,6 +21,7 @@ class UpgradeStageSourceTests(unittest.TestCase):
         self.config_path.parent.mkdir(parents=True)
         self.state = self.home / ".local" / "state" / "chatgpt-shell-bridge"
         self.state.mkdir(parents=True)
+        self.state.chmod(0o700)
         self.allowed = self.home / "tom-repos"
         self.allowed.mkdir()
         self.source = {
@@ -36,6 +37,7 @@ class UpgradeStageSourceTests(unittest.TestCase):
             "oauth_token": "NEVER_EXPOSE_SECRET",
         }
         self.config_path.write_text(json.dumps(self.source))
+        self.config_path.chmod(0o600)
         self.expected = {k: v for k, v in self.source.items()
                          if k != "oauth_token"}
 
@@ -62,6 +64,11 @@ class UpgradeStageSourceTests(unittest.TestCase):
         self.config_path.unlink()
         self.config_path.symlink_to(alias)
         with self.assertRaisesRegex(StageSourceError, "trusted"):
+            verify(self.config_path, self.expected, home=self.home)
+
+    def test_source_config_cannot_expose_stored_credentials(self):
+        self.config_path.chmod(0o644)
+        with self.assertRaisesRegex(StageSourceError, "private"):
             verify(self.config_path, self.expected, home=self.home)
 
     def test_foreign_or_writable_state_directory_is_rejected(self):
