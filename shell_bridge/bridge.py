@@ -1522,12 +1522,32 @@ def process_one(name: str, cfg: dict) -> None:
                 original = load_json_bytes(admitted.read_bytes())
             except (OSError, ValueError):
                 original = None
-            if not isinstance(original, dict) or original.get("operation_id") != operation_id:
+            prior_id = original.get("original_request_id") if isinstance(original, dict) else None
+            if (not isinstance(original, dict)
+                    or original.get("operation_id") != operation_id
+                    or not isinstance(prior_id, str)
+                    or ID_RE.fullmatch(prior_id) is None):
+                # Never resolve a persisted path through corrupt admission
+                # metadata. The incoming transport ID is not an alternative
+                # source of truth for the admitted original.
                 status, details = "indeterminate", {"message": "logical operation admission record is corrupt; no replay"}
             elif original.get("payload_sha256") != digest:
                 status, details = "rejected", {"message": "logical operation ID reused for conflicting canonical payload"}
+                if v["id"] == prior_id:
+                    # An attempt to reuse the ORIGINAL transport ID with
+                    # different bytes must never replace its immutable
+                    # STARTED/FINISHED/result evidence, including when the
+                    # crash happened before any request folder existed.
+                    request_dir = state / "requests" / v["id"]
+                    if request_dir.is_symlink():
+                        return
+                    request_dir.mkdir(parents=True, exist_ok=True)
+                    result = result_envelope(v["id"], sha256_bytes(raw), status, details)
+                    _write_upload_delete(
+                        result, request_dir / "logical-conflict-result.json", name, cfg
+                    )
+                    return
             else:
-                prior_id = original["original_request_id"]
                 if v["id"] == prior_id:
                     original_dir = state / "requests" / prior_id
                     original_path = original_dir / "result.json"
