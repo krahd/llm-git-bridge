@@ -59,6 +59,69 @@ class LocalHandoverReadOnlyTests(unittest.TestCase):
         self.assertFalse(report["retirement_authorized"])
         self.assertFalse(report["mutations_performed"])
 
+    def test_one_pass_audit_identifies_indeterminate_request_without_exposing_contents(self):
+        requested = []
+        def verify(path):
+            if path == self.prod:
+                raise UnresolvedJournalError("journal contains indeterminate completion")
+            return {"finished": 12, "started_without_finished": 0}
+        def forensic(path):
+            requested.append(path)
+            return {
+                "complete_scan": True,
+                "scanned": 12953,
+                "issue_count": 2,
+                "indeterminate_count": 1,
+                "started_without_finished_count": 0,
+                "examples_truncated": False,
+                "examples": [
+                    {"request_id": "v6-owner-audit-20261011-readonly-a2",
+                     "labels": ["indeterminate"], "command": "NEVER_EXPOSE_COMMAND"},
+                    {"request_id": "../SECRET_IN_DIR_NAME",
+                     "labels": ["active_marker", "unverifiable_result"],
+                     "oauth_token": "NEVER_EXPOSE_TOKEN"},
+                ],
+            }
+        report = audit_inventory(
+            self.inventory(), self.home, verify=verify,
+            inspect_locks=lambda _: {"lock_evidence": []},
+            inspect_unresolved=forensic,
+        )
+        self.assertEqual(requested, [self.prod])
+        self.assertTrue(report["local_holds_detected"])
+        self.assertFalse(report["retirement_authorized"])
+        self.assertFalse(report["mutations_performed"])
+        entry = next(item for item in report["journals"]
+                     if item["state_dir"] == str(self.prod))
+        details = entry["unresolved_inventory"]
+        self.assertEqual(details["status"], "scanned")
+        self.assertEqual(details["indeterminate_count"], 1)
+        self.assertEqual(details["examples"][0]["request_id"],
+                         "v6-owner-audit-20261011-readonly-a2")
+        self.assertEqual(details["examples"][1]["request_id"], "<invalid-request-id>")
+        self.assertFalse(details["replay_authorized"])
+        import json
+        data = json.dumps(report)
+        for secret in ("NEVER_EXPOSE_COMMAND", "NEVER_EXPOSE_TOKEN",
+                       "SECRET_IN_DIR_NAME"):
+            self.assertNotIn(secret, data)
+
+    def test_unavailable_forensic_pass_never_reclassifies_a_journal_hold(self):
+        from inspect_indeterminate_journal import InventoryUnavailable
+        def failed(_):
+            raise InventoryUnavailable("unavailable")
+        report = audit_inventory(
+            self.inventory(), self.home,
+            verify=lambda _: (_ for _ in ()).throw(UnresolvedJournalError("indeterminate")),
+            inspect_locks=lambda _: {"lock_evidence": []},
+            inspect_unresolved=failed,
+        )
+        self.assertTrue(report["local_holds_detected"])
+        self.assertEqual(len(report["journals"]), 2)
+        self.assertTrue(all(j["status"] == "hold" for j in report["journals"]))
+        self.assertTrue(all(j["unresolved_inventory"]["status"] == "unavailable"
+                            for j in report["journals"]))
+
     def test_unverified_and_outside_state_dirs_fail_closed_without_traversal(self):
         observed = []
         inventory = self.inventory()
