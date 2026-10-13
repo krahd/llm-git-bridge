@@ -35,6 +35,8 @@ For repository changes, use `workspace.py` rather than editing canonical branche
 
 For sustained use, configure your own Google OAuth Desktop client for the rclone Drive remote rather than relying on rclone's shared client identity.
 
+**October–November 2026 Google Workspace OAuth change:** the `is_agentic` classification applies to dedicated OAuth clients used by AI agents, including this bridge's automated transport. The 11 November restriction applies to Google's hosted **Workspace MCP** servers, not automatically to our current rclone/Drive REST mailbox. Before the setting becomes permanent on 12 November, inventory the actual active client ID, separate agent and non-agent clients, and avoid changing live credentials during an unresolved owner/journal handover. See [agentic OAuth decision and safe credential transition](../docs/GOOGLE-WORKSPACE-AGENTIC-OAUTH-2026.md).
+
 ## Fresh installation
 
 Clone this repository and run the Local Executor Bridge installer:
