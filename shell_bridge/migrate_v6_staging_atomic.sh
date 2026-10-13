@@ -25,10 +25,12 @@ need python3; need "$LAUNCHCTL"
 PREVIOUS_LABEL=""
 PREVIOUS_PLIST=""
 NEW_STARTED=0
+PREVIOUS_STOPPED=0
 COMMITTED=0
+HOLD_FILE="$LOG_DIR/LocalExecutorBridgeV6Migrator.hold"
 consider_previous(){
   label="$1"; plist="$2"
-  [ "$label" != "$NEW_LABEL" ] || return 0
+  [ "$label" != "$NEW_LABEL" ] && [ "$label" != "$OLD_LABEL" ] || return 0
   if "$LAUNCHCTL" print "gui/$UID_NOW/$label" >/dev/null 2>&1; then
     [ -z "$PREVIOUS_LABEL" ] || fail "multiple active v6 staging services: $PREVIOUS_LABEL and $label"
     PREVIOUS_LABEL="$label"; PREVIOUS_PLIST="$plist"
@@ -38,22 +40,47 @@ rollback(){
   rc=$?
   if [ "$rc" -ne 0 ] && [ "$COMMITTED" -eq 0 ]; then
     echo "ROLLBACK rc=$rc"
-    if [ "$NEW_STARTED" -eq 1 ]; then "$LAUNCHCTL" bootout "gui/$UID_NOW/$NEW_LABEL" >/dev/null 2>&1 || true; fi
-    if [ -n "$PREVIOUS_LABEL" ] && [ -f "$PREVIOUS_PLIST" ]; then
-      "$LAUNCHCTL" bootstrap "gui/$UID_NOW" "$PREVIOUS_PLIST" >/dev/null 2>&1 || true
-      "$LAUNCHCTL" kickstart -k "gui/$UID_NOW/$PREVIOUS_LABEL" >/dev/null 2>&1 || true
+    if [ "$NEW_STARTED" -eq 1 ]; then
+      # Bootstrap can start even when launchctl returns nonzero, and a worker
+      # may already have executed a side effect. Do not restart the old owner.
+      "$LAUNCHCTL" bootout "gui/$UID_NOW/$NEW_LABEL" >/dev/null 2>&1 || true
+      printf 'HOLD: v6 candidate may have admitted work. Do not restore previous staging owner without mailbox and journal reconciliation.\n' > "$HOLD_FILE"
+      chmod 600 "$HOLD_FILE"
+    elif [ "$PREVIOUS_STOPPED" -eq 1 ]; then
+      # No new candidate was bootstrapped. Only restore an old owner whose
+      # loaded launchd state can be independently inspected.
+      if [ -n "$PREVIOUS_PLIST" ] && [ -f "$PREVIOUS_PLIST" ]; then
+        if ! "$LAUNCHCTL" print "gui/$UID_NOW/$PREVIOUS_LABEL" >/dev/null 2>&1; then
+          "$LAUNCHCTL" bootstrap "gui/$UID_NOW" "$PREVIOUS_PLIST" >/dev/null 2>&1 || true
+        fi
+        if ! "$LAUNCHCTL" print "gui/$UID_NOW/$PREVIOUS_LABEL" >/dev/null 2>&1; then
+          printf 'HOLD: previous staging owner could not be restored. Inspect launchd before retry.\n' > "$HOLD_FILE"
+          chmod 600 "$HOLD_FILE"
+        fi
+      else
+        printf 'HOLD: previous staging owner has no verified rollback plist.\n' > "$HOLD_FILE"
+        chmod 600 "$HOLD_FILE"
+      fi
     fi
   fi
   exit "$rc"
 }
 trap rollback EXIT
 [ -f "$OLD_PLIST" ] || fail "old v6 staging plist missing: $OLD_PLIST"
-consider_previous "$OLD_LABEL" "$OLD_PLIST"
-for plist in "$HOME_ROOT"/Library/LaunchAgents/net.laurenzo.local-executor-bridge-v6-candidate-*.plist; do
+if "$LAUNCHCTL" print "gui/$UID_NOW/$OLD_LABEL" >/dev/null 2>&1; then
+  PREVIOUS_LABEL="$OLD_LABEL"; PREVIOUS_PLIST="$OLD_PLIST"
+fi
+# Include manual-bootstrap, staging, candidate and every dynamic v6 label.
+# The former candidate-only glob missed the actual duplicate staging daemon.
+for plist in "$HOME_ROOT"/Library/LaunchAgents/net.laurenzo.local-executor-bridge-v6-*.plist; do
   [ -e "$plist" ] || continue
   label="$(basename "$plist" .plist)"
   consider_previous "$label" "$plist"
 done
+# Never boot out an already loaded candidate under the replacement label.
+if "$LAUNCHCTL" print "gui/$UID_NOW/$NEW_LABEL" >/dev/null 2>&1; then
+  fail "replacement v6 service is already loaded; reconcile before migration"
+fi
 if [ "${MIGRATOR_SKIP_STAGE:-0}" != 1 ]; then HOME="$HOME_ROOT" "$ROOT/shell_bridge/bootstrap_v6_noauth_stage.sh" "$SUFFIX"; fi
 [ -f "$NEW_PLIST" ] || fail "candidate plist missing: $NEW_PLIST"
 [ -f "$NEW_CONFIG" ] || fail "candidate config missing: $NEW_CONFIG"
@@ -84,10 +111,16 @@ if [ "${MIGRATOR_DRY_RUN:-0}" = 1 ]; then
   printf 'PLAN previous=%s new=%s config=%s install=%s\n' "${PREVIOUS_LABEL:-none}" "$NEW_LABEL" "$NEW_CONFIG" "$NEW_INSTALL"
   COMMITTED=1; trap - EXIT; exit 0
 fi
-if [ -n "$PREVIOUS_LABEL" ]; then "$LAUNCHCTL" bootout "gui/$UID_NOW/$PREVIOUS_LABEL"; fi
-"$LAUNCHCTL" bootout "gui/$UID_NOW/$NEW_LABEL" >/dev/null 2>&1 || true
-"$LAUNCHCTL" bootstrap "gui/$UID_NOW" "$NEW_PLIST"
+if [ -n "$PREVIOUS_LABEL" ]; then
+  PREVIOUS_STOPPED=1
+  "$LAUNCHCTL" bootout "gui/$UID_NOW/$PREVIOUS_LABEL"
+  if "$LAUNCHCTL" print "gui/$UID_NOW/$PREVIOUS_LABEL" >/dev/null 2>&1; then
+    fail "old staging service remains loaded after bootout"
+  fi
+fi
+# Mark possible candidate admission BEFORE the non-atomic bootstrap call.
 NEW_STARTED=1
+"$LAUNCHCTL" bootstrap "gui/$UID_NOW" "$NEW_PLIST"
 "$LAUNCHCTL" kickstart -k "gui/$UID_NOW/$NEW_LABEL"
 "$LAUNCHCTL" print "gui/$UID_NOW/$NEW_LABEL" >/dev/null
 python3 "$NEW_INSTALL/bridge.py" doctor --config "$NEW_CONFIG" >/dev/null
