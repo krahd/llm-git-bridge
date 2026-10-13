@@ -82,4 +82,94 @@ class LogicalOperationTests(unittest.TestCase):
         out=json.loads((self.state/'requests'/'second'/'result.json').read_text())
         self.assertEqual(out['status'],'indeterminate')
 
+
+    def admit_only(self, request_id="original", operation_id="one-logical-work"):
+        self.payload(request_id, operation_id=operation_id)
+        raw = self.requests[request_id + ".json"]
+        validated = b.validate_request(
+            json.loads(raw), request_id + ".json", self.root, 60)
+        digest = b.canonical_operation_payload(validated, self.cfg)
+        opdir = self.state / "operations" / b.hashlib.sha256(operation_id.encode()).hexdigest()
+        opdir.mkdir(parents=True)
+        (opdir / "admitted.json").write_text(json.dumps({
+            "operation_id": operation_id, "original_request_id": request_id,
+            "payload_sha256": digest,
+        }))
+        return raw
+
+    def test_admitted_original_before_started_is_sealed_without_execution(self):
+        raw = self.admit_only()
+        self.run_requests(["original"])
+        self.assertEqual(self.execute_count, 0)
+        receipt = self.state / "requests" / "original"
+        result = json.loads((receipt / "result.json").read_text())
+        self.assertEqual(result["status"], "indeterminate")
+        self.assertEqual(result["request_sha256"], b.sha256_bytes(raw))
+        self.assertFalse((receipt / "started.json").exists())
+        self.assertEqual((receipt / "request.json").read_bytes(), raw)
+        # A retransmission republishes the sealed receipt; it never runs.
+        self.run_requests(["original"])
+        self.assertEqual(self.execute_count, 0)
+        self.assertEqual(json.loads((receipt / "result.json").read_text()), result)
+
+    def test_partial_original_result_is_never_replaced(self):
+        self.admit_only()
+        receipt = self.state / "requests" / "original"
+        receipt.mkdir(parents=True)
+        raw_terminal = b'{"status":"completed","evidence":"partial"}'
+        (receipt / "result.json").write_bytes(raw_terminal)
+        self.run_requests(["original"])
+        self.assertEqual(self.execute_count, 0)
+        self.assertEqual((receipt / "result.json").read_bytes(), raw_terminal)
+        self.assertFalse((receipt / "finished.json").exists())
+
+    def test_admission_only_conflicting_local_original_payload_is_not_replayed(self):
+        self.admit_only()
+        receipt = self.state / "requests" / "original"
+        receipt.mkdir(parents=True)
+        (receipt / "request.json").write_bytes(b"some different request bytes")
+        self.run_requests(["original"])
+        self.assertEqual(self.execute_count, 0)
+        self.assertFalse((receipt / "result.json").exists())
+        self.assertFalse((receipt / "finished.json").exists())
+
+
+
+    def run_without_remote_conflict_publish(self, ids):
+        def persist_conflict(result, local, name, cfg):
+            b.atomic_write(local, json.dumps(result).encode("utf-8"))
+        with patch.object(b, "_write_upload_delete", side_effect=persist_conflict):
+            self.run_requests(ids)
+
+    def test_conflicting_original_id_preserves_admission_and_source(self):
+        self.admit_only()
+        changed = json.loads(self.requests["original.json"])
+        changed["command"] = "printf CHANGED"
+        self.requests["original.json"] = json.dumps(changed).encode("utf-8")
+        self.run_without_remote_conflict_publish(["original"])
+        self.assertEqual(self.execute_count, 0)
+        folder = self.state / "requests" / "original"
+        self.assertFalse((folder / "result.json").exists())
+        self.assertFalse((folder / "finished.json").exists())
+        conflict = json.loads((folder / "logical-conflict-result.json").read_text())
+        self.assertEqual(conflict["status"], "rejected")
+
+    def test_conflicting_retransmission_cannot_overwrite_terminal_replay(self):
+        self.payload("first")
+        self.payload("second")
+        self.run_requests(["first", "second"])
+        self.assertEqual(self.execute_count, 1)
+        folder = self.state / "requests" / "second"
+        old_result = (folder / "result.json").read_bytes()
+        old_finished = (folder / "finished.json").read_bytes()
+        changed = json.loads(self.requests["second.json"])
+        changed["command"] = "printf CHANGED"
+        self.requests["second.json"] = json.dumps(changed).encode("utf-8")
+        self.run_without_remote_conflict_publish(["second"])
+        self.assertEqual(self.execute_count, 1)
+        self.assertEqual((folder / "result.json").read_bytes(), old_result)
+        self.assertEqual((folder / "finished.json").read_bytes(), old_finished)
+        self.assertEqual(json.loads((folder / "logical-conflict-result.json").read_text())
+                         ["status"], "rejected")
+
 if __name__=='__main__':unittest.main()

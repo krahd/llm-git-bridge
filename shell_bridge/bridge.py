@@ -1522,18 +1522,83 @@ def process_one(name: str, cfg: dict) -> None:
                 original = load_json_bytes(admitted.read_bytes())
             except (OSError, ValueError):
                 original = None
-            if not isinstance(original, dict) or original.get("operation_id") != operation_id:
+            prior_id = original.get("original_request_id") if isinstance(original, dict) else None
+            if (not isinstance(original, dict)
+                    or original.get("operation_id") != operation_id
+                    or not isinstance(prior_id, str)
+                    or ID_RE.fullmatch(prior_id) is None):
+                # Never resolve a persisted path through corrupt admission
+                # metadata. The incoming transport ID is not an alternative
+                # source of truth for the admitted original.
                 status, details = "indeterminate", {"message": "logical operation admission record is corrupt; no replay"}
             elif original.get("payload_sha256") != digest:
                 status, details = "rejected", {"message": "logical operation ID reused for conflicting canonical payload"}
-            else:
-                prior_id = original["original_request_id"]
                 if v["id"] == prior_id:
-                    original_path = state / "requests" / prior_id / "result.json"
-                    if original_path.is_file() and (state / "requests" / prior_id / "finished.json").is_file():
+                    # An attempt to reuse the ORIGINAL transport ID with
+                    # different bytes must never replace its immutable
+                    # STARTED/FINISHED/result evidence, including when the
+                    # crash happened before any request folder existed.
+                    request_dir = state / "requests" / v["id"]
+                    if request_dir.is_symlink():
+                        return
+                    request_dir.mkdir(parents=True, exist_ok=True)
+                    result = result_envelope(v["id"], sha256_bytes(raw), status, details)
+                    _write_upload_delete(
+                        result, request_dir / "logical-conflict-result.json", name, cfg
+                    )
+                    return
+            else:
+                if v["id"] == prior_id:
+                    original_dir = state / "requests" / prior_id
+                    original_path = original_dir / "result.json"
+                    original_finished = original_dir / "finished.json"
+                    original_started = original_dir / "started.json"
+                    original_active = original_dir / "active.json"
+                    original_request = original_dir / "request.json"
+                    # Reconciliation must not follow linked or partial receipt
+                    # paths, or overwrite a terminal result with unknown effects.
+                    if (original_dir.is_symlink() or
+                            any(p.is_symlink() for p in (
+                                original_path, original_finished, original_started,
+                                original_active, original_request))):
+                        return
+                    if original_path.is_file() and original_finished.is_file():
                         _publish_stored(original_path, name, cfg)
                         return
-                    # Never rewrite the original immutable request/result journal.
+                    if original_path.exists() or original_finished.exists():
+                        # A partially written terminal pair requires forensic
+                        # reconciliation; never replace it automatically.
+                        return
+                    if original_started.exists():
+                        # The legacy per-request recovery path contains a
+                        # recorded active PGID and writes indeterminate, without
+                        # executing STARTED a second time. It also checks SHA.
+                        _process_one_request(name, cfg, raw)
+                        return
+                    if original_active.exists():
+                        # ACTIVE without STARTED is corrupt and must not be
+                        # silently discarded by this recovery branch.
+                        return
+                    # The admission is durable before STARTED and before the
+                    # request folder is necessarily created. Returning here
+                    # forever strands the original Drive request. Never try
+                    # the shell; explicitly finish it as indeterminate.
+                    original_dir.mkdir(parents=True, exist_ok=True)
+                    if original_request.exists():
+                        if not original_request.is_file() or (
+                                original_request.stat().st_size > len(raw)
+                                or original_request.read_bytes() != raw):
+                            return
+                    else:
+                        atomic_write(original_request, raw)
+                    result = result_envelope(v["id"], sha256_bytes(raw), "indeterminate", {
+                        "message": "logical operation was admitted before a provable STARTED/FINISHED result; original request was not executed again",
+                        "logical_operation_id": operation_id,
+                        "original_request_id": prior_id,
+                    })
+                    _persist_then_publish(
+                        result, original_path, original_finished, name, cfg
+                    )
                     return
                 original_dir = state / "requests" / prior_id
                 terminal_path = original_dir / "result.json"
@@ -1553,8 +1618,49 @@ def process_one(name: str, cfg: dict) -> None:
             request_sha = sha256_bytes(raw)
             result = result_envelope(v["id"], request_sha, status, details)
             request_dir = state / "requests" / v["id"]
+            if request_dir.is_symlink():
+                return
             request_dir.mkdir(parents=True, exist_ok=True)
-            _persist_then_publish(result, request_dir / "result.json", request_dir / "finished.json", name, cfg)
+            local_result = request_dir / "result.json"
+            finished = request_dir / "finished.json"
+            started = request_dir / "started.json"
+            active = request_dir / "active.json"
+            prior_request = request_dir / "request.json"
+            if any(p.is_symlink() for p in (local_result, finished, started, active, prior_request)):
+                return
+            if local_result.exists() or finished.exists():
+                if (local_result.is_file() and finished.is_file()
+                        and _stored_sha(finished) == request_sha):
+                    _publish_stored(local_result, name, cfg)
+                elif local_result.exists() and finished.exists():
+                    _write_upload_delete(
+                        result_envelope(v["id"], request_sha, "rejected", {
+                            "message": "request id was reused with different bytes or terminal metadata",
+                        }),
+                        request_dir / "logical-conflict-result.json", name, cfg,
+                    )
+                # A partial result/FINISHED pair is immutable evidence of
+                # unknown effects. Never replace its other half automatically.
+                return
+            if started.exists():
+                _process_one_request(name, cfg, raw)
+                return
+            if active.exists():
+                # ACTIVE without a corresponding STARTED is a corrupt
+                # process claim, not proof that a logical reply is safe.
+                return
+            if prior_request.exists():
+                if not prior_request.is_file() or (
+                        prior_request.stat().st_size > len(raw)
+                        or prior_request.read_bytes() != raw):
+                    _write_upload_delete(
+                        result_envelope(v["id"], request_sha, "rejected", {
+                            "message": "request id was reused with different bytes",
+                        }),
+                        request_dir / "logical-conflict-result.json", name, cfg,
+                    )
+                    return
+            _persist_then_publish(result, local_result, finished, name, cfg)
             return
         atomic_write(admitted, json.dumps({
             "operation_id": operation_id, "payload_sha256": digest,
