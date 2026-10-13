@@ -15,7 +15,10 @@ fresh install/config/LaunchAgent paths.
 existing request/results folder IDs *read-only*, validates all nine source
 identity fields against the production configuration, copies source policy into
 a separate candidate config, builds its own approval app, and produces a
-candidate install manifest. It performs **no** `rclone mkdir`, upload or
+candidate install manifest. Its unbootstrapped LaunchAgent plist is parked at
+`$INSTALL_DIR/launchagent.plist`, **not** in
+`~/Library/LaunchAgents` where macOS might automatically load it at login.
+It performs **no** `rclone mkdir`, upload or
 remote deletion, and does **not** create, chmod or write the production
 durable state directory. It does not `bootstrap`, `bootout`, `kickstart`
 or otherwise activate a LaunchAgent. A failed/partial local candidate
