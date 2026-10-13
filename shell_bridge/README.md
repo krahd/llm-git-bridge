@@ -134,6 +134,30 @@ Reconciliation must inspect the exact request, affected repository/remote
 state, and publication evidence separately under a controlled local process.
 Even zero findings from triage do not authorize cutover.
 
+### Guarded v6-to-v6 replacement: source pre-stop contract
+
+The existing `cutover.sh` is the **v5-first** cutover, not a v6-to-v6
+upgrader; do not run it on production already reporting bridge version 6.
+The `v6_to_v6_preflight.py` module supplies a separately tested, pure
+**pre-stop** decision gate for the eventual guarded v6-to-v6 controller.
+
+It requires exactly one running, identifiable v6 production owner and no
+conflicting loaded or parked claimant; matching source/candidate mailbox,
+instance and durable journal; fresh PID-bound v6 health; no active work or
+approvals; independently verified journal receipts; an empty remote request
+mailbox; and a pinned, integrity-verified candidate. In particular, the
+observed four running claimants and historic indeterminate production journal
+**must fail** that gate. Never use a supplied JSON snapshot alone as authority:
+a future executor must gather fresh, primary live state, then repeat mailbox
+and journal checks after the old owner stops and before the replacement
+starts.
+
+A green **pre-stop** result is still not authority to mutate services. The
+module never stops/starts processes, transfers ownership, replays ambiguous
+requests, authorises rollback or retires v5. It explicitly withholds those
+permissions. No single-operator terminal command to effect the v6-to-v6
+handover is qualified yet.
+
 ## Request protocol
 
 Create a raw JSON file named `<id>.json` in the mailbox `requests/` folder:
