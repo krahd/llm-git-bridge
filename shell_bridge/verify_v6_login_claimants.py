@@ -23,8 +23,9 @@ def bridge_label(label: str) -> bool:
     return (
         s.startswith("io.llm-git-bridge.")
         or s.startswith("com.tom.chatgpt-shell-bridge")
-        or (s.startswith("net.laurenzo.") and
-            ("bridge" in s or "local-executor" in s))
+        or s.startswith("net.laurenzo.local-executor-bridge")
+        or s.startswith("net.laurenzo.mac-executor-bridge")
+        or (s.startswith("net.laurenzo.") and "bridge" in s)
     )
 
 
