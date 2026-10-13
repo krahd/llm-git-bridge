@@ -68,7 +68,7 @@ ALLOWED_ROOT="$HOME/repos" \
 bash shell_bridge/install.sh
 ```
 
-`RCLONE_REMOTE` accepts the remote name with or without the trailing `:`. `ALLOWED_ROOT` must already exist. `--stage-only` writes the installed files/config/LaunchAgent but does not start the agent or run the smoke request.
+`RCLONE_REMOTE` accepts the remote name with or without the trailing `:`. `ALLOWED_ROOT` must already exist. `--stage-only` writes the installed files/config/LaunchAgent but does not explicitly bootstrap the agent or run the smoke request. **Do not stage a production-mailbox candidate plist directly under `~/Library/LaunchAgents`: macOS may auto-load it at a later login, even without a bootstrap command.** For replacement production staging use `--upgrade-stage-only` (or the guarded wrapper `stage_v6_upgrade.sh`), which requires an inert plist under its fresh installation directory and does not write to the live journal or mailbox. The one-invocation v5-to-v6 release controller now also uses that inert upgrade-staging mode, and only publishes the accepted v6 plist for future login *after* old v5 registrations are archived. A read-only smoke never proves real restart acceptance.
 
 The installer also reserves a single operator-owned per-user installation lock
 before remote mailbox discovery or local writes. Concurrent invocations cannot
