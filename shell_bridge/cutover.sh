@@ -24,6 +24,7 @@ PROVISIONAL_ACTIVATION=0
 STARTED_NEW=0
 OLD_CONSUMERS_STOPPED=0
 V6_UNSAFE_TO_RESTORE=0
+V5_UNSAFE_TO_RESTORE=0
 V6_ARCHIVE_STARTED=0
 V6_TARGET_PERSISTED=0
 V6_OLD_LABEL=""
@@ -60,6 +61,30 @@ rollback() {
         chmod 600 "$STATE_DIR/cutover-rollback-services.tsv"
       fi
     elif [ "$OLD_CONSUMERS_STOPPED" -eq 1 ]; then
+      # The old v5 rollback previously restarted the consumer without
+      # rechecking its journal or other mailbox owners after a failed
+      # bootout. A process may have been interrupted mid-command even
+      # though the pre-stop journal was clean. Enforce the same HOLD
+      # semantics for v5 as for v6; never replay unknown effects.
+      if [ "$CUTOVER_SOURCE_VERSION" = 5 ]; then
+        V5_UNSAFE_TO_RESTORE=1
+        if PYTHONDONTWRITEBYTECODE=1 python3 "$(cd "$(dirname "$0")" && pwd)/verify_quiescent_journal.py" "$LEGACY_STATE_DIR" >/dev/null &&
+           PYTHONDONTWRITEBYTECODE=1 python3 "$(cd "$(dirname "$0")" && pwd)/verify_pending_approvals.py" "$LEGACY_STATE_DIR" >/dev/null; then
+          V5_CURRENT_OWNERS="$(PYTHONDONTWRITEBYTECODE=1 python3 "$OWNER_SCRIPT")" || V5_CURRENT_OWNERS=""
+          if [ -n "$V5_CURRENT_OWNERS" ]; then
+            if python3 - "$V5_CURRENT_OWNERS" "$ROOT_ID" "${OLD_LABELS[@]}" <<'PYV5RESTORE'
+import json,sys
+inventory=json.loads(sys.argv[1]); root=sys.argv[2]; old=set(sys.argv[3:])
+if inventory.get("safe_to_stage") is not True or inventory.get("problems"):
+    raise SystemExit(1)
+if any(r.get("drive_root_folder_id")==root and r.get("label") not in old
+       for r in inventory.get("loaded",[])):
+    raise SystemExit(1)
+PYV5RESTORE
+            then V5_UNSAFE_TO_RESTORE=0; fi
+          fi
+        fi
+      fi
       # Even a failed bootout may have left indeterminate STARTED work.
       # Recheck current evidence before restoring old v6; an ambiguous
       # transition is a HOLD, not an invitation to replay effects.
@@ -94,16 +119,22 @@ PYROLLBACKOWN
         python3 "$V6_REGISTRAR" restore "$V6_ARCHIVE_DIR/$V6_OLD_LABEL.plist" "$V6_OLD_SOURCE_PLIST" "$V6_OLD_LABEL" ||
           V6_UNSAFE_TO_RESTORE=1
       fi
-      if [ "$CUTOVER_SOURCE_VERSION" = 6 ] && [ "$V6_UNSAFE_TO_RESTORE" -eq 1 ]; then
-        # An unexpected claimant appeared after the source stopped. Restoring
-        # the old daemon would risk concurrent execution of the same request.
+      if { [ "$CUTOVER_SOURCE_VERSION" = 6 ] && [ "$V6_UNSAFE_TO_RESTORE" -eq 1 ]; } ||
+         { [ "$CUTOVER_SOURCE_VERSION" = 5 ] && [ "$V5_UNSAFE_TO_RESTORE" -eq 1 ]; }; then
+        # An unresolved journal or another owner appeared after the source
+        # stopped. Restarting either v5 or v6 could duplicate effects.
         mkdir -p "$STATE_DIR"; chmod 700 "$STATE_DIR" || true
-        printf '%s\n' "v6_upgrade_owner_race_hold $(date -u +%Y-%m-%dT%H:%M:%SZ)" > "$STATE_DIR/cutover-reconciliation-required"
+        if [ "$CUTOVER_SOURCE_VERSION" = 6 ]; then
+          SOURCE_ROLLBACK_REASON="v6_upgrade_owner_race_hold"
+        else
+          SOURCE_ROLLBACK_REASON="v5_pre_admission_rollback_hold"
+        fi
+        printf '%s\n' "$SOURCE_ROLLBACK_REASON $(date -u +%Y-%m-%dT%H:%M:%SZ)" > "$STATE_DIR/cutover-reconciliation-required"
         if [ -n "$ROLLBACK_FILE" ] && [ -s "$ROLLBACK_FILE" ]; then
           cp -p "$ROLLBACK_FILE" "$STATE_DIR/cutover-rollback-services.tsv"
           chmod 600 "$STATE_DIR/cutover-rollback-services.tsv"
         fi
-        printf 'CRITICAL: new owner appeared; keep old v6 stopped until local journal/mailbox reconciliation.\n' >&2
+        printf 'CRITICAL: source rollback evidence is unsafe or incomplete; keep old consumer stopped until journal/owner reconciliation.\n' >&2
       else
         # No new-v6 admission was possible and the last owner snapshot was
         # exclusive; restore only the original source service.
@@ -283,16 +314,16 @@ PYAPP
 [ "$CONFIG_APPROVAL_APP" = "$EXPECTED_APPROVAL_APP" ] || fail "staged v6 approval app path does not match install directory"
 [ -x "$EXPECTED_APPROVAL_APP/Contents/MacOS/local-executor-approval" ] || fail "staged v6 approval app executable missing"
 
-# Existing durable workspace state must survive an in-place v5 upgrade.
-if [ -d "$LEGACY_STATE_DIR/workspaces" ]; then
-  SAME_STATE="$(python3 - "$STATE_DIR" "$LEGACY_STATE_DIR" <<'PYSTATE'
-from pathlib import Path
-import sys
-print('1' if Path(sys.argv[1]).expanduser().resolve()==Path(sys.argv[2]).expanduser().resolve() else '0')
-PYSTATE
-)"
-  [ "$SAME_STATE" = 1 ] || fail "v5 workspace state exists; stage v6 with STATE_DIR=$LEGACY_STATE_DIR before cutover"
-fi
+# v5 request receipts are also deduplication evidence. The old check
+# only enforced state reuse when a workspaces/ directory existed, permitting
+# a seemingly clean v5->v6 cutover that silently forgot prior request IDs
+# and their FINISHED/indeterminate outcomes. Refuse *any* state fork before
+# a production service is stopped, even if no workspace has ever been made.
+STATE_GATE="$(cd "$(dirname "$0")" && pwd)/verify_v5_state_continuity.py"
+[ -f "$STATE_GATE" ] && [ ! -L "$STATE_GATE" ] ||
+  fail "read-only v5 durable state identity verifier is missing"
+PYTHONDONTWRITEBYTECODE=1 python3 "$STATE_GATE" "$STATE_DIR" "$LEGACY_STATE_DIR" >/dev/null ||
+  fail "v5 durable journal and workspace state identity differs; stage v6 with STATE_DIR=$LEGACY_STATE_DIR before cutover"
 
 R=(rclone --drive-root-folder-id "$ROOT_ID")
 TMP_HEALTH="$(mktemp)"

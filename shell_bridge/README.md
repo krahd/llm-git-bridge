@@ -144,10 +144,13 @@ in [V6_UPGRADE_STAGING.md](V6_UPGRADE_STAGING.md). It prepares a fresh
 candidate without changing the running state directory, remote mailbox, or
 launchd job. Staging is **not** activation.
 
-The existing `cutover.sh` is the **v5-first** cutover, not a v6-to-v6
-upgrader; do not run it on production already reporting bridge version 6.
-The `v6_to_v6_preflight.py` module supplies a separately tested, pure
-**pre-stop** decision gate for the eventual guarded v6-to-v6 controller.
+`cutover.sh` defaults to **v5-first** and must not be run directly against
+an existing v6 production installation. The separate `upgrade_v6.sh`
+entrypoint explicitly selects its guarded v6-to-v6 mode, using the tested,
+pure `v6_to_v6_preflight.py` **pre-stop** decision gate. See
+[V6_TO_V6_UPGRADE.md](V6_TO_V6_UPGRADE.md). Source and CI qualification of
+that controller do not establish that the currently installed Mac services
+can be safely switched.
 
 It requires exactly one running, identifiable v6 production owner and no
 conflicting loaded or parked claimant; matching source/candidate mailbox,
@@ -162,9 +165,13 @@ starts.
 
 A green **pre-stop** result is still not authority to mutate services. The
 module never stops/starts processes, transfers ownership, replays ambiguous
-requests, authorises rollback or retires v5. It explicitly withholds those
-permissions. No single-operator terminal command to effect the v6-to-v6
-handover is qualified yet.
+requests, authorises rollback or retires v5. The separate controller has
+additional post-stop, candidate-build, unique-owner and registration gates.
+The historical duplicate production and staging consumers and indeterminate
+journal on this Mac still block actual use; do not run the controller as a
+service-repair command. A v5-first failure *before* candidate admission
+likewise restores the old service only after a fresh journal, approval and
+owner check. An unsafe rollback leaves a durable reconciliation HOLD.
 
 ## Request protocol
 
