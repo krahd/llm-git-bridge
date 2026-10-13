@@ -309,16 +309,31 @@ PYAPP
 [ "$CONFIG_APPROVAL_APP" = "$EXPECTED_APPROVAL_APP" ] || fail "staged v6 approval app path does not match install directory"
 [ -x "$EXPECTED_APPROVAL_APP/Contents/MacOS/local-executor-approval" ] || fail "staged v6 approval app executable missing"
 
-# Existing durable workspace state must survive an in-place v5 upgrade.
-if [ -d "$LEGACY_STATE_DIR/workspaces" ]; then
-  SAME_STATE="$(python3 - "$STATE_DIR" "$LEGACY_STATE_DIR" <<'PYSTATE'
+# v5 request receipts are also deduplication evidence. The old check
+# only enforced state reuse when a workspaces/ directory existed, permitting
+# a seemingly clean v5->v6 cutover that silently forgot prior request IDs
+# and their FINISHED/indeterminate outcomes. Refuse *any* state fork before
+# a production service is stopped, even if no workspace has ever been made.
+SAME_STATE="$(python3 - "$STATE_DIR" "$LEGACY_STATE_DIR" <<'PYSTATE'
 from pathlib import Path
 import sys
-print('1' if Path(sys.argv[1]).expanduser().resolve()==Path(sys.argv[2]).expanduser().resolve() else '0')
+candidate,source=(Path(v).expanduser() for v in sys.argv[1:])
+if not candidate.is_absolute() or not source.is_absolute() or candidate != source:
+    raise SystemExit(1)
+# A linked alias can redirect to a different journal between admission and
+# bootstrap. Neither the state directory nor any user-home ancestor may link.
+home=Path.home()
+if home not in source.parents:
+    raise SystemExit(1)
+at=source
+while at!=home:
+    if at.is_symlink():
+        raise SystemExit(1)
+    at=at.parent
+print('1')
 PYSTATE
-)"
-  [ "$SAME_STATE" = 1 ] || fail "v5 workspace state exists; stage v6 with STATE_DIR=$LEGACY_STATE_DIR before cutover"
-fi
+)" || fail "v5 durable journal and workspace state identity differs; stage v6 with STATE_DIR=$LEGACY_STATE_DIR before cutover"
+[ "$SAME_STATE" = 1 ] || fail "v5 durable journal and workspace state identity differs; stage v6 with STATE_DIR=$LEGACY_STATE_DIR before cutover"
 
 R=(rclone --drive-root-folder-id "$ROOT_ID")
 TMP_HEALTH="$(mktemp)"
