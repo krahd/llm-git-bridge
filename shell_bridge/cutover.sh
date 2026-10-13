@@ -47,6 +47,31 @@ rollback() {
         chmod 600 "$STATE_DIR/cutover-rollback-services.tsv"
       fi
     elif [ "$OLD_CONSUMERS_STOPPED" -eq 1 ]; then
+      # Even a failed bootout may have left indeterminate STARTED work.
+      # Recheck current evidence before restoring old v6; an ambiguous
+      # transition is a HOLD, not an invitation to replay effects.
+      if [ "$CUTOVER_SOURCE_VERSION" = 6 ] && [ "$V6_UNSAFE_TO_RESTORE" -eq 0 ]; then
+        if ! PYTHONDONTWRITEBYTECODE=1 python3 "$(cd "$(dirname "$0")" && pwd)/verify_quiescent_journal.py" "$LEGACY_STATE_DIR" >/dev/null; then
+          V6_UNSAFE_TO_RESTORE=1
+        fi
+        if [ "$V6_UNSAFE_TO_RESTORE" -eq 0 ]; then
+          CURRENT_OWNERS="$(PYTHONDONTWRITEBYTECODE=1 python3 "$OWNER_SCRIPT")" ||
+            V6_UNSAFE_TO_RESTORE=1
+          if [ "$V6_UNSAFE_TO_RESTORE" -eq 0 ]; then
+            python3 - "$CURRENT_OWNERS" "$ROOT_ID" "${OLD_LABELS[@]}" <<'PYROLLBACKOWN' || V6_UNSAFE_TO_RESTORE=1
+import json,sys
+inventory=json.loads(sys.argv[1])
+root=sys.argv[2]
+old=set(sys.argv[3:])
+if inventory.get('safe_to_stage') is not True or inventory.get('problems'):
+    raise SystemExit(1)
+for item in inventory.get('loaded',[]):
+    if item.get('drive_root_folder_id')==root and item.get('label') not in old:
+        raise SystemExit(1)
+PYROLLBACKOWN
+          fi
+        fi
+      fi
       if [ "$CUTOVER_SOURCE_VERSION" = 6 ] && [ "$V6_UNSAFE_TO_RESTORE" -eq 1 ]; then
         # An unexpected claimant appeared after the source stopped. Restoring
         # the old daemon would risk concurrent execution of the same request.
