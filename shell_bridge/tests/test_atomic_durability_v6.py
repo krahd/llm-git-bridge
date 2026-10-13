@@ -54,6 +54,29 @@ class AtomicJournalDurabilityTests(unittest.TestCase):
                                   "file_fsync", "replace", "directory_fsync"])
                 self.assertEqual(path.read_bytes(), b"durable")
 
+    def test_precreated_request_directory_parent_is_synced_before_admission(self):
+        folder = self.root / "requests" / "original"
+        folder.mkdir(parents=True)
+        parent_inode = folder.parent.stat().st_ino
+        observed = []
+        real_fsync = os.fsync
+
+        def inspect(fd):
+            current = os.fstat(fd)
+            observed.append(current.st_ino)
+            return real_fsync(fd)
+
+        with patch.object(bridge.os, "fsync", side_effect=inspect):
+            bridge.ensure_directory_durable(folder)
+        self.assertEqual(observed, [parent_inode])
+
+    def test_precreated_directory_sync_failure_stops_admission(self):
+        folder = self.root / "operations" / "op-hash"
+        folder.mkdir(parents=True)
+        with patch.object(bridge, "_sync_directory", side_effect=OSError("sync denied")):
+            with self.assertRaisesRegex(OSError, "sync denied"):
+                bridge.ensure_directory_durable(folder)
+
     def test_postrename_directory_sync_error_is_not_reported_as_success(self):
         folder = self.root / "requests"
         folder.mkdir()
