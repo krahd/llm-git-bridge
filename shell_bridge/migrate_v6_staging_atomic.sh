@@ -28,6 +28,8 @@ NEW_STARTED=0
 PREVIOUS_STOPPED=0
 COMMITTED=0
 HOLD_FILE="$LOG_DIR/LocalExecutorBridgeV6Migrator.hold"
+[ ! -e "$HOLD_FILE" ] && [ ! -L "$HOLD_FILE" ] ||
+  fail "previous staging migration left a reconciliation hold; do not retry or start a new owner"
 consider_previous(){
   label="$1"; plist="$2"
   [ "$label" != "$NEW_LABEL" ] && [ "$label" != "$OLD_LABEL" ] || return 0
