@@ -50,7 +50,7 @@ class V6UpgradeControllerTests(unittest.TestCase):
         start = c.index('launchctl bootstrap "gui/$' + '{UID_NOW}" "$NEW_PLIST"')
         self.assertLess(stop, c.index("PENDING_AFTER_STOP=", stop))
         self.assertLess(c.index("PENDING_AFTER_STOP=", stop), start)
-        self.assertEqual(c.count('verify_quiescent_journal.py" "$LEGACY_STATE_DIR"'), 2)
+        self.assertEqual(c.count('verify_quiescent_journal.py" "$LEGACY_STATE_DIR"'), 3)
         self.assertLess(c.index("STARTED_NEW=1"), start)
         self.assertIn("cutover-reconciliation-required", c)
         self.assertIn("CUTOVER_COMMITTED=1", c)
