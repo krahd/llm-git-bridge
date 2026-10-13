@@ -27,16 +27,22 @@ def _safe_owned(path: Path, home: Path, *, directory: bool) -> bool:
         return False
     current = path
     while current != home:
-        if current.is_symlink():
+        try:
+            info = current.lstat()
+        except OSError:
             return False
+        if stat.S_ISLNK(info.st_mode) or info.st_uid != os.getuid():
+            return False
+        if current != path:
+            if not stat.S_ISDIR(info.st_mode) or info.st_mode & 0o022:
+                return False
+        else:
+            if directory and (not stat.S_ISDIR(info.st_mode) or info.st_mode & 0o077):
+                return False
+            if not directory and (not stat.S_ISREG(info.st_mode) or info.st_mode & 0o077):
+                return False
         current = current.parent
-    try:
-        info = path.stat()
-    except OSError:
-        return False
-    if info.st_uid != os.getuid() or (info.st_mode & 0o022):
-        return False
-    return stat.S_ISDIR(info.st_mode) if directory else stat.S_ISREG(info.st_mode)
+    return True
 
 
 def _remote(value: str) -> str:
