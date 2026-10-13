@@ -251,6 +251,88 @@ class QuiescentJournalTests(unittest.TestCase):
         with self.assertRaisesRegex(UnresolvedJournalError, "unresolved STARTED"):
             verify(self.state)
 
+    def admission(self, *, operation_id="single-operation", source_id="original"):
+        """Construct a bound, fully terminal logical admission for verifier tests."""
+        original = self.record(source_id, "completed")
+        payload = json.dumps({"protocol": 1, "id": source_id,
+                              "operation_id": operation_id}).encode("utf-8")
+        sha = hashlib.sha256(payload).hexdigest()
+        (original / "request.json").write_bytes(payload)
+        (original / "started.json").write_text(json.dumps({"request_sha256": sha}))
+        (original / "finished.json").write_text(
+            json.dumps({"status": "completed", "request_sha256": sha}))
+        (original / "result.json").write_text(json.dumps(
+            {"protocol": 1, "kind": "result", "id": source_id,
+             "status": "completed", "request_sha256": sha}))
+        opdir = self.state / "operations" / hashlib.sha256(operation_id.encode()).hexdigest()
+        opdir.mkdir(parents=True)
+        admitted = opdir / "admitted.json"
+        admitted.write_text(json.dumps({
+            "operation_id": operation_id, "original_request_id": source_id,
+            "payload_sha256": hashlib.sha256(b"canonical-payload").hexdigest(),
+        }))
+        return original, admitted
+
+    def test_complete_logical_admission_is_accepted(self):
+        self.admission()
+        self.assertEqual(verify(self.state)["finished"], 1)
+
+    def test_admission_before_started_or_request_receipt_blocks_handover(self):
+        # The admission is written before STARTED. Without this gate the
+        # empty request journal was incorrectly certified as quiescent.
+        opid = "crashed-before-start"
+        opdir = self.state / "operations" / hashlib.sha256(opid.encode()).hexdigest()
+        opdir.mkdir(parents=True)
+        (opdir / "admitted.json").write_text(json.dumps({
+            "operation_id": opid, "original_request_id": "never-recorded",
+            "payload_sha256": hashlib.sha256(b"payload").hexdigest(),
+        }))
+        with self.assertRaisesRegex(UnresolvedJournalError, "no complete source receipt"):
+            verify(self.state)
+
+    def test_missing_or_linked_logical_admission_blocks_handover(self):
+        original, admitted = self.admission()
+        admitted.unlink()
+        with self.assertRaisesRegex(UnresolvedJournalError, "missing an immutable admission"):
+            verify(self.state)
+        admitted.symlink_to(original / "result.json")
+        with self.assertRaisesRegex(UnresolvedJournalError, "missing an immutable admission"):
+            verify(self.state)
+
+    def test_admission_source_mismatch_or_tamper_blocks_handover(self):
+        original, admitted = self.admission()
+        baseline = json.loads(admitted.read_text())
+        for change in (
+            {"operation_id": "different"},
+            {"original_request_id": "not-the-original"},
+            {"payload_sha256": "broken"},
+        ):
+            with self.subTest(change=change):
+                admitted.write_text(json.dumps({**baseline, **change}))
+                with self.assertRaises(UnresolvedJournalError):
+                    verify(self.state)
+        admitted.write_text(json.dumps(baseline))
+        # The FINISHED request hash has not changed. A locally changed
+        # operation_id may not silently inherit another operation's receipt.
+        request = original / "request.json"
+        request.write_text(json.dumps({"id": "original",
+                                       "operation_id": "another-operation"}))
+        new_sha = hashlib.sha256(request.read_bytes()).hexdigest()
+        (original / "started.json").write_text(json.dumps({"request_sha256": new_sha}))
+        (original / "finished.json").write_text(
+            json.dumps({"status": "completed", "request_sha256": new_sha}))
+        (original / "result.json").write_text(json.dumps({
+            "protocol": 1, "kind": "result", "id": "original",
+            "status": "completed", "request_sha256": new_sha}))
+        with self.assertRaisesRegex(UnresolvedJournalError, "identities disagree"):
+            verify(self.state)
+
+    def test_logical_admission_directory_symlink_blocks_handover(self):
+        operations = self.state / "operations"
+        operations.symlink_to(self.state.parent, target_is_directory=True)
+        with self.assertRaisesRegex(UnresolvedJournalError, "symlinked"):
+            verify(self.state)
+
     def test_cutover_checks_journal_before_and_after_old_owner_shutdown(self):
         content = CUTOVER.read_text()
         gate = 'verify_quiescent_journal.py" "$LEGACY_STATE_DIR"'
