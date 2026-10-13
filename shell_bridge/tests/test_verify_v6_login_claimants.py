@@ -76,6 +76,15 @@ class FutureLoginOwnerTests(unittest.TestCase):
         with self.assertRaises(RestartRegistrationHold):
             inspect_agents(self.agents, "io.llm-git-bridge.daemon", "PROD")
 
+    def test_native_approval_launchagent_is_not_a_mailbox_daemon(self):
+        approval = self.agents / "net.laurenzo.local-executor-approval.123.plist"
+        approval.write_bytes(plistlib.dumps({
+            "Label": "net.laurenzo.local-executor-approval.123",
+            "ProgramArguments": ["/usr/bin/python3", "/opt/approval_helper.py"],
+        }))
+        self.assertTrue(inspect_agents(self.agents, self.label, "PROD")
+                        ["eligible_for_source_archive"])
+
     def test_unrelated_no_config_plist_does_not_block(self):
         other = self.agents / "com.apple.unrelated.plist"
         other.write_bytes(plistlib.dumps({"Label": "com.apple.unrelated",
