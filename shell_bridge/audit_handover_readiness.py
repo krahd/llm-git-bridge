@@ -22,7 +22,7 @@ from verify_quiescent_journal import UnresolvedJournalError, verify as verify_jo
 
 MAX_LOADED_SERVICES = 64
 MAX_UNIQUE_STATES = 64
-_REQUEST_ID = re.compile(r"[a-z0-9][a-z0-9._-]{0,127}\\Z")
+_REQUEST_ID = re.compile(r"[a-z0-9][a-z0-9._-]{0,127}\Z")
 
 
 
