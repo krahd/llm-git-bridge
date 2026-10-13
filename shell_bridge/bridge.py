@@ -146,15 +146,57 @@ def sha256_file(path: Path) -> str:
     return h.hexdigest()
 
 
+def _sync_directory(path: Path) -> None:
+    """Make the directory entry for a completed rename durable on POSIX.
+
+    Raising is intentional: an I/O error after a rename leaves an ambiguous
+    visible effect. Callers must not advance to external execution/acknowledge
+    it as durable on that error.
+    """
+    fd = os.open(str(path), os.O_RDONLY | getattr(os, "O_DIRECTORY", 0))
+    try:
+        os.fsync(fd)
+    finally:
+        os.close(fd)
+
+
+def ensure_directory_durable(path: Path, *, mode: int = 0o777,
+                             sync_existing: bool = True) -> None:
+    """Persist a request/operation folder's name before admitting work.
+
+    The bridge creates these folders *before* it calls atomic_write, so
+    syncing the marker's containing folder alone would not persist the
+    folder's name under requests/ or operations/.
+    """
+    missing = []
+    ancestor = path
+    while not ancestor.exists():
+        if ancestor == ancestor.parent:
+            raise OSError("cannot establish durable directory ancestry")
+        missing.append(ancestor)
+        ancestor = ancestor.parent
+    path.mkdir(mode=mode, parents=True, exist_ok=True)
+    for created in reversed(missing):
+        _sync_directory(created.parent)
+    if sync_existing and not missing:
+        # A preexisting directory may have been created by an interrupted
+        # prior writer. Do not assume its parent entry was persisted.
+        _sync_directory(path.parent)
+
+
 def atomic_write(path: Path, data: bytes) -> None:
-    path.parent.mkdir(parents=True, exist_ok=True)
-    fd, tmp = tempfile.mkstemp(prefix=path.name + ".", dir=str(path.parent))
+    parent = path.parent
+    ensure_directory_durable(parent, sync_existing=False)
+    fd, tmp = tempfile.mkstemp(prefix=path.name + ".", dir=str(parent))
     try:
         with os.fdopen(fd, "wb") as f:
             f.write(data)
             f.flush()
             os.fsync(f.fileno())
         os.replace(tmp, path)
+        # Rename is atomic, but without syncing directory metadata the
+        # STARTED/FINISHED or admission marker can roll back after power loss.
+        _sync_directory(parent)
     finally:
         if os.path.exists(tmp):
             os.unlink(tmp)
@@ -1202,7 +1244,7 @@ def _process_one_request(name: str, cfg: dict, preloaded_raw: bytes | None = Non
     max_output_bytes = int(cfg.get("max_output_bytes", DEFAULT_MAX_OUTPUT_BYTES))
 
     request_dir = state_dir / "requests" / rid_guess
-    request_dir.mkdir(parents=True, exist_ok=True)
+    ensure_directory_durable(request_dir)
     local_request = request_dir / "request.json"
     local_result = request_dir / "result.json"
     started_marker = request_dir / "started.json"
@@ -1574,7 +1616,7 @@ def process_one(name: str, cfg: dict) -> None:
         return
     state = Path(cfg["state_dir"]).expanduser()
     opdir = state / "operations" / hashlib.sha256(operation_id.encode()).hexdigest()
-    opdir.mkdir(mode=0o700, parents=True, exist_ok=True)
+    ensure_directory_durable(opdir, mode=0o700)
     opdir.chmod(0o700)
     lock = (opdir / "admission.lock").open("a+")
     try:
@@ -1604,7 +1646,7 @@ def process_one(name: str, cfg: dict) -> None:
                     request_dir = state / "requests" / v["id"]
                     if request_dir.is_symlink():
                         return
-                    request_dir.mkdir(parents=True, exist_ok=True)
+                    ensure_directory_durable(request_dir)
                     result = result_envelope(v["id"], sha256_bytes(raw), status, details)
                     _write_upload_delete(
                         result, request_dir / "logical-conflict-result.json", name, cfg
@@ -1648,7 +1690,7 @@ def process_one(name: str, cfg: dict) -> None:
                     # request folder is necessarily created. Returning here
                     # forever strands the original Drive request. Never try
                     # the shell; explicitly finish it as indeterminate.
-                    original_dir.mkdir(parents=True, exist_ok=True)
+                    ensure_directory_durable(original_dir)
                     if original_request.exists():
                         if not original_request.is_file() or (
                                 original_request.stat().st_size > len(raw)
@@ -1685,7 +1727,7 @@ def process_one(name: str, cfg: dict) -> None:
             request_dir = state / "requests" / v["id"]
             if request_dir.is_symlink():
                 return
-            request_dir.mkdir(parents=True, exist_ok=True)
+            ensure_directory_durable(request_dir)
             local_result = request_dir / "result.json"
             finished = request_dir / "finished.json"
             started = request_dir / "started.json"

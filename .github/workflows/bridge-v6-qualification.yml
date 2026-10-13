@@ -70,6 +70,7 @@ jobs:
           PYTHONPATH=shell_bridge python3 -m unittest discover -s shell_bridge/tests -p test_installer_reservation.py -v
           PYTHONPATH=shell_bridge python3 -m unittest discover -s shell_bridge/tests -p test_shutdown_worker_drain.py -v
           PYTHONPATH=shell_bridge python3 -m unittest discover -s shell_bridge/tests -p test_verify_quiescent_journal.py -v
+          PYTHONPATH=shell_bridge python3 -m unittest discover -s shell_bridge/tests -p test_atomic_durability_v6.py -v
       - name: Run canonical repository unit tests
         env:
           PYTHONDONTWRITEBYTECODE: '1'
