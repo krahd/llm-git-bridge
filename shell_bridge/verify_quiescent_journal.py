@@ -180,14 +180,16 @@ def verify(state: Path) -> dict:
                     folder = Path(entry.path)
                     started = folder / "started.json"
                     finished = folder / "finished.json"
-                    # Before STARTED/FINISHED records are paired there may be
-                    # effects not safely replayable. Fail immediately and
-                    # leave everything intact for explicit reconciliation.
-                    if started.is_symlink() or (
-                            started.exists() and not finished.exists()):
+                    # Verify receipt pairing first to retain a specific
+                    # missing-FINISHED or linked-receipt diagnosis. Then
+                    # reject dangling STARTED evidence even if no result was
+                    # ever persisted. Never infer a replayable effect.
+                    remaining = _verify_completed_receipt_pair(folder, remaining)
+                    if started.is_symlink():
+                        raise UnresolvedJournalError("STARTED marker is symlinked")
+                    if started.exists() and not finished.exists():
                         raise UnresolvedJournalError(
                             "journal contains unresolved STARTED without FINISHED")
-                    remaining = _verify_completed_receipt_pair(folder, remaining)
                     if finished.exists():
                         counters["finished"] += 1
         except UnresolvedJournalError:
