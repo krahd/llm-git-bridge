@@ -46,6 +46,28 @@ class FutureLoginOwnerTests(unittest.TestCase):
         with self.assertRaises(RestartRegistrationHold):
             inspect_agents(self.agents, self.label, "PROD")
 
+    def test_program_only_bridge_launcher_with_unknown_label_is_not_ignored(self):
+        target = self.agents / "com.example.hidden-executor.plist"
+        target.write_bytes(plistlib.dumps({
+            "Label": "com.example.hidden-executor",
+            "Program": "/opt/private/shell_bridge/bridge.py",
+            "RunAtLoad": True,
+        }))
+        with self.assertRaises(RestartRegistrationHold):
+            inspect_agents(self.agents, self.label, "PROD")
+
+    def test_program_and_arguments_bridge_alias_claims_mailbox(self):
+        target = self.agents / "com.example.hidden-executor.plist"
+        target.write_bytes(plistlib.dumps({
+            "Label": "com.example.hidden-executor",
+            "Program": "/opt/private/shell_bridge/bridge.py",
+            "ProgramArguments": ["/usr/bin/python3", "/opt/private/entrypoint.py",
+                                 "--config", str(self.cfg)],
+            "RunAtLoad": True,
+        }))
+        with self.assertRaises(RestartRegistrationHold):
+            inspect_agents(self.agents, self.label, "PROD")
+
     def test_unknown_label_running_bridge_is_not_ignored(self):
         self.plist("com.example.bypass", self.cfg)
         with self.assertRaises(RestartRegistrationHold):
