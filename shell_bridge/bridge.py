@@ -1529,11 +1529,56 @@ def process_one(name: str, cfg: dict) -> None:
             else:
                 prior_id = original["original_request_id"]
                 if v["id"] == prior_id:
-                    original_path = state / "requests" / prior_id / "result.json"
-                    if original_path.is_file() and (state / "requests" / prior_id / "finished.json").is_file():
+                    original_dir = state / "requests" / prior_id
+                    original_path = original_dir / "result.json"
+                    original_finished = original_dir / "finished.json"
+                    original_started = original_dir / "started.json"
+                    original_active = original_dir / "active.json"
+                    original_request = original_dir / "request.json"
+                    # Reconciliation must not follow linked or partial receipt
+                    # paths, or overwrite a terminal result with unknown effects.
+                    if (original_dir.is_symlink() or
+                            any(p.is_symlink() for p in (
+                                original_path, original_finished, original_started,
+                                original_active, original_request))):
+                        return
+                    if original_path.is_file() and original_finished.is_file():
                         _publish_stored(original_path, name, cfg)
                         return
-                    # Never rewrite the original immutable request/result journal.
+                    if original_path.exists() or original_finished.exists():
+                        # A partially written terminal pair requires forensic
+                        # reconciliation; never replace it automatically.
+                        return
+                    if original_started.exists():
+                        # The legacy per-request recovery path contains a
+                        # recorded active PGID and writes indeterminate, without
+                        # executing STARTED a second time. It also checks SHA.
+                        _process_one_request(name, cfg, raw)
+                        return
+                    if original_active.exists():
+                        # ACTIVE without STARTED is corrupt and must not be
+                        # silently discarded by this recovery branch.
+                        return
+                    # The admission is durable before STARTED and before the
+                    # request folder is necessarily created. Returning here
+                    # forever strands the original Drive request. Never try
+                    # the shell; explicitly finish it as indeterminate.
+                    original_dir.mkdir(parents=True, exist_ok=True)
+                    if original_request.exists():
+                        if not original_request.is_file() or (
+                                original_request.stat().st_size > len(raw)
+                                or original_request.read_bytes() != raw):
+                            return
+                    else:
+                        atomic_write(original_request, raw)
+                    result = result_envelope(v["id"], sha256_bytes(raw), "indeterminate", {
+                        "message": "logical operation was admitted before a provable STARTED/FINISHED result; original request was not executed again",
+                        "logical_operation_id": operation_id,
+                        "original_request_id": prior_id,
+                    })
+                    _persist_then_publish(
+                        result, original_path, original_finished, name, cfg
+                    )
                     return
                 original_dir = state / "requests" / prior_id
                 terminal_path = original_dir / "result.json"
