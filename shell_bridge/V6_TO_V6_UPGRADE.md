@@ -75,6 +75,16 @@ executed the same request more than once. Under these conditions the
 handover must **refuse to stop any service**; preserve all history.
 Do not use it to fix ownership conflicts automatically.
 
+The **single read-only Mac-local** `audit_handover_readiness.py` now includes
+a bounded `unresolved_inventory` summary for each journal rejected by the
+full verifier: number scanned, issue/indeterminate counts and up to 40
+sanitised request IDs and issue labels. This avoids a second operator
+command simply to identify the historical indeterminate receipt. It does
+not expose request commands, arguments, results or credentials, and a failed
+forensic pass reports `unavailable` rather than silently clearing a hold.
+The report never approves replay, owner transfer or retirement; any command
+effects remain unverified until a distinct authorised reconciliation.
+
 GitHub CI/source tests establish source-level safety properties, not real
 authenticated production acceptance. Any later live handover still needs
 explicit proof of exclusive ownership, no duplicate effects, correct installed
