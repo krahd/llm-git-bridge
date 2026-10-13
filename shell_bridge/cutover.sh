@@ -319,29 +319,11 @@ PYAPP
 # a seemingly clean v5->v6 cutover that silently forgot prior request IDs
 # and their FINISHED/indeterminate outcomes. Refuse *any* state fork before
 # a production service is stopped, even if no workspace has ever been made.
-SAME_STATE="$(python3 - "$STATE_DIR" "$LEGACY_STATE_DIR" <<'PYSTATE'
-from pathlib import Path
-import sys
-candidate,source=(Path(v).expanduser() for v in sys.argv[1:])
-if not candidate.is_absolute() or not source.is_absolute() or candidate != source:
-    raise SystemExit(1)
-# macOS /var and /tmp are system-controlled symlink prefixes; following
-# them as if they were user-writable aliases would reject ordinary temp/home
-# paths. Guard the mutable portion *beneath* this user's home, and refuse
-# externally mounted state paths until a separate trusted-volume handover
-# protocol is available.
-home=Path.home()
-if home not in source.parents:
-    raise SystemExit(1)
-at=source
-while at!=home:
-    if at.is_symlink():
-        raise SystemExit(1)
-    at=at.parent
-print('1')
-PYSTATE
-)" || fail "v5 durable journal and workspace state identity differs; stage v6 with STATE_DIR=$LEGACY_STATE_DIR before cutover"
-[ "$SAME_STATE" = 1 ] || fail "v5 durable journal and workspace state identity differs; stage v6 with STATE_DIR=$LEGACY_STATE_DIR before cutover"
+STATE_GATE="$(cd "$(dirname "$0")" && pwd)/verify_v5_state_continuity.py"
+[ -f "$STATE_GATE" ] && [ ! -L "$STATE_GATE" ] ||
+  fail "read-only v5 durable state identity verifier is missing"
+PYTHONDONTWRITEBYTECODE=1 python3 "$STATE_GATE" "$STATE_DIR" "$LEGACY_STATE_DIR" >/dev/null ||
+  fail "v5 durable journal and workspace state identity differs; stage v6 with STATE_DIR=$LEGACY_STATE_DIR before cutover"
 
 R=(rclone --drive-root-folder-id "$ROOT_ID")
 TMP_HEALTH="$(mktemp)"
