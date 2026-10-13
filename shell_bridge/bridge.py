@@ -146,15 +146,46 @@ def sha256_file(path: Path) -> str:
     return h.hexdigest()
 
 
+def _sync_directory(path: Path) -> None:
+    """Make the directory entry for a completed rename durable on POSIX.
+
+    Raising is intentional: an I/O error after a rename leaves an ambiguous
+    visible effect. Callers must not advance to external execution/acknowledge
+    it as durable on that error.
+    """
+    fd = os.open(str(path), os.O_RDONLY | getattr(os, "O_DIRECTORY", 0))
+    try:
+        os.fsync(fd)
+    finally:
+        os.close(fd)
+
+
 def atomic_write(path: Path, data: bytes) -> None:
-    path.parent.mkdir(parents=True, exist_ok=True)
-    fd, tmp = tempfile.mkstemp(prefix=path.name + ".", dir=str(path.parent))
+    # An fsynced marker inside a newly-created request/operation folder is
+    # insufficient if that folder's own directory entry can disappear after
+    # a power loss. Synchronize only newly-created ancestry, outermost first.
+    missing = []
+    parent = path.parent
+    ancestor = parent
+    while not ancestor.exists():
+        if ancestor == ancestor.parent:
+            raise OSError("cannot establish durable directory ancestry")
+        missing.append(ancestor)
+        ancestor = ancestor.parent
+    parent.mkdir(parents=True, exist_ok=True)
+    for new_directory in reversed(missing):
+        _sync_directory(new_directory.parent)
+
+    fd, tmp = tempfile.mkstemp(prefix=path.name + ".", dir=str(parent))
     try:
         with os.fdopen(fd, "wb") as f:
             f.write(data)
             f.flush()
             os.fsync(f.fileno())
         os.replace(tmp, path)
+        # Rename is atomic, but without syncing directory metadata the
+        # STARTED/FINISHED or admission marker can roll back after power loss.
+        _sync_directory(parent)
     finally:
         if os.path.exists(tmp):
             os.unlink(tmp)
