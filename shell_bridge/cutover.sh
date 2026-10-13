@@ -58,8 +58,8 @@ rollback() {
         fi
         printf 'CRITICAL: new owner appeared; keep old v6 stopped until local journal/mailbox reconciliation.\n' >&2
       else
-      # No v6 admission was possible; restoring the original consumer does
-      # not introduce a v6/v5 duplicate-execution race.
+        # No new-v6 admission was possible and the last owner snapshot was
+        # exclusive; restore only the original source service.
       echo "Cutover failed after stopping legacy consumers; restoring previously active bridge service(s)." >&2
       restore_failed=0
       if [ -n "$ROLLBACK_FILE" ] && [ -f "$ROLLBACK_FILE" ]; then
@@ -368,11 +368,6 @@ import json,sys
 inventory=json.loads(sys.argv[1]); root=sys.argv[2]
 if inventory.get('safe_to_stage') is not True or inventory.get('problems'):
     raise SystemExit('HOLD: ambiguous loaded bridge ownership after stop')
-if any(r.get('drive_root_folder_id')==root or
-       r.get('requests_folder_id') in (None,) or
-       r.get('results_folder_id') in (None,)
-       for r in []):
-    raise SystemExit('HOLD: unreachable owner identity guard')
 if any(r.get('drive_root_folder_id')==root for r in inventory.get('loaded',[])):
     raise SystemExit('HOLD: another loaded bridge claimed production during handover')
 PYPOSTOWN
