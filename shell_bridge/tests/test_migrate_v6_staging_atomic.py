@@ -117,6 +117,17 @@ esac
             self.assertNotEqual(r.returncode, 0)
             self.assertNotIn("bootout", calls.read_text())
 
+    def test_prior_reconciliation_hold_refuses_new_attempt(self):
+        with tempfile.TemporaryDirectory() as td:
+            home, suffix, fake, calls, loaded = self.make_fixture(td)
+            hold = home / "Library/Logs/LocalExecutorBridgeV6Migrator.hold"
+            hold.write_text("historical work unresolved")
+            r = self.run_migrator(home, suffix, fake, calls, loaded)
+            self.assertNotEqual(r.returncode, 0)
+            self.assertTrue(hold.is_file())
+            self.assertNotIn("bootout", calls.read_text() if calls.exists() else "")
+            self.assertNotIn("bootstrap", calls.read_text() if calls.exists() else "")
+
     def test_pre_start_stop_failure_restores_original_from_plist(self):
         with tempfile.TemporaryDirectory() as td:
             home, suffix, fake, calls, loaded = self.make_fixture(td)
