@@ -10,12 +10,52 @@ from __future__ import annotations
 import json
 import plistlib
 import re
+import shlex
 import subprocess
 import sys
 from pathlib import Path
 
 IDENTITY = ("bridge_instance_id", "drive_root_folder_id",
             "requests_folder_id", "results_folder_id", "state_dir")
+
+
+def _bridge_process_identity(command: str) -> tuple[str, str] | None:
+    """Private comparison-only process identity; never print raw argv.
+
+    launchctl's PID is not proof that the process still executes the
+    command/config from its on-disk plist. Check both independently obtained
+    snapshots and hold on ambiguous/truncated/malformed ps output.
+    """
+    if len(command) > 32768:
+        return None
+    try:
+        tokens = shlex.split(command)
+    except ValueError:
+        return None
+    paths = [i for i, token in enumerate(tokens)
+             if token == "bridge.py" or token.endswith("/bridge.py")]
+    if len(paths) != 1 or paths[0] + 1 >= len(tokens):
+        return None
+    script_index = paths[0]
+    if tokens[script_index + 1] != "daemon":
+        return None
+    script = tokens[script_index]
+    if not Path(script).is_absolute():
+        return None
+    values = [token.split("=", 1)[1] for token in tokens
+              if token.startswith("--config=")]
+    positions = [i for i, token in enumerate(tokens) if token == "--config"]
+    if len(values) + len(positions) != 1:
+        return None
+    if positions:
+        i = positions[0]
+        if i + 1 >= len(tokens):
+            return None
+        values = [tokens[i + 1]]
+    if not values[0] or not Path(values[0]).is_absolute():
+        return None
+    return (script, values[0])
+
 def _belongs_to_bridge_ecosystem(label: str) -> bool:
     value = label.lower()
     # The native menu approval app can have its own LaunchAgent. It is not
@@ -49,6 +89,9 @@ def inspect_services(home: Path, launchctl_listing: str, process_listing: str | 
     home = home.absolute()
     records = []
     problems = []
+    # Internal comparison-only material; do not export installed paths,
+    # arbitrary ps arguments or other potentially sensitive strings.
+    expected_pid_commands: dict[str, tuple[str, str]] = {}
     for line in launchctl_listing.splitlines()[1:]:
         fields = line.split(None, 2)
         if len(fields) != 3:
@@ -74,6 +117,13 @@ def inspect_services(home: Path, launchctl_listing: str, process_listing: str | 
             positions = [i for i, x in enumerate(argv) if x == "--config"]
             if len(args) + len(positions) != 1:
                 raise ValueError("config argument is missing or ambiguous")
+            script_positions = [i for i, token in enumerate(argv)
+                                if token == "bridge.py" or token.endswith("/bridge.py")]
+            if (len(script_positions) != 1 or
+                    script_positions[0] + 1 >= len(argv) or
+                    argv[script_positions[0] + 1] != "daemon" or
+                    not Path(argv[script_positions[0]]).is_absolute()):
+                raise ValueError("bridge daemon script identity is ambiguous")
             if args:
                 config = Path(args[0].split("=", 1)[1])
             else:
@@ -103,28 +153,42 @@ def inspect_services(home: Path, launchctl_listing: str, process_listing: str | 
                     field = str(location.resolve(strict=False))
                 record[key] = field
             record["state"] = "verified"
+            if record["pid"] is not None:
+                expected_pid_commands[record["pid"]] = (
+                    argv[script_positions[0]], str(config))
         except (OSError, ValueError, TypeError, plistlib.InvalidFileException):
             record["state"] = "unverifiable"
             problems.append("unverifiable loaded bridge: " + label)
         records.append(record)
     if process_listing is not None:
         known_pids = {item["pid"] for item in records if item.get("pid")}
-        observed_pids = set()
+        observed_pids: dict[str, str] = {}
         for line in process_listing.splitlines():
             part = line.strip().split(None, 1)
             if len(part) != 2 or not part[0].isdecimal():
                 continue
             pid, argv = part
-            observed_pids.add(pid)
+            observed_pids[pid] = argv
             if (re.search(r"(?:^|/)bridge\.py\s+daemon\b", argv)
                     and pid not in known_pids):
                 problems.append("unmanaged bridge daemon PID=" + pid)
         for record in records:
             pid = record.get("pid")
-            if pid is not None and pid not in observed_pids:
+            if pid is None:
+                continue
+            if pid not in observed_pids:
                 # launchctl and ps are independent snapshots. A process which
                 # disappeared between them is *not* proof of safe ownership.
                 problems.append("launchd PID missing from process inventory: "
+                                + record["label"] + " PID=" + pid)
+                continue
+            expected = expected_pid_commands.get(pid)
+            actual = _bridge_process_identity(observed_pids[pid])
+            if expected is None or actual != expected:
+                # Merely seeing the launchd PID in ps is not enough. The
+                # daemon may be running a different script, or a config
+                # pointing to another mailbox, from what the plist declares.
+                problems.append("launchd PID command/config differs from registered bridge: "
                                 + record["label"] + " PID=" + pid)
     active_collisions = []
     parked_loaded = sorted(record["label"] for record in records if not record["running"])
