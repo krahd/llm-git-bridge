@@ -16,7 +16,7 @@ class SingleRunReleaseContractTests(unittest.TestCase):
     def test_single_entrypoint_progresses_past_isolated_staging(self):
         self.assertIn("prepare_v6_on_mac.sh", SCRIPT)
         self.assertIn("approval_canary", SCRIPT)
-        self.assertIn("install.sh --stage-only", SCRIPT)
+        self.assertIn("install.sh --upgrade-stage-only", SCRIPT)
         self.assertIn("bash shell_bridge/cutover.sh", SCRIPT)
         self.assertIn("V6_PRODUCTION_PROVISIONAL_AND_APPROVAL_VERIFIED=1", SCRIPT)
 
@@ -42,6 +42,25 @@ class SingleRunReleaseContractTests(unittest.TestCase):
         self.assertNotIn("git reset --hard", SCRIPT)
         self.assertNotIn("git clean -", SCRIPT)
         self.assertNotIn("launchctl bootout", SCRIPT)
+
+    def test_first_cutover_keeps_candidate_inert_until_accepted(self):
+        stage = SCRIPT.index('PROD_PLIST="$PROD_INSTALL/launchagent.plist"')
+        stage_only = SCRIPT.index('install.sh --upgrade-stage-only')
+        cutover = SCRIPT.index('bash shell_bridge/cutover.sh')
+        approval = SCRIPT.index('approval_canary "$PROD_ROOT" "$PROD_ALLOWED" allow production')
+        archive = SCRIPT.index('echo "Phase 8: archive stopped production v5')
+        publish = SCRIPT.index('python3 "$REGISTRATION_HELPER" publish ')
+        receipt = SCRIPT.index('v6-release-acceptance.json')
+        self.assertLess(stage, stage_only)
+        self.assertLess(stage_only, cutover)
+        self.assertLess(cutover, approval)
+        self.assertLess(approval, archive)
+        self.assertLess(archive, publish)
+        self.assertLess(publish, receipt)
+        self.assertIn('PLIST="$PROD_PLIST"', SCRIPT)
+        self.assertIn('SOURCE_CONFIG_FILE="$LEGACY_CONFIG"', SCRIPT)
+        self.assertIn('PROD_PERSIST_PLIST="$HOME/Library/LaunchAgents/$PROD_LABEL.plist"', SCRIPT)
+        self.assertIn('reboot_verified":False', SCRIPT)
 
     def test_retirement_occurs_only_after_production_approval(self):
         approval = SCRIPT.index('approval_canary "$PROD_ROOT" "$PROD_ALLOWED" allow production')
