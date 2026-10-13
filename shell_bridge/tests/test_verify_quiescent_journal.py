@@ -254,7 +254,9 @@ class QuiescentJournalTests(unittest.TestCase):
     def test_cutover_checks_journal_before_and_after_old_owner_shutdown(self):
         content = CUTOVER.read_text()
         gate = 'verify_quiescent_journal.py" "$LEGACY_STATE_DIR"'
-        self.assertEqual(content.count(gate), 2)
+        # The guarded v6-source mode also verifies the journal before
+        # attempting to restore the old service on an ambiguous stop.
+        self.assertEqual(content.count(gate), 3)
         first = content.index(gate)
         stop = content.index('# Stop old consumers first.')
         second = content.rindex(gate)

@@ -11,6 +11,9 @@ OLD_LABELS=("com.tom.chatgpt-shell-bridge" "io.llm-git-bridge.daemon" "net.laure
 SMOKE_ATTEMPTS="${SMOKE_ATTEMPTS:-30}"
 SMOKE_SLEEP="${SMOKE_SLEEP:-2}"
 RETIRE_OLD_AFTER_SMOKE="${RETIRE_OLD_AFTER_SMOKE:-0}"
+# Default remains the original v5-first cutover. Only the separate v6
+# wrapper may explicitly select the v6-to-v6 handover mode.
+CUTOVER_SOURCE_VERSION="${CUTOVER_SOURCE_VERSION:-5}"
 UID_NOW="$(id -u)"
 ROLLBACK_FILE=""
 TMP_REQ=""
@@ -20,6 +23,7 @@ CUTOVER_COMMITTED=0
 PROVISIONAL_ACTIVATION=0
 STARTED_NEW=0
 OLD_CONSUMERS_STOPPED=0
+V6_UNSAFE_TO_RESTORE=0
 
 fail(){ echo "ERROR: $*" >&2; exit 1; }
 need(){ command -v "$1" >/dev/null 2>&1 || fail "missing required command: $1"; }
@@ -43,8 +47,44 @@ rollback() {
         chmod 600 "$STATE_DIR/cutover-rollback-services.tsv"
       fi
     elif [ "$OLD_CONSUMERS_STOPPED" -eq 1 ]; then
-      # No v6 admission was possible; restoring the original consumer does
-      # not introduce a v6/v5 duplicate-execution race.
+      # Even a failed bootout may have left indeterminate STARTED work.
+      # Recheck current evidence before restoring old v6; an ambiguous
+      # transition is a HOLD, not an invitation to replay effects.
+      if [ "$CUTOVER_SOURCE_VERSION" = 6 ] && [ "$V6_UNSAFE_TO_RESTORE" -eq 0 ]; then
+        if ! PYTHONDONTWRITEBYTECODE=1 python3 "$(cd "$(dirname "$0")" && pwd)/verify_quiescent_journal.py" "$LEGACY_STATE_DIR" >/dev/null; then
+          V6_UNSAFE_TO_RESTORE=1
+        fi
+        if [ "$V6_UNSAFE_TO_RESTORE" -eq 0 ]; then
+          CURRENT_OWNERS="$(PYTHONDONTWRITEBYTECODE=1 python3 "$OWNER_SCRIPT")" ||
+            V6_UNSAFE_TO_RESTORE=1
+          if [ "$V6_UNSAFE_TO_RESTORE" -eq 0 ]; then
+            python3 - "$CURRENT_OWNERS" "$ROOT_ID" "${OLD_LABELS[@]}" <<'PYROLLBACKOWN' || V6_UNSAFE_TO_RESTORE=1
+import json,sys
+inventory=json.loads(sys.argv[1])
+root=sys.argv[2]
+old=set(sys.argv[3:])
+if inventory.get('safe_to_stage') is not True or inventory.get('problems'):
+    raise SystemExit(1)
+for item in inventory.get('loaded',[]):
+    if item.get('drive_root_folder_id')==root and item.get('label') not in old:
+        raise SystemExit(1)
+PYROLLBACKOWN
+          fi
+        fi
+      fi
+      if [ "$CUTOVER_SOURCE_VERSION" = 6 ] && [ "$V6_UNSAFE_TO_RESTORE" -eq 1 ]; then
+        # An unexpected claimant appeared after the source stopped. Restoring
+        # the old daemon would risk concurrent execution of the same request.
+        mkdir -p "$STATE_DIR"; chmod 700 "$STATE_DIR" || true
+        printf '%s\n' "v6_upgrade_owner_race_hold $(date -u +%Y-%m-%dT%H:%M:%SZ)" > "$STATE_DIR/cutover-reconciliation-required"
+        if [ -n "$ROLLBACK_FILE" ] && [ -s "$ROLLBACK_FILE" ]; then
+          cp -p "$ROLLBACK_FILE" "$STATE_DIR/cutover-rollback-services.tsv"
+          chmod 600 "$STATE_DIR/cutover-rollback-services.tsv"
+        fi
+        printf 'CRITICAL: new owner appeared; keep old v6 stopped until local journal/mailbox reconciliation.\n' >&2
+      else
+        # No new-v6 admission was possible and the last owner snapshot was
+        # exclusive; restore only the original source service.
       echo "Cutover failed after stopping legacy consumers; restoring previously active bridge service(s)." >&2
       restore_failed=0
       if [ -n "$ROLLBACK_FILE" ] && [ -f "$ROLLBACK_FILE" ]; then
@@ -73,6 +113,7 @@ rollback() {
           chmod 600 "$STATE_DIR/cutover-rollback-services.tsv"
         fi
       fi
+      fi
     fi
   fi
   [ -n "$ROLLBACK_FILE" ] && rm -f "$ROLLBACK_FILE" || true
@@ -87,6 +128,15 @@ trap rollback EXIT
 [ "$(uname -s)" = Darwin ] || fail "macOS required"
 need python3; need rclone; need launchctl
 [ "$RETIRE_OLD_AFTER_SMOKE" = 0 ] || fail "legacy retirement requires separate verified production acceptance; RETIRE_OLD_AFTER_SMOKE must be 0"
+case "$CUTOVER_SOURCE_VERSION" in
+  5) ;;
+  6)
+    [ -t 0 ] || fail "v6-to-v6 handover requires out-of-band interactive local Terminal"
+    [ -z "${CHATGPT_SHELL_BRIDGE_REQUEST_ID:-}" ] ||
+      fail "v6-to-v6 handover cannot be submitted through any bridge mailbox"
+    ;;
+  *) fail "unsupported source version; use explicit v6-to-v6 wrapper" ;;
+esac
 [ -f "$NEW_PLIST" ] || fail "staged v6 plist missing: $NEW_PLIST"
 [ -f "$NEW_CONFIG" ] || fail "staged v6 config missing: $NEW_CONFIG"
 [ -f "$NEW_INSTALL_DIR/bridge.py" ] || fail "staged v6 bridge missing: $NEW_INSTALL_DIR/bridge.py"
@@ -213,7 +263,7 @@ fi
 R=(rclone --drive-root-folder-id "$ROOT_ID")
 TMP_HEALTH="$(mktemp)"
 "${R[@]}" copyto "${REMOTE}health.json" "$TMP_HEALTH" >/dev/null 2>&1 || fail "cannot read current production health.json"
-python3 - "$TMP_HEALTH" "$ROOT_ID" "$TARGET_INSTANCE" <<'PYHEALTH'
+python3 - "$TMP_HEALTH" "$ROOT_ID" "$TARGET_INSTANCE" "$CUTOVER_SOURCE_VERSION" <<'PYHEALTH'
 import datetime,json,sys,time
 h=json.load(open(sys.argv[1],encoding='utf-8'))
 if h.get('kind')!='shell_bridge_health':
@@ -221,8 +271,10 @@ if h.get('kind')!='shell_bridge_health':
 if h.get('drive_root_folder_id')!=sys.argv[2] or h.get('bridge_instance_id')!=sys.argv[3]:
     raise SystemExit('production heartbeat does not match the pinned legacy mailbox/instance')
 version=h.get('bridge_version')
-if isinstance(version,bool) or str(version)!='5':
-    raise SystemExit('production mailbox is not owned by v5; reconcile before cutting over')
+if isinstance(version,bool) or str(version)!=sys.argv[4]:
+    if sys.argv[4]=='5':
+        raise SystemExit('production mailbox is not owned by v5; reconcile before cutting over')
+    raise SystemExit('production mailbox is not owned by v6; reconcile before cutting over')
 active=h.get('active_requests')
 if not isinstance(active,list): raise SystemExit('health.json has no active_requests list')
 if active: raise SystemExit('production bridge is not quiescent; active requests: '+', '.join(map(str,active)))
@@ -263,6 +315,48 @@ PENDING="$(printf '%s\n' "$PENDING" | sed '/^[[:space:]]*$/d')"
 python3 "$(cd "$(dirname "$0")" && pwd)/verify_quiescent_journal.py" "$LEGACY_STATE_DIR" ||
   fail "legacy durable journal contains unresolved or indeterminate effects"
 
+if [ "$CUTOVER_SOURCE_VERSION" = 6 ]; then
+  # Existing v6 state includes both historical request receipts and workspace
+  # continuity. Never silently adopt a second journal for a source upgrade.
+  python3 - "$STATE_DIR" "$LEGACY_STATE_DIR" <<'PYUPGRADESTATE' || fail "v6-to-v6 candidate does not preserve the live durable state path"
+from pathlib import Path
+import sys
+a,b=(Path(v).expanduser().resolve(strict=False) for v in sys.argv[1:])
+raise SystemExit(0 if a == b else 1)
+PYUPGRADESTATE
+
+  # The original v5 cutover script predates v6 production. An explicitly
+  # selected v6 source must also pass the separate PID-bound source gate.
+  # This is pre-stop evidence ONLY, never post-stop/takeover authority.
+  SOURCE_GATE="$(cd "$(dirname "$0")" && pwd)/v6_to_v6_preflight.py"
+  [ -f "$SOURCE_GATE" ] && [ ! -L "$SOURCE_GATE" ] ||
+    fail "v6-to-v6 pre-stop source gate is unavailable"
+  PYTHONDONTWRITEBYTECODE=1 python3 - "$SOURCE_GATE" "$OWNERSHIP"       "$NEW_LABEL" "$NEW_CONFIG" "$TMP_HEALTH" "$STAGED_SOURCE_COMMIT" "$ROOT_ID" <<'PYV6GATE' || fail "v6-to-v6 source pre-stop identity and quiescence gate did not pass"
+import importlib.util,json,sys
+path,raw,new,config_path,health_path,commit,root=sys.argv[1:]
+spec=importlib.util.spec_from_file_location("v6_to_v6_preflight",path)
+module=importlib.util.module_from_spec(spec)
+spec.loader.exec_module(module)
+inventory=json.loads(raw)
+owners=[r for r in inventory.get("loaded",[])
+        if r.get("drive_root_folder_id")==root]
+if len(owners)!=1:
+    raise SystemExit("HOLD: v6 source must be one loaded mailbox owner")
+source=owners[0]
+candidate=json.load(open(config_path,encoding="utf-8"))
+health=json.load(open(health_path,encoding="utf-8"))
+source_cfg={k:source.get(k) for k in module._ID_FIELDS}
+report=module.assess(
+    inventory,source.get("label"),new,source_cfg,candidate,health,
+    journal_verified=True,pending_mailbox_files=[],
+    candidate_source_commit=commit,candidate_manifest_verified=True)
+if not report["prestop_evidence_consistent"]:
+    raise SystemExit("HOLD: v6 pre-stop gates: "+",".join(report["blockers"]))
+if report["activation_authorized"] is not False:
+    raise SystemExit("HOLD: pre-stop gate attempted to authorize cutover")
+PYV6GATE
+fi
+
 ROLLBACK_FILE="$(mktemp)"
 for label in "${OLD_LABELS[@]}"; do
   plist="$HOME/Library/LaunchAgents/$label.plist"
@@ -287,6 +381,24 @@ for label in "${OLD_LABELS[@]}"; do
   fi
 done
 
+# Re-read loaded ownership after stopping the source. A new/parked
+# consumer which wakes during the stop window must not be joined by the new
+# v6 instance, and must not trigger automatic old-v6 restoration.
+if [ "$CUTOVER_SOURCE_VERSION" = 6 ]; then
+  V6_UNSAFE_TO_RESTORE=1
+  POST_STOP_OWNERSHIP="$(PYTHONDONTWRITEBYTECODE=1 python3 "$OWNER_SCRIPT")" ||
+    fail "v6 ownership changed or is unverifiable after source shutdown"
+  python3 - "$POST_STOP_OWNERSHIP" "$ROOT_ID" <<'PYPOSTOWN'
+import json,sys
+inventory=json.loads(sys.argv[1]); root=sys.argv[2]
+if inventory.get('safe_to_stage') is not True or inventory.get('problems'):
+    raise SystemExit('HOLD: ambiguous loaded bridge ownership after stop')
+if any(r.get('drive_root_folder_id')==root for r in inventory.get('loaded',[])):
+    raise SystemExit('HOLD: another loaded bridge claimed production during handover')
+PYPOSTOWN
+  V6_UNSAFE_TO_RESTORE=0
+fi
+
 # Close the drain race: after legacy consumers are stopped, refuse to attach v6
 # if a request arrived while the stop sequence was in progress. Rollback will
 # restore any legacy consumers that were actually stopped.
@@ -296,8 +408,12 @@ PENDING_AFTER_STOP="$(printf '%s\n' "$PENDING_AFTER_STOP" | sed '/^[[:space:]]*$
 
 # Stop/drain may have altered durable state since the first snapshot.
 # Re-read local FINISHED/STARTED markers after the old owner has stopped.
+# An indeterminate state discovered after shutdown is not a recoverable
+# v6-to-v6 pre-admission rollback; restarting the old v6 could replay it.
+if [ "$CUTOVER_SOURCE_VERSION" = 6 ]; then V6_UNSAFE_TO_RESTORE=1; fi
 python3 "$(cd "$(dirname "$0")" && pwd)/verify_quiescent_journal.py" "$LEGACY_STATE_DIR" ||
   fail "journal changed to unresolved/indeterminate during shutdown; hold all consumers"
+if [ "$CUTOVER_SOURCE_VERSION" = 6 ]; then V6_UNSAFE_TO_RESTORE=0; fi
 
 # From here a partially successful bootstrap may already have started v6,
 # even when launchctl reports failure. Fail closed and require journal review.
@@ -324,6 +440,23 @@ done
 if [ "${LIVE_HEALTH_CONFIRMED:-0}" != 1 ]; then
   rm -f "$LIVE_HEALTH"
   fail "production daemon exact build, PID, or heartbeat not verified; rollback remains guarded"
+fi
+if [ "$CUTOVER_SOURCE_VERSION" = 6 ]; then
+  # A fresh PID-bound health record is still not evidence that no second
+  # LaunchAgent joined the mailbox during startup. Re-snapshot launchd after
+  # successful candidate health verification and before the smoke request.
+  V6_ACTIVATED_OWNERSHIP="$(PYTHONDONTWRITEBYTECODE=1 python3 "$OWNER_SCRIPT")" ||
+    fail "v6 activation ownership is unverifiable"
+  python3 - "$V6_ACTIVATED_OWNERSHIP" "$ROOT_ID" "$NEW_LABEL" <<'PYFINALOWN' || fail "v6 replacement is not the exclusive loaded mailbox owner"
+import json,sys
+inventory=json.loads(sys.argv[1]); root,label=sys.argv[2:]
+if inventory.get('safe_to_stage') is not True or inventory.get('problems'):
+    raise SystemExit('HOLD: loaded bridge collisions after replacement startup')
+owners=[r for r in inventory.get('loaded',[])
+        if r.get('drive_root_folder_id')==root]
+if len(owners)!=1 or owners[0].get('label')!=label or not owners[0].get('running'):
+    raise SystemExit('HOLD: expected exactly one running target service')
+PYFINALOWN
 fi
 rm -f "$LIVE_HEALTH"
 
