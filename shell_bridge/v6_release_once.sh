@@ -19,6 +19,15 @@ SOURCE="$(git rev-parse HEAD)"
 [ "$(git rev-parse refs/remotes/origin/main 2>/dev/null)" = "$SOURCE" ] || fail "this worktree is not the freshly fetched canonical origin/main release"
 echo "RELEASE_SOURCE=$SOURCE"
 echo "Phase 0: verify live production is the expected v5 instance before creating staging state"
+# The shared health.json is last-writer-wins. It can report v5 even when a
+# different v6 daemon is simultaneously consuming the production mailbox.
+# Reject split-brain, historical indeterminate FINISHED and unreadable local
+# journals *before* any isolated staging, mailbox creation or operator prompt.
+# This gate is deliberately read-only; exit 0 never by itself authorises a
+# cutover. The later controller still repeats its stop-time checks.
+if ! PYTHONDONTWRITEBYTECODE=1 python3 shell_bridge/audit_handover_readiness.py >/dev/null; then
+  fail "production LaunchAgent ownership or durable journal is not locally safe; do not create staging or cut over"
+fi
 LEGACY_CONFIG="$HOME/.config/chatgpt-shell-bridge/config.json"
 LIVE_LEGACY_REMOTE="$(python3 shell_bridge/verify_v5_production_health.py remote "$LEGACY_CONFIG")" ||
   fail "cannot identify the pinned legacy production remote"
