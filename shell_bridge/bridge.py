@@ -1475,7 +1475,8 @@ def canonical_operation_payload(v: dict, cfg: dict) -> str:
 
 
 def _verified_logical_original(state: Path, request_id: str,
-                               operation_id: str,
+                               operation_id: str, cfg: dict,
+                               expected_digest: str,
                                expected_sha: str | None = None) -> dict | None:
     """Read a terminal logical source only when the request and markers agree.
 
@@ -1510,6 +1511,18 @@ def _verified_logical_original(state: Path, request_id: str,
         result_data = load_json_bytes(result.read_bytes())
         if not all(isinstance(x, dict) for x in
                    (request_data, finish_data, result_data)):
+            return None
+        # Hash-equal receipt markers do not prove that the source command is
+        # the command admitted under this logical operation. All three could
+        # refer to a replaced request. Bind the source to the immutable
+        # write-ahead admission's canonical execution digest as well.
+        validated = validate_request(
+            request_data, request_id + ".json", Path(cfg["allowed_root"]),
+            int(cfg.get("max_timeout_seconds", DEFAULT_MAX_TIMEOUT)),
+            int(cfg.get("max_command_bytes", DEFAULT_MAX_COMMAND_BYTES)),
+            int(cfg.get("max_stdin_bytes", DEFAULT_MAX_STDIN_BYTES)),
+        )
+        if canonical_operation_payload(validated, cfg) != expected_digest:
             return None
         status = result_data.get("status")
         if (request_data.get("id") != request_id
@@ -1627,7 +1640,8 @@ def process_one(name: str, cfg: dict) -> None:
                         return
                     if original_path.is_file() and original_finished.is_file():
                         if _verified_logical_original(
-                                state, prior_id, operation_id, sha256_bytes(raw)) is not None:
+                                state, prior_id, operation_id, cfg, digest,
+                                sha256_bytes(raw)) is not None:
                             _publish_stored(original_path, name, cfg)
                         return
                     if original_path.exists() or original_finished.exists():
@@ -1668,7 +1682,7 @@ def process_one(name: str, cfg: dict) -> None:
                 original_dir = state / "requests" / prior_id
                 terminal_path = original_dir / "result.json"
                 finished = original_dir / "finished.json"
-                prior = _verified_logical_original(state, prior_id, operation_id)
+                prior = _verified_logical_original(state, prior_id, operation_id, cfg, digest)
                 if prior is not None:
                     status = prior["status"]
                     details = {k: value for k, value in prior.items() if k not in
