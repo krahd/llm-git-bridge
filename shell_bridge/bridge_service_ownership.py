@@ -169,7 +169,7 @@ def inspect_services(home: Path, launchctl_listing: str, process_listing: str | 
                 continue
             pid, argv = part
             observed_pids[pid] = argv
-            if (re.search(r"(?:^|/)bridge\\.py\\s+daemon\\b", argv)
+            if (re.search(r"(?:^|/)bridge\.py\s+daemon\b", argv)
                     and pid not in known_pids):
                 problems.append("unmanaged bridge daemon PID=" + pid)
         for record in records:
