@@ -317,6 +317,13 @@ class QuiescentJournalTests(unittest.TestCase):
         request = original / "request.json"
         request.write_text(json.dumps({"id": "original",
                                        "operation_id": "another-operation"}))
+        new_sha = hashlib.sha256(request.read_bytes()).hexdigest()
+        (original / "started.json").write_text(json.dumps({"request_sha256": new_sha}))
+        (original / "finished.json").write_text(
+            json.dumps({"status": "completed", "request_sha256": new_sha}))
+        (original / "result.json").write_text(json.dumps({
+            "protocol": 1, "kind": "result", "id": "original",
+            "status": "completed", "request_sha256": new_sha}))
         with self.assertRaisesRegex(UnresolvedJournalError, "identities disagree"):
             verify(self.state)
 
