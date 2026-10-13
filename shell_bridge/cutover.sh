@@ -124,7 +124,12 @@ PYROLLBACKOWN
         # An unresolved journal or another owner appeared after the source
         # stopped. Restarting either v5 or v6 could duplicate effects.
         mkdir -p "$STATE_DIR"; chmod 700 "$STATE_DIR" || true
-        printf '%s\n' "pre_admission_source_restoration_hold $(date -u +%Y-%m-%dT%H:%M:%SZ)" > "$STATE_DIR/cutover-reconciliation-required"
+        if [ "$CUTOVER_SOURCE_VERSION" = 6 ]; then
+          SOURCE_ROLLBACK_REASON="v6_upgrade_owner_race_hold"
+        else
+          SOURCE_ROLLBACK_REASON="v5_pre_admission_rollback_hold"
+        fi
+        printf '%s\n' "$SOURCE_ROLLBACK_REASON $(date -u +%Y-%m-%dT%H:%M:%SZ)" > "$STATE_DIR/cutover-reconciliation-required"
         if [ -n "$ROLLBACK_FILE" ] && [ -s "$ROLLBACK_FILE" ]; then
           cp -p "$ROLLBACK_FILE" "$STATE_DIR/cutover-rollback-services.tsv"
           chmod 600 "$STATE_DIR/cutover-rollback-services.tsv"
@@ -320,15 +325,18 @@ import sys
 candidate,source=(Path(v).expanduser() for v in sys.argv[1:])
 if not candidate.is_absolute() or not source.is_absolute() or candidate != source:
     raise SystemExit(1)
-# A linked alias can redirect to another journal between admission and
-# bootstrap. Inspect every path component, including external volumes, not
-# only the final state directory; nonlinked exact external paths are valid.
+# macOS /var and /tmp are system-controlled symlink prefixes; following
+# them as if they were user-writable aliases would reject ordinary temp/home
+# paths. Guard the mutable portion *beneath* this user's home, and refuse
+# externally mounted state paths until a separate trusted-volume handover
+# protocol is available.
+home=Path.home()
+if home not in source.parents:
+    raise SystemExit(1)
 at=source
-while True:
+while at!=home:
     if at.is_symlink():
         raise SystemExit(1)
-    if at==at.parent:
-        break
     at=at.parent
 print('1')
 PYSTATE
