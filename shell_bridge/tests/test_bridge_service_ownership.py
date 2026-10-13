@@ -35,6 +35,11 @@ class LoadedBridgeOwnershipTests(unittest.TestCase):
                                                   "/bin/bridge.py", "daemon",
                                                   "--config", str(config)]}, stream)
 
+    def ps(self, label, pid, *, suffix=""):
+        config = self.home / ".config" / label / "config.json"
+        return (f"{pid} /opt/homebrew/bin/python3 /bin/bridge.py daemon "
+                f"--config {config}{suffix}\n")
+
     def check(self, *labels):
         listing = "PID\tStatus\tLabel\n" + "".join(
             f"{100 + i}\t0\t{label}\n" for i, label in enumerate(labels))
@@ -99,8 +104,7 @@ class LoadedBridgeOwnershipTests(unittest.TestCase):
         listing = "PID\tStatus\tLabel\n1786\t0\tbridge-a\n"
         result = inspect_services(
             self.home, listing,
-            "1786 /usr/bin/python3 /opt/bridge.py daemon --config /tmp/cfg "
-            "--password=NEVER_LOG_THIS\n",
+            self.ps("bridge-a", 1786, suffix=" --password=NEVER_LOG_THIS"),
         )
         self.assertTrue(result["safe_to_stage"])
         self.assertNotIn("NEVER_LOG_THIS", json.dumps(result))
@@ -109,20 +113,50 @@ class LoadedBridgeOwnershipTests(unittest.TestCase):
     def test_unmanaged_manual_daemon_is_rejected(self):
         self.service("bridge-a", "one")
         launchd = "PID\tStatus\tLabel\n101\t0\tbridge-a\n"
-        processes = ("101 /usr/bin/python3 /opt/bridge.py daemon --config /a\n"
-                     "333 /usr/bin/python3 /tmp/manual/bridge.py daemon --config /b\n")
+        processes = (
+            self.ps("bridge-a", 101)
+            + "333 /usr/bin/python3 /tmp/manual/bridge.py daemon --config /b\n")
         report = inspect_services(self.home, launchd, processes)
         self.assertFalse(report["safe_to_stage"])
-        self.assertTrue(any("unmanaged bridge daemon PID=333" == p
-                            for p in report["problems"]))
+        self.assertIn("unmanaged bridge daemon PID=333", report["problems"])
 
     def test_known_launchd_daemon_process_is_not_rejected(self):
         self.service("bridge-a", "one")
         report = inspect_services(
             self.home, "PID\tStatus\tLabel\n101\t0\tbridge-a\n",
-            "101 /usr/bin/python3 /opt/bridge.py daemon --config /a\n",
+            self.ps("bridge-a", 101),
         )
         self.assertTrue(report["safe_to_stage"])
+
+    def test_same_launchd_pid_with_another_config_fails_closed(self):
+        self.service("bridge-a", "production")
+        self.service("bridge-b", "different")
+        report = inspect_services(
+            self.home, "PID\tStatus\tLabel\n1786\t0\tbridge-a\n",
+            self.ps("bridge-b", 1786),
+        )
+        self.assertFalse(report["safe_to_stage"])
+        self.assertIn("command/config differs", " ".join(report["problems"]))
+
+    def test_same_launchd_pid_with_wrong_or_unreadable_command_fails(self):
+        self.service("bridge-a", "production")
+        config = self.home / ".config/bridge-a/config.json"
+        for command in (
+            f"1786 /usr/bin/python3 /opt/other/bridge.py daemon --config {config}\n",
+            f"1786 /usr/bin/python3 /bin/bridge.py doctor --config {config}\n",
+            f"1786 /usr/bin/python3 /bin/not-bridge.py daemon --config {config}\n",
+            "1786 /usr/bin/python3 /bin/bridge.py daemon --config /other/config.json\n",
+            "1786 /bin/zsh /tmp/unrelated.sh\n",
+            '1786 /usr/bin/python3 "/bin/bridge.py daemon --config\n',
+        ):
+            with self.subTest(command=command[:40]):
+                report = inspect_services(
+                    self.home, "PID\tStatus\tLabel\n1786\t0\tbridge-a\n",
+                    command,
+                )
+                self.assertFalse(report["safe_to_stage"])
+                self.assertNotIn("/other/config.json", json.dumps(report))
+                self.assertNotIn("/tmp/unrelated.sh", json.dumps(report))
 
     def test_unrelated_macos_bridge_named_daemon_is_ignored(self):
         listing = "PID\\tStatus\\tLabel\\n123\\t0\\tcom.apple.SystemBridge\\n"
