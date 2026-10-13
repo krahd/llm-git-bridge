@@ -68,6 +68,13 @@ fi
 [ -x "$SHELL_BIN" ] || { echo "ERROR: shell is not executable: $SHELL_BIN" >&2; exit 1; }
 
 fail(){ echo "ERROR: $*" >&2; exit 1; }
+if [ "$UPGRADE_STAGE" -eq 1 ]; then
+  # A staged RunAtLoad plist in ~/Library/LaunchAgents can become live at
+  # the next login even without bootstrap. Keep it inside the inert install
+  # directory until the guarded owner handover explicitly loads it.
+  [ "$PLIST" = "$INSTALL_DIR/launchagent.plist" ] ||
+    fail "upgrade staging LaunchAgent plist must remain inert under its fresh installation directory"
+fi
 # Installation targets are immutable. Reusing a loaded v6 install directory
 # rewrites its Python files and manifest before the old process is stopped.
 # That is neither an atomic upgrade nor a recoverable rollback.
