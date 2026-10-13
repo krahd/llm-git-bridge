@@ -116,6 +116,24 @@ legacy retirement. In particular, a staging mailbox that has already
 double-executed requests must remain excluded from side-effecting operations
 until an out-of-band, guarded ownership handover is verified.
 
+If a journal reports `JOURNAL_HANDOVER_HOLD: journal contains indeterminate
+completion`, **do not** delete the receipt, replay the request, stop running
+services, or classify it as successfully completed. First run this bounded,
+read-only local triage from an independently verified source checkout:
+
+```bash
+PYTHONDONTWRITEBYTECODE=1 python3 shell_bridge/inspect_indeterminate_journal.py /Users/tom/.local/state/chatgpt-shell-bridge
+```
+
+It reports up to 40 affected request IDs and only controlled status-marker
+labels, plus total counts from its bounded scan. It does **not** emit commands,
+cwd, stdin, stdout, stderr or raw results; an incomplete scan explicitly
+fails rather than declaring safety. Triage can locate receipts but cannot
+prove whether an indeterminate command performed its external effects.
+Reconciliation must inspect the exact request, affected repository/remote
+state, and publication evidence separately under a controlled local process.
+Even zero findings from triage do not authorize cutover.
+
 ## Request protocol
 
 Create a raw JSON file named `<id>.json` in the mailbox `requests/` folder:
