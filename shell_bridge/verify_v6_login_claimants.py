@@ -114,6 +114,10 @@ def inspect_agents(directory: Path, source_label: str, root_id: str,
                         continue
                     program_claims_bridge = isinstance(program, str) and (
                         "bridge.py" in program or "shell_bridge" in program)
+                    # Set the suspicious-program flag *before* validating
+                    # ProgramArguments: otherwise an unknown-label
+                    # Program-only bridge could be discarded in the catch.
+                    is_bridge_command = program_claims_bridge
                     args = value.get("ProgramArguments")
                     if not isinstance(args, list) or not all(isinstance(a, str) for a in args):
                         if suspect or program_claims_bridge:
