@@ -1618,8 +1618,44 @@ def process_one(name: str, cfg: dict) -> None:
             request_sha = sha256_bytes(raw)
             result = result_envelope(v["id"], request_sha, status, details)
             request_dir = state / "requests" / v["id"]
+            if request_dir.is_symlink():
+                return
             request_dir.mkdir(parents=True, exist_ok=True)
-            _persist_then_publish(result, request_dir / "result.json", request_dir / "finished.json", name, cfg)
+            local_result = request_dir / "result.json"
+            finished = request_dir / "finished.json"
+            started = request_dir / "started.json"
+            prior_request = request_dir / "request.json"
+            if any(p.is_symlink() for p in (local_result, finished, started, prior_request)):
+                return
+            if local_result.exists() or finished.exists():
+                if (local_result.is_file() and finished.is_file()
+                        and _stored_sha(finished) == request_sha):
+                    _publish_stored(local_result, name, cfg)
+                elif local_result.exists() and finished.exists():
+                    _write_upload_delete(
+                        result_envelope(v["id"], request_sha, "rejected", {
+                            "message": "request id was reused with different bytes or terminal metadata",
+                        }),
+                        request_dir / "logical-conflict-result.json", name, cfg,
+                    )
+                # A partial result/FINISHED pair is immutable evidence of
+                # unknown effects. Never replace its other half automatically.
+                return
+            if started.exists():
+                _process_one_request(name, cfg, raw)
+                return
+            if prior_request.exists():
+                if not prior_request.is_file() or (
+                        prior_request.stat().st_size > len(raw)
+                        or prior_request.read_bytes() != raw):
+                    _write_upload_delete(
+                        result_envelope(v["id"], request_sha, "rejected", {
+                            "message": "request id was reused with different bytes",
+                        }),
+                        request_dir / "logical-conflict-result.json", name, cfg,
+                    )
+                    return
+            _persist_then_publish(result, local_result, finished, name, cfg)
             return
         atomic_write(admitted, json.dumps({
             "operation_id": operation_id, "payload_sha256": digest,
