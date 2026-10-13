@@ -10,6 +10,7 @@ from __future__ import annotations
 import json
 import os
 from pathlib import Path
+import stat
 import sys
 import time
 
@@ -28,13 +29,21 @@ class InventoryUnavailable(ValueError):
 
 def _status(path: Path, max_bytes: int, remaining: int) -> tuple[str, int]:
     """Read only bounded status metadata, with no arbitrary text in errors."""
-    if path.is_symlink() or not path.is_file():
+    if path.is_symlink():
         return "invalid", remaining
     try:
-        size = path.stat().st_size
-        if size > max_bytes or size > remaining:
-            return "unverifiable", remaining
-        raw = path.read_bytes()
+        # Open without following symlinks, including if a marker changes
+        # between directory inspection and the read-only evidence pass.
+        fd = os.open(path, os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK)
+        with os.fdopen(fd, "rb") as handle:
+            meta = os.fstat(handle.fileno())
+            if not stat.S_ISREG(meta.st_mode):
+                return "invalid", remaining
+            if meta.st_size > max_bytes or meta.st_size > remaining:
+                return "unverifiable", remaining
+            raw = handle.read(meta.st_size + 1)
+            if len(raw) != meta.st_size:
+                return "unverifiable", remaining
         remaining -= len(raw)
         record = json.loads(raw.decode("utf-8"))
         if not isinstance(record, dict):
@@ -135,6 +144,8 @@ def inspect(state: Path) -> dict:
         if isinstance(exc, InventoryUnavailable):
             raise
         raise InventoryUnavailable("unable to complete local journal inventory") from exc
+    if time.monotonic() - started_at > _MAX_SCAN_SECONDS:
+        raise InventoryUnavailable("request inventory exceeds bounded scan limits")
     report["complete_scan"] = True
     return report
 
