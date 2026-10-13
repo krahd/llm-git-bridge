@@ -129,18 +129,30 @@ python3 "$NEW_INSTALL/bridge.py" doctor --config "$NEW_CONFIG" >/dev/null
 if [ "${MIGRATOR_FAIL_AFTER_START:-0}" = 1 ]; then fail "injected post-start failure"; fi
 if [ "${MIGRATOR_SKIP_HEALTH:-0}" != 1 ]; then
   need "$RCLONE"
+  [ -f "$NEW_INSTALL/install-manifest.json" ] ||
+    fail "staged v6 install manifest unavailable"
+  SOURCE_COMMIT="$(python3 - "$NEW_INSTALL/install-manifest.json" <<'PYCOMMIT'
+import json,re,sys
+m=json.load(open(sys.argv[1],encoding='utf-8'))
+v=m.get('source_commit')
+if not isinstance(v,str) or not re.fullmatch(r'[a-f0-9]{40}',v): raise SystemExit(2)
+print(v)
+PYCOMMIT
+)" || fail "staged v6 source commit is not pinned"
+  HEALTH_VERIFIER="$ROOT/shell_bridge/verify_v6_candidate_health.py"
+  [ -f "$HEALTH_VERIFIER" ] && [ ! -L "$HEALTH_VERIFIER" ] ||
+    fail "exact-build v6 health verifier unavailable"
   tmp="$(mktemp)"; found=0
   for _ in 1 2 3 4 5 6 7 8 9 10; do
-    if "$RCLONE" --drive-root-folder-id "$ROOT_ID" copyto "${REMOTE}health.json" "$tmp" >/dev/null 2>&1 && python3 - "$tmp" "$INSTANCE_ID" <<'PYHEALTH'
-import json,sys
-h=json.load(open(sys.argv[1],encoding='utf-8'))
-raise SystemExit(0 if h.get('bridge_instance_id')==sys.argv[2] and h.get('bridge_version')=='6' else 1)
-PYHEALTH
-    then found=1; break; fi
+    if "$RCLONE" --drive-root-folder-id "$ROOT_ID" copyto "${REMOTE}health.json" "$tmp" >/dev/null 2>&1 &&
+       PYTHONDONTWRITEBYTECODE=1 python3 "$HEALTH_VERIFIER" "$NEW_CONFIG" "$tmp" "$SOURCE_COMMIT" "$NEW_LABEL" >/dev/null 2>&1; then
+      found=1; break
+    fi
     sleep 1
   done
   rm -f "$tmp"
-  [ "$found" -eq 1 ] || fail "candidate did not publish matching v6 health"
+  [ "$found" -eq 1 ] ||
+    fail "candidate exact build, service PID or fresh v6 health was not verified"
 fi
 COMMITTED=1
 trap - EXIT
