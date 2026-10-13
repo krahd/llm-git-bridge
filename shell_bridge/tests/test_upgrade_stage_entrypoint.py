@@ -24,6 +24,8 @@ class ProductionUpgradeStagingGuardTests(unittest.TestCase):
         self.assertIn('chmod 700 "$INSTALL_DIR" "$CONFIG_DIR"', text)
         self.assertIn('else\n  mkdir -p "$INSTALL_DIR" "$CONFIG_DIR" "$STATE_DIR"', text)
         self.assertIn('verify_upgrade_stage_source.py', text)
+        self.assertIn('PLIST" = "$INSTALL_DIR/launchagent.plist"', text)
+        self.assertIn("LaunchAgent plist must remain inert", text)
         self.assertLess(text.index('if [ "$STAGE_ONLY" -eq 1 ]; then\n  echo'),
                         text.index('launchctl bootstrap "gui/'))
         self.assertIn("os.environ['SOURCE_CONFIG_FILE'] if os.environ.get('UPGRADE_STAGE')=='1' else path", text)
@@ -34,6 +36,8 @@ class ProductionUpgradeStagingGuardTests(unittest.TestCase):
         self.assertIn("EXPECTED_SOURCE_COMMIT", text)
         self.assertIn('git -C "$ROOT" diff --quiet HEAD', text)
         self.assertIn('install.sh" --upgrade-stage-only', text)
+        self.assertIn('PLIST="$INSTALL_DIR/launchagent.plist"', text)
+        self.assertNotIn('PLIST="$HOME/Library/LaunchAgents/', text)
         self.assertNotIn("launchctl bootout", text)
         self.assertNotIn("launchctl bootstrap", text)
         self.assertNotIn("rclone copyto", text)
