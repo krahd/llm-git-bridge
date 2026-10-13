@@ -38,6 +38,9 @@ class LogicalOperationTests(unittest.TestCase):
                 self.execute_count+=1
             time.sleep(0.04)
             id=name[:-5];d=self.state/'requests'/id;d.mkdir(parents=True,exist_ok=True)
+            b.atomic_write(d/'request.json', raw)
+            b.atomic_write(d/'started.json', json.dumps(
+                {'request_sha256':b.sha256_bytes(raw)}).encode())
             persist(b.result_envelope(id,b.sha256_bytes(raw),'completed',{'exit_code':0,'stdout_text':'ONCE'}),
                     d/'result.json',d/'finished.json',name,cfg)
         with patch.object(b,'_copy_request',side_effect=copy),\
@@ -171,5 +174,51 @@ class LogicalOperationTests(unittest.TestCase):
         self.assertEqual((folder / "finished.json").read_bytes(), old_finished)
         self.assertEqual(json.loads((folder / "logical-conflict-result.json").read_text())
                          ["status"], "rejected")
+
+
+    def test_torn_original_terminal_marker_does_not_replay_completion(self):
+        self.payload("original")
+        self.payload("later")
+        self.run_requests(["original"])
+        source = self.state / "requests" / "original"
+        prior = (source / "result.json").read_bytes()
+        # Both marker files exist, but this FINISHED disagrees with result.
+        marker = json.loads((source / "finished.json").read_text())
+        marker["status"] = "rejected"
+        (source / "finished.json").write_text(json.dumps(marker))
+        self.assertIsNone(b._verified_logical_original(
+            self.state, "original", "one-logical-work"))
+        self.run_requests(["later"])
+        out = json.loads((self.state / "requests" / "later" / "result.json").read_text())
+        self.assertEqual(out["status"], "indeterminate")
+        self.assertNotEqual(out.get("replayed"), True)
+        self.assertEqual((source / "result.json").read_bytes(), prior)
+        self.assertEqual(self.execute_count, 1)
+
+    def test_missing_original_payload_does_not_replay_completion(self):
+        self.payload("original")
+        self.payload("later")
+        self.run_requests(["original"])
+        source = self.state / "requests" / "original"
+        (source / "request.json").unlink()
+        self.run_requests(["later"])
+        out = json.loads((self.state / "requests" / "later" / "result.json").read_text())
+        self.assertEqual(out["status"], "indeterminate")
+        self.assertEqual(self.execute_count, 1)
+
+    def test_prestart_rejection_remains_a_valid_terminal_original(self):
+        operation_id = "one-logical-work"
+        self.payload("original", operation_id=operation_id)
+        raw = self.requests["original.json"]
+        folder = self.state / "requests" / "original"
+        folder.mkdir(parents=True)
+        (folder / "request.json").write_bytes(raw)
+        rejected = b.result_envelope("original", b.sha256_bytes(raw),
+                                     "rejected", {"message": "prestart policy"})
+        (folder / "result.json").write_text(json.dumps(rejected))
+        (folder / "finished.json").write_text(json.dumps({
+            "status": "rejected", "request_sha256": b.sha256_bytes(raw)}))
+        self.assertEqual(b._verified_logical_original(
+            self.state, "original", operation_id)["status"], "rejected")
 
 if __name__=='__main__':unittest.main()
