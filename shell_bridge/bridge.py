@@ -1624,8 +1624,9 @@ def process_one(name: str, cfg: dict) -> None:
             local_result = request_dir / "result.json"
             finished = request_dir / "finished.json"
             started = request_dir / "started.json"
+            active = request_dir / "active.json"
             prior_request = request_dir / "request.json"
-            if any(p.is_symlink() for p in (local_result, finished, started, prior_request)):
+            if any(p.is_symlink() for p in (local_result, finished, started, active, prior_request)):
                 return
             if local_result.exists() or finished.exists():
                 if (local_result.is_file() and finished.is_file()
@@ -1643,6 +1644,10 @@ def process_one(name: str, cfg: dict) -> None:
                 return
             if started.exists():
                 _process_one_request(name, cfg, raw)
+                return
+            if active.exists():
+                # ACTIVE without a corresponding STARTED is a corrupt
+                # process claim, not proof that a logical reply is safe.
                 return
             if prior_request.exists():
                 if not prior_request.is_file() or (
