@@ -383,8 +383,12 @@ PENDING_AFTER_STOP="$(printf '%s\n' "$PENDING_AFTER_STOP" | sed '/^[[:space:]]*$
 
 # Stop/drain may have altered durable state since the first snapshot.
 # Re-read local FINISHED/STARTED markers after the old owner has stopped.
+# An indeterminate state discovered after shutdown is not a recoverable
+# v6-to-v6 pre-admission rollback; restarting the old v6 could replay it.
+if [ "$CUTOVER_SOURCE_VERSION" = 6 ]; then V6_UNSAFE_TO_RESTORE=1; fi
 python3 "$(cd "$(dirname "$0")" && pwd)/verify_quiescent_journal.py" "$LEGACY_STATE_DIR" ||
   fail "journal changed to unresolved/indeterminate during shutdown; hold all consumers"
+if [ "$CUTOVER_SOURCE_VERSION" = 6 ]; then V6_UNSAFE_TO_RESTORE=0; fi
 
 # From here a partially successful bootstrap may already have started v6,
 # even when launchctl reports failure. Fail closed and require journal review.
@@ -411,6 +415,24 @@ done
 if [ "${LIVE_HEALTH_CONFIRMED:-0}" != 1 ]; then
   rm -f "$LIVE_HEALTH"
   fail "production daemon exact build, PID, or heartbeat not verified; rollback remains guarded"
+fi
+if [ "$CUTOVER_SOURCE_VERSION" = 6 ]; then
+  # A fresh PID-bound health record is still not evidence that no second
+  # LaunchAgent joined the mailbox during startup. Re-snapshot launchd after
+  # successful candidate health verification and before the smoke request.
+  V6_ACTIVATED_OWNERSHIP="$(PYTHONDONTWRITEBYTECODE=1 python3 "$OWNER_SCRIPT")" ||
+    fail "v6 activation ownership is unverifiable"
+  python3 - "$V6_ACTIVATED_OWNERSHIP" "$ROOT_ID" "$NEW_LABEL" <<'PYFINALOWN' ||
+    fail "v6 replacement is not the exclusive loaded mailbox owner"
+import json,sys
+inventory=json.loads(sys.argv[1]); root,label=sys.argv[2:]
+if inventory.get('safe_to_stage') is not True or inventory.get('problems'):
+    raise SystemExit('HOLD: loaded bridge collisions after replacement startup')
+owners=[r for r in inventory.get('loaded',[])
+        if r.get('drive_root_folder_id')==root]
+if len(owners)!=1 or owners[0].get('label')!=label or not owners[0].get('running'):
+    raise SystemExit('HOLD: expected exactly one running target service')
+PYFINALOWN
 fi
 rm -f "$LIVE_HEALTH"
 
