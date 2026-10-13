@@ -235,20 +235,32 @@ fi
 OWNER_SCRIPT="$(cd "$(dirname "$0")" && pwd)/bridge_service_ownership.py"
 [ -f "$OWNER_SCRIPT" ] || fail "live bridge ownership inspector is missing"
 OWNERSHIP="$(python3 "$OWNER_SCRIPT")" || fail "loaded bridge ownership is not independently verified"
-KNOWN_CONSUMERS="$(python3 - "$OWNERSHIP" "$ROOT_ID" "$NEW_LABEL" <<'PYOWNERS'
+KNOWN_CONSUMERS="$(python3 - "$OWNERSHIP" "$ROOT_ID" "$NEW_LABEL" "$CUTOVER_SOURCE_VERSION" <<'PYOWNERS'
 import json,sys
 inventory=json.loads(sys.argv[1])
-root,new=sys.argv[2:]
-if inventory.get('problems') or not inventory.get('safe_to_stage'):
+root,new,source_version=sys.argv[2:]
+if inventory.get('problems') or inventory.get('safe_to_stage') is not True:
     raise SystemExit('HOLD: duplicate or unknown loaded bridge')
 known={'com.tom.chatgpt-shell-bridge','io.llm-git-bridge.daemon',
        'net.laurenzo.mac-executor-bridge','net.laurenzo.local-executor-bridge'}
+def allowed(label):
+    if label in known:
+        return True
+    # SHA/suffix-specific v6 production labels are legitimate only as an
+    # explicitly selected v6 source; never silently reclassify them as v5.
+    return (source_version=='6'
+            and label.startswith('net.laurenzo.local-executor-bridge-v6-')
+            and len(label)>len('net.laurenzo.local-executor-bridge-v6-')
+            and all(ch.isascii() and (ch.isalnum() or ch in '._-')
+                    for ch in label))
 owners=[r['label'] for r in inventory['loaded']
         if r.get('drive_root_folder_id')==root]
 if not owners:
     raise SystemExit('HOLD: no loaded production mailbox consumer to transfer')
-if new in owners or any(label not in known for label in owners):
-    raise SystemExit('HOLD: production mailbox consumer is not a recognized legacy service')
+if new in owners or any(not allowed(label) for label in owners):
+    raise SystemExit('HOLD: production mailbox consumer is not a recognized source service')
+if source_version=='6' and len(owners)!=1:
+    raise SystemExit('HOLD: v6 source must have exactly one loaded owner')
 for label in owners:
     print(label)
 PYOWNERS
