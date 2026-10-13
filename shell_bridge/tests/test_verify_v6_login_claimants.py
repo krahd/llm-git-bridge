@@ -52,7 +52,9 @@ class FutureLoginOwnerTests(unittest.TestCase):
             inspect_agents(self.agents, self.label, "PROD")
 
     def test_different_staging_mailbox_may_remain_registered(self):
-        cfg = self.cfgdir / "staging.json"
+        cfgdir = self.home / ".config" / "staging"
+        cfgdir.mkdir()
+        cfg = cfgdir / "config.json"
         cfg.write_text(json.dumps({"drive_root_folder_id": "STAGING"}))
         cfg.chmod(0o600)
         self.plist("net.laurenzo.local-executor-bridge-v6-staging", cfg)
