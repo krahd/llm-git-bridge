@@ -180,6 +180,25 @@ class RecoveryTests(unittest.TestCase):
         with self.assertRaises(recovery.Hold):
             recovery.inventory(**self.inputs())
 
+    def test_parent_component_path_escape_fails_closed(self):
+        # pathlib.is_relative_to is lexical and treats .. as an ordinary part.
+        bad=self.home/".local/state"/".."/"state-untracked"/"requests"
+        with self.assertRaises(recovery.Hold):
+            recovery.safe_path(bad,self.home/".local/state")
+
+    def test_unrecognised_legacy_label_cannot_hide_as_parked_service(self):
+        stale="com.tom.chatgpt-shell-bridge-backup"
+        (self.agents/(stale+".plist")).write_bytes(b"invalid plist")
+        with self.assertRaises(recovery.Hold):
+            recovery.inventory(**self.inputs())
+        stale2="io.llm-git-bridge.daemon-recovery"
+        (self.agents/(stale2+".plist")).write_bytes(b"invalid plist")
+        with self.assertRaises(recovery.Hold):
+            recovery.inventory(**self.inputs())
+
+    def test_approval_menu_label_not_mistaken_for_bridge_daemon(self):
+        self.assertFalse(recovery.LABEL.fullmatch("net.laurenzo.local-executor-approval"))
+
     def test_nonfinite_approval_expiry_is_unverifiable(self):
         pending=self.states[self.labels[1]]/"approvals/pending/x.json"
         pending.write_text(json.dumps({"protocol":1,"kind":"operator_approval_request","request_id":"x","expires_at":float("nan")}))
