@@ -39,7 +39,7 @@ class RecoveryTests(unittest.TestCase):
             cfg = dict(bridge_instance_id=f"instance-{i}",
                        drive_root_folder_id=recovery.PRODUCTION,
                        requests_folder_id="request-id",results_folder_id="result-id",
-                       state_dir=str(state))
+                       state_dir=str(state),remote="mock-remote:")
             config.write_text(json.dumps(cfg))
             (self.agents / f"{label}.plist").write_bytes(plistlib.dumps(dict(
                 Label=label,ProgramArguments=["/usr/bin/python3",str(script),"daemon","--config",str(config)])))
@@ -53,7 +53,7 @@ class RecoveryTests(unittest.TestCase):
         ps+=f"200 1 200 /usr/bin/python3 {self.scripts[self.labels[1]]} daemon --config {self.confs[self.labels[1]]}\n"
         if child:
             ps+="201 200 201 /bin/sh -c sleeper\n"
-        return dict(home=self.home,now=1000,launch=launch,ps=ps)
+        return dict(home=self.home,now=1000,launch=launch,ps=ps,remote_listings={('mock-remote:', 'request-id'):[]})
 
     def test_clean_inventory_targets_only_v6(self):
         report=recovery.inventory(**self.inputs())
@@ -68,14 +68,14 @@ class RecoveryTests(unittest.TestCase):
 
     def test_expired_approval_is_historical_not_actionable(self):
         pending = self.states[self.labels[1]] / "approvals/pending/x.json"
-        pending.write_text(json.dumps({"kind":"operator_approval_request", "request_id":"x","expires_at":999}))
+        pending.write_text(json.dumps({"protocol":1,"kind":"operator_approval_request", "request_id":"x","expires_at":999}))
         r=recovery.inventory(**self.inputs())
         self.assertTrue(r["containment_ready"])
         self.assertEqual(r["states"][str(self.states[self.labels[1]])]["approvals"]["expired"],1)
 
     def test_live_approval_blocks_containment(self):
         pending = self.states[self.labels[1]] / "approvals/pending/x.json"
-        pending.write_text(json.dumps({"kind":"operator_approval_request", "request_id":"x","expires_at":1001}))
+        pending.write_text(json.dumps({"protocol":1,"kind":"operator_approval_request", "request_id":"x","expires_at":1001}))
         r=recovery.inventory(**self.inputs())
         self.assertFalse(r["containment_ready"])
         self.assertTrue(any("actionable" in reason for reason in r["holds"]))
@@ -120,13 +120,97 @@ class RecoveryTests(unittest.TestCase):
                     return kw["ps"]
                 return kw["ps"].splitlines()[0]+"\n"
             raise AssertionError(argv)
-        with patch.object(recovery,"command",side_effect=fake_command):
+        with (patch.object(recovery,"command",side_effect=fake_command),
+              patch.object(recovery,"verify_operator_context"),
+              patch.object(recovery,"inventory",side_effect=lambda *a, **k: (
+                  r if (self.agents/(self.labels[1]+".plist")).exists() else
+                  {**r, "targets":[], "services":{self.labels[0]:r["services"][self.labels[0]]}}
+              ))):
             recovery.containment(r,self.home,r["fingerprint"])
         self.assertTrue((self.agents/(recovery.KEEP+".plist")).exists())
         self.assertFalse((self.agents/(self.labels[1]+".plist")).exists())
         self.assertTrue(any(x[:2]==("/bin/launchctl","disable") for x in calls))
         archives=list((self.home/"Library/Application Support/llm-git-bridge/retired-launchagents").glob("*/"+self.labels[1]+".plist"))
         self.assertEqual(len(archives),1)
+
+    def test_live_keeper_child_also_blocks_containment(self):
+        kw=self.inputs()
+        kw["ps"] += "101 100 101 /bin/sh -c sleeper\n"
+        r=recovery.inventory(**kw)
+        self.assertFalse(r["containment_ready"])
+        self.assertIn(recovery.KEEP," ".join(r["holds"]))
+
+    def test_remote_json_request_blocks_containment(self):
+        kw=self.inputs()
+        kw["remote_listings"]={('mock-remote:','request-id'):['new-command.json']}
+        r=recovery.inventory(**kw)
+        self.assertFalse(r["containment_ready"])
+        self.assertTrue(any('remote requests' in reason for reason in r["holds"]))
+
+    def test_remote_inventory_failure_blocks(self):
+        kw=self.inputs()
+        kw["remote_listings"]={}
+        with self.assertRaises(recovery.Hold):
+            recovery.inventory(**kw)
+
+    def test_path_prefix_escape_is_rejected(self):
+        label=self.labels[1]
+        config=self.confs[label]
+        data=json.loads(config.read_text())
+        other=self.home/".local/state-other/fake"
+        other.mkdir(parents=True)
+        data["state_dir"]=str(other)
+        config.write_text(json.dumps(data))
+        with self.assertRaises(recovery.Hold):
+            recovery.inventory(**self.inputs())
+
+    def test_symlinked_config_ancestor_is_rejected(self):
+        label=self.labels[1]
+        conf=self.confs[label]
+        target=self.home/"outside-config"
+        conf.parent.rename(target)
+        conf.parent.symlink_to(target)
+        with self.assertRaises(recovery.Hold):
+            recovery.inventory(**self.inputs())
+
+    def test_group_writable_registration_is_rejected(self):
+        label=self.labels[1]
+        plist=self.agents/(label+".plist")
+        plist.chmod(0o666)
+        with self.assertRaises(recovery.Hold):
+            recovery.inventory(**self.inputs())
+
+    def test_nonfinite_approval_expiry_is_unverifiable(self):
+        pending=self.states[self.labels[1]]/"approvals/pending/x.json"
+        pending.write_text(json.dumps({"protocol":1,"kind":"operator_approval_request","request_id":"x","expires_at":float("nan")}))
+        r=recovery.inventory(**self.inputs())
+        self.assertFalse(r["containment_ready"])
+        self.assertEqual(r["states"][str(self.states[self.labels[1]])]["approvals"]["unverifiable"],1)
+
+    def test_journal_symlink_marker_is_rejected(self):
+        folder=self.states[self.labels[1]]/"requests/x"
+        folder.mkdir()
+        (folder/"active.json").symlink_to("/tmp/nonexistent-approval")
+        with self.assertRaises(recovery.Hold):
+            recovery.inventory(**self.inputs())
+
+    def test_stale_fingerprint_changes_after_ten_minutes(self):
+        first=recovery.inventory(**self.inputs())
+        kw=self.inputs()
+        kw["now"]=1700
+        second=recovery.inventory(**kw)
+        self.assertNotEqual(first["fingerprint"],second["fingerprint"])
+
+    def test_verified_remote_folder_id_validation(self):
+        with self.assertRaises(recovery.Hold):
+            recovery.remote_request_queue("mock-remote:","../unexpected")
+
+    def test_malformed_approval_directory_symlink_is_rejected(self):
+        pending=self.states[self.labels[1]]/"approvals/pending"
+        pending.rmdir()
+        pending.symlink_to("/tmp/not-present")
+        with self.assertRaises(recovery.Hold):
+            recovery.inventory(**self.inputs())
 
     def test_containment_never_runs_without_matching_fingerprint(self):
         r=recovery.inventory(**self.inputs())
