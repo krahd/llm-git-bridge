@@ -212,6 +212,23 @@ PYMARKER
 }
 
 choose_allowed_root
+RCLONE_BIN="$(command -v rclone)"; PYTHON_BIN="$(command -v python3)"
+# The daemon, its PATH and the approval app run these binaries with the
+# operator's full authority. One resolved from inside the agent-writable
+# allowed root (for example a project virtualenv on PATH) would let any
+# repository-scoped request replace the executor itself.
+for runtime_bin in "$PYTHON_BIN" "$RCLONE_BIN"; do
+  python3 - "$runtime_bin" "$ALLOWED_ROOT" <<'PYTRUSTEDBIN' ||
+import os,sys
+binary,root=sys.argv[1:]
+roots={os.path.abspath(root), os.path.realpath(root)}
+for candidate in (os.path.abspath(binary), os.path.realpath(binary)):
+    for item in roots:
+        if os.path.commonpath([candidate, item]) == item:
+            raise SystemExit(1)
+PYTRUSTEDBIN
+    fail "runtime binary lies inside the agent-writable allowed root; put a system interpreter first on PATH: $runtime_bin"
+done
 choose_remote
 # Never rewrite or launch a v6 instance while an unresolved legacy or other
 # v6 LaunchAgent may claim the mailbox. This is read-only and happens BEFORE
@@ -452,7 +469,6 @@ with open(path,'w',encoding='utf-8') as f: json.dump(cfg,f,indent=2,sort_keys=Tr
 PY
 chmod 600 "$CONFIG_DIR/config.json"
 
-RCLONE_BIN="$(command -v rclone)"; PYTHON_BIN="$(command -v python3)"
 APP_BUNDLE="$INSTALL_DIR/Local Executor Approval.app"
 DEVELOPER_DIR_VALUE="${DEVELOPER_DIR:-$(/usr/bin/xcode-select -p 2>/dev/null || true)}"
 DIRECT_SWIFTC="$DEVELOPER_DIR_VALUE/Toolchains/XcodeDefault.xctoolchain/usr/bin/swiftc"

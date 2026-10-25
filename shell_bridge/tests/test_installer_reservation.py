@@ -73,7 +73,7 @@ class InstallerReservationTests(unittest.TestCase):
 
     def test_lock_is_acquired_before_remote_discovery_and_any_install_copy(self):
         self.assertLess(INSTALL.index('INSTALL_LOCK_HELD=1'),
-                        INSTALL.index("choose_allowed_root\nchoose_remote"))
+                        INSTALL.index("\nchoose_allowed_root\n"))
         self.assertLess(INSTALL.index('INSTALL_LOCK_HELD=1'),
                         INSTALL.index('cp "$SCRIPT_DIR/bridge.py"'))
         self.assertIn("another installer is active or previous installation ended indeterminately",
