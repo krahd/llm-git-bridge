@@ -1,5 +1,9 @@
 # Explicit v6-to-v6 handover (source qualification only)
 
+> **Superseded (2026-10-25).** Retained as history only. Production installs,
+> upgrades and recovery use [`V6_PRODUCTION_OPERATIONS.md`](V6_PRODUCTION_OPERATIONS.md).
+
+
 `shell_bridge/upgrade_v6.sh` is the explicit v6-source variant of the
 guarded cutover engine. It is **not** a general service-cleanup tool.
 The original `cutover.sh` continues to default to v5-first cutover.

@@ -6,6 +6,12 @@ The repository still retains the older protocol-v2 Git implementation for compat
 
 > **Deployment is independent of source:** this repository documents the intended v6 architecture; do not infer that your running daemon is v6. See the [2026-10-09 v6 audit and implementation plan](docs/plans/BRIDGE-V6-TRANSPARENT-EXECUTION-2026-10-09.md) and verify the live mailbox/build before migrating or retiring v5.
 
+## Production operation
+
+Run exactly one v6 daemon per Mac under the LaunchAgent
+`net.laurenzo.local-executor-bridge`. Install, upgrade, consolidate and
+recover it only with [`shell_bridge/V6_PRODUCTION_OPERATIONS.md`](shell_bridge/V6_PRODUCTION_OPERATIONS.md).
+
 ## Architecture
 
 ```text
@@ -89,7 +95,7 @@ bash shell_bridge/install.sh
 
 The source directory remains `shell_bridge/` for compatibility with existing installations and client instructions; the product/runtime identity is Local Executor Bridge v6. The installer creates/adopts one verified mailbox, pins its Drive IDs, installs one LaunchAgent, runs `doctor`, and performs an end-to-end smoke test.
 
-The v6 installer supports staged migration. Existing bridge services are not retired until the v6 smoke test succeeds. Final cutover retires the obsolete `com.tom.chatgpt-shell-bridge` and `io.llm-git-bridge.daemon` LaunchAgents only after successful v6 acceptance.
+For an existing installation, stage an inert release with `install.sh --upgrade-stage-only` and hand over with `shell_bridge/v6_consolidate.py`; it retires every other bridge LaunchAgent (including the obsolete v5 `com.tom.chatgpt-shell-bridge` and `io.llm-git-bridge.daemon`) so exactly one owner remains.
 
 ## One bridge, not two
 
