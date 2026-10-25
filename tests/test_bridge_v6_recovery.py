@@ -359,7 +359,6 @@ class RecoveryTests(unittest.TestCase):
 if __name__=="__main__":
     unittest.main()
 
-
 class RegistrationCensusTests(unittest.TestCase):
     def setUp(self):
         self.t = tempfile.TemporaryDirectory()
