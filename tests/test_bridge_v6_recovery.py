@@ -38,7 +38,8 @@ class RecoveryTests(unittest.TestCase):
             (state / "approvals/pending").mkdir(parents=True)
             cfg = dict(bridge_instance_id=f"instance-{i}",
                        drive_root_folder_id=recovery.PRODUCTION,
-                       requests_folder_id="request-id",results_folder_id="result-id",
+                       requests_folder_id=recovery.MAILBOX_FOLDERS[recovery.PRODUCTION][0],
+                       results_folder_id=recovery.MAILBOX_FOLDERS[recovery.PRODUCTION][1],
                        state_dir=str(state),remote="mock-remote:")
             config.write_text(json.dumps(cfg))
             (self.agents / f"{label}.plist").write_bytes(plistlib.dumps(dict(
@@ -53,7 +54,7 @@ class RecoveryTests(unittest.TestCase):
         ps+=f"200 1 200 /usr/bin/python3 {self.scripts[self.labels[1]]} daemon --config {self.confs[self.labels[1]]}\n"
         if child:
             ps+="201 200 201 /bin/sh -c sleeper\n"
-        return dict(home=self.home,now=1000,launch=launch,ps=ps,remote_listings={('mock-remote:', 'request-id'):[]})
+        return dict(home=self.home,now=1000,launch=launch,ps=ps,remote_listings={('mock-remote:', recovery.MAILBOX_FOLDERS[recovery.PRODUCTION][0]):[]})
 
     def test_clean_inventory_targets_only_v6(self):
         report=recovery.inventory(**self.inputs())
@@ -142,7 +143,7 @@ class RecoveryTests(unittest.TestCase):
 
     def test_remote_json_request_blocks_containment(self):
         kw=self.inputs()
-        kw["remote_listings"]={('mock-remote:','request-id'):['new-command.json']}
+        kw["remote_listings"]={('mock-remote:',recovery.MAILBOX_FOLDERS[recovery.PRODUCTION][0]):['new-command.json']}
         r=recovery.inventory(**kw)
         self.assertFalse(r["containment_ready"])
         self.assertTrue(any('remote requests' in reason for reason in r["holds"]))
@@ -198,6 +199,28 @@ class RecoveryTests(unittest.TestCase):
 
     def test_approval_menu_label_not_mistaken_for_bridge_daemon(self):
         self.assertFalse(recovery.LABEL.fullmatch("net.laurenzo.local-executor-approval"))
+
+    def test_config_cannot_redirect_inspection_to_different_remote_queue(self):
+        label=self.labels[1]
+        cfg_path=self.confs[label]
+        conf=json.loads(cfg_path.read_text())
+        conf["requests_folder_id"]="some-other-folder-id"
+        cfg_path.write_text(json.dumps(conf))
+        with self.assertRaises(recovery.Hold):
+            recovery.inventory(**self.inputs())
+
+    def test_valid_staging_mailbox_has_independent_queue_identity(self):
+        label=self.labels[1]
+        cfg_path=self.confs[label]
+        conf=json.loads(cfg_path.read_text())
+        conf["drive_root_folder_id"]=recovery.STAGING
+        conf["requests_folder_id"],conf["results_folder_id"]=recovery.MAILBOX_FOLDERS[recovery.STAGING]
+        cfg_path.write_text(json.dumps(conf))
+        kw=self.inputs()
+        kw["remote_listings"][("mock-remote:",recovery.MAILBOX_FOLDERS[recovery.STAGING][0])]=[]
+        report=recovery.inventory(**kw)
+        self.assertTrue(report["containment_ready"])
+        self.assertEqual(len(report["remote_queues"]),2)
 
     def test_nonfinite_approval_expiry_is_unverifiable(self):
         pending=self.states[self.labels[1]]/"approvals/pending/x.json"
