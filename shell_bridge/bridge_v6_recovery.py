@@ -25,6 +25,12 @@ import time
 KEEP = "com.tom.chatgpt-shell-bridge"
 PRODUCTION = "1PRsQHgVsgXhIYT_8akGFRGdhdlw9Lmk6"
 STAGING = "15ql2yACOq7H6qo0IgzosySqW8nHgUKXv"
+# Exact independently audited request/result folders: do not trust a mutable
+# installation config as the sole authority for which queue is empty.
+MAILBOX_FOLDERS = {
+    PRODUCTION: ("1jvTV0g4JVypFJ5olOovIPtCRIlawl4MP", "1SMdHzWEj2w2zRcOsCBc6fGT44ltco1fL"),
+    STAGING: ("101ZPUf3ZLCG2BW8HLgQazg48TNyUMrNa", "1xnU55UNAc-6APc6b-8naPNyk4DlUC3xd"),
+}
 REQUIRED = ("bridge_instance_id", "drive_root_folder_id", "requests_folder_id",
             "results_folder_id", "state_dir")
 LABEL = re.compile(r"(?:com\.tom\.chatgpt-shell-bridge(?:[-.][A-Za-z0-9._-]+)?|io\.llm-git-bridge\.[A-Za-z0-9._-]+|net\.laurenzo\.local-executor-bridge(?:[-.][A-Za-z0-9._-]+)?)\Z")
@@ -99,8 +105,11 @@ def parse_service(plist: Path, home: Path) -> dict:
     cfg = json.loads(raw_conf)
     if not isinstance(cfg, dict) or not all(isinstance(cfg.get(x), str) and cfg[x] for x in REQUIRED):
         raise Hold(f"invalid required config fields: {name}")
-    if cfg["drive_root_folder_id"] not in (PRODUCTION, STAGING):
+    mailbox = cfg["drive_root_folder_id"]
+    if mailbox not in MAILBOX_FOLDERS:
         raise Hold(f"unknown mailbox: {name}")
+    if (cfg["requests_folder_id"], cfg["results_folder_id"]) != MAILBOX_FOLDERS[mailbox]:
+        raise Hold(f"unverified request/result folder identity: {name}")
     remote=cfg.get("remote")
     if not isinstance(remote,str) or not re.fullmatch(r"[A-Za-z0-9_-]+:",remote):
         raise Hold(f"missing/unrecognised rclone remote: {name}")
