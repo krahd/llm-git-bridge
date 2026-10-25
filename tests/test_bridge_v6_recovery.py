@@ -212,6 +212,63 @@ class RecoveryTests(unittest.TestCase):
         with self.assertRaises(recovery.Hold):
             recovery.inventory(**self.inputs())
 
+    def test_pinned_rclone_lookup_and_executable_names(self):
+        calls=[]
+        def fake(argv, **kw):
+            calls.append(argv)
+            return "history.txt\nold.disabled\nnew.json\n"
+        with patch.object(recovery,"command",side_effect=fake):
+            result=recovery.remote_request_queue("mock-remote:","A"*32)
+        self.assertEqual(result,["new.json"])
+        self.assertIn("--drive-root-folder-id",calls[0])
+        self.assertIn("A"*32,calls[0])
+        self.assertNotIn("requests",calls[0])
+
+    def test_invocation_through_bridge_is_rejected(self):
+        proc="120 121 120 python3 /tmp/bridge_v6_recovery.py --contain x\n"
+        proc+="121 1 121 /usr/bin/python3 /Users/tom/.local/share/bridge/bridge.py daemon --config /tmp/conf\n"
+        with (patch.object(recovery.os,"getpid",return_value=120),
+              patch.object(recovery,"command",return_value=proc)):
+            with self.assertRaises(recovery.Hold):
+                recovery.verify_operator_context()
+
+    def test_containment_archive_is_private(self):
+        kw=self.inputs()
+        r=recovery.inventory(**kw)
+        state={"loaded":True}
+        def fake(argv,**kwargs):
+            if argv[:2]==["/bin/launchctl","disable"]: return ""
+            if argv[:2]==["/bin/launchctl","bootout"]:
+                state["loaded"]=False
+                return ""
+            if argv[:2]==["/bin/launchctl","list"]:
+                return kw["launch"] if state["loaded"] else "PID Status Label\n100 0 "+recovery.KEEP+"\n"
+            if argv[0]=="/bin/ps":
+                return kw["ps"] if state["loaded"] else kw["ps"].splitlines()[0]+"\n"
+            raise AssertionError(argv)
+        def inv(*a,**k):
+            if (self.agents/(self.labels[1]+".plist")).exists(): return r
+            return {**r,"targets":[],"services":{recovery.KEEP:r["services"][recovery.KEEP]}}
+        with (patch.object(recovery,"command",side_effect=fake),
+              patch.object(recovery,"verify_operator_context"),
+              patch.object(recovery,"inventory",side_effect=inv)):
+            recovery.containment(r,self.home,r["fingerprint"])
+        archive=self.home/"Library/Application Support/llm-git-bridge/retired-launchagents"
+        self.assertEqual(archive.stat().st_mode & 0o077,0)
+
+    def test_symlinked_archive_parent_refused_without_writes(self):
+        kw=self.inputs()
+        r=recovery.inventory(**kw)
+        outside=Path(self.t.name)/"unrelated"
+        outside.mkdir()
+        parent=self.home/"Library/Application Support"
+        parent.symlink_to(outside, target_is_directory=True)
+        with (patch.object(recovery,"verify_operator_context"),
+              patch.object(recovery,"inventory",return_value=r)):
+            with self.assertRaises(recovery.Hold):
+                recovery.containment(r,self.home,r["fingerprint"])
+        self.assertFalse(any(outside.iterdir()))
+
     def test_containment_never_runs_without_matching_fingerprint(self):
         r=recovery.inventory(**self.inputs())
         with self.assertRaises(recovery.Hold):
