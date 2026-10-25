@@ -358,3 +358,66 @@ class RecoveryTests(unittest.TestCase):
 
 if __name__=="__main__":
     unittest.main()
+
+
+class RegistrationCensusTests(unittest.TestCase):
+    def setUp(self):
+        self.t = tempfile.TemporaryDirectory()
+        self.addCleanup(self.t.cleanup)
+        self.home = Path(self.t.name)/"home"
+        self.agents = self.home/"Library/LaunchAgents"
+        self.agents.mkdir(parents=True)
+
+    def test_mismatch_and_generic_loaded_label_are_reported_together(self):
+        name="net.laurenzo.local-executor-bridge-v6-staging.candidate-abcdef"
+        declared="net.laurenzo.local-executor-bridge-v6-staging"
+        (self.agents/(name+".plist")).write_bytes(plistlib.dumps({
+            "Label":declared,"KeepAlive":True,"RunAtLoad":True}))
+        (self.agents/(recovery.KEEP+".plist")).write_bytes(plistlib.dumps({"Label":recovery.KEEP}))
+        raw=f"PID Status Label\n- 1 {declared}\n222 0 {recovery.KEEP}\n"
+        report=recovery.registration_census(self.home,launch=raw)
+        candidate=next(x for x in report["registrations"] if x["filename"]==name+".plist")
+        self.assertEqual(candidate["declared_label"],declared)
+        self.assertTrue(candidate["loaded"])
+        self.assertIsNone(candidate["pid"])
+        self.assertTrue(candidate["keep_alive"])
+        self.assertEqual(candidate["problem"],"filename_and_declared_label_disagree")
+        self.assertTrue(report["incomplete"])
+
+    def test_duplicate_declarations_detected_without_one_by_one_commands(self):
+        label="net.laurenzo.local-executor-bridge-v6-staging"
+        for basename in (label,label+".candidate-a"):
+            (self.agents/(basename+".plist")).write_bytes(plistlib.dumps({"Label":label}))
+        r=recovery.registration_census(self.home,launch=f"PID Status Label\n- 1 {label}\n")
+        self.assertEqual(len(r["duplicate_declared_labels"][label]),2)
+        self.assertEqual(len(r["registrations"]),2)
+
+    def test_unknown_loaded_labels_identified(self):
+        label="net.laurenzo.local-executor-bridge-v6-staging"
+        r=recovery.registration_census(self.home,launch=f"PID Status Label\n- 1 {label}\n")
+        self.assertEqual(r["loaded_without_registration"],[label])
+        self.assertTrue(r["incomplete"])
+
+    def test_malformed_bridge_plist_does_not_hide_other_issues(self):
+        label="net.laurenzo.local-executor-bridge-v6-staging"
+        (self.agents/(label+".plist")).write_bytes(b"not a plist")
+        (self.agents/(recovery.KEEP+".plist")).write_bytes(plistlib.dumps({"Label":recovery.KEEP}))
+        r=recovery.registration_census(self.home,launch="PID Status Label\n")
+        self.assertEqual(len(r["registrations"]),2)
+        self.assertTrue(any(x["problem"] for x in r["registrations"]))
+
+    def test_partial_hold_json_includes_census(self):
+        label="net.laurenzo.local-executor-bridge-v6-staging"
+        (self.agents/(label+".candidate-x.plist")).write_bytes(plistlib.dumps({"Label":label}))
+        stdout=io.StringIO()
+        with (patch.object(recovery.sys,"platform","darwin"),
+              patch.object(recovery.sys,"argv",["bridge_v6_recovery.py","--inspect"]),
+              patch.object(Path,"home",return_value=self.home),
+              patch.object(recovery,"inventory",side_effect=recovery.Hold("test hold")),
+              patch.object(recovery,"command",return_value=f"PID Status Label\n- 1 {label}\n"),
+              patch("sys.stdout",stdout),patch("sys.stderr",io.StringIO())):
+            rc=recovery.main()
+        r=json.loads(stdout.getvalue())
+        self.assertEqual(rc,4)
+        self.assertFalse(r["inspection_complete"])
+        self.assertEqual(r["registration_census"]["registrations"][0]["declared_label"],label)
