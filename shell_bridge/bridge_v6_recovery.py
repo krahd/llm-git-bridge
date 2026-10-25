@@ -87,7 +87,11 @@ def parse_service(plist: Path, home: Path) -> dict:
     if not isinstance(obj, dict):
         raise Hold(f"non-object LaunchAgent registration: {name}")
     if obj.get("Label") != name:
-        raise Hold(f"plist label differs: {name}")
+        declared = obj.get("Label")
+        # Only print syntactically valid service labels, never arbitrary plist
+        # contents, shell commands or control characters.
+        reported = declared if isinstance(declared, str) and LABEL.fullmatch(declared) else "<unrecognised>"
+        raise Hold(f"plist label differs: filename={name} declared={reported}")
     args = obj.get("ProgramArguments")
     if not isinstance(args, list) or not all(isinstance(x, str) for x in args):
         raise Hold(f"invalid program arguments: {name}")
@@ -432,7 +436,18 @@ def main() -> int:
                 print("HOLD: containment currently blocked; no mutation performed",file=sys.stderr)
                 return 3
     except (Hold,OSError,ValueError,subprocess.TimeoutExpired,plistlib.InvalidFileException) as exc:
-        print("HOLD: "+str(exc),file=sys.stderr)
+        reason = str(exc)
+        # Inspection errors must still produce machine-readable output.
+        # This is a partial diagnostic, NEVER a complete safety inventory.
+        # Do not emit 'mutations_performed': false after a failed --contain,
+        # because that failure might occur after disabling a service.
+        if not args.contain:
+            print(json.dumps({
+                "schema": 2, "mode": "read_only", "inspection_complete": False,
+                "containment_ready": False, "holds": [reason],
+                "mutations_performed": False,
+            }, indent=2, sort_keys=True))
+        print("HOLD: " + reason, file=sys.stderr)
         return 4
     return 0
 
