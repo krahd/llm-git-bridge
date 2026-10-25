@@ -27,7 +27,7 @@ PRODUCTION = "1PRsQHgVsgXhIYT_8akGFRGdhdlw9Lmk6"
 STAGING = "15ql2yACOq7H6qo0IgzosySqW8nHgUKXv"
 REQUIRED = ("bridge_instance_id", "drive_root_folder_id", "requests_folder_id",
             "results_folder_id", "state_dir")
-LABEL = re.compile(r"(?:com\.tom\.chatgpt-shell-bridge|io\.llm-git-bridge\.daemon|net\.laurenzo\.local-executor-bridge(?:[-.][A-Za-z0-9._-]+)?)\Z")
+LABEL = re.compile(r"(?:com\.tom\.chatgpt-shell-bridge(?:[-.][A-Za-z0-9._-]+)?|io\.llm-git-bridge\.[A-Za-z0-9._-]+|net\.laurenzo\.local-executor-bridge(?:[-.][A-Za-z0-9._-]+)?)\Z")
 BRIDGE_ARG = re.compile(r"(?:^|/)bridge\.py\s+daemon(?:\s|$)")
 FINGERPRINT_SECONDS = 600
 
@@ -45,7 +45,9 @@ def digest(raw: bytes) -> str:
 
 def safe_path(path: Path, root: Path, *, regular: bool = False) -> None:
     """Reject lexical escapes, symlinked ancestors, and non-owned regular files."""
-    if not path.is_absolute() or not root.is_absolute() or not path.is_relative_to(root):
+    if (not path.is_absolute() or not root.is_absolute()
+            or ".." in path.parts or ".." in root.parts
+            or not path.is_relative_to(root)):
         raise Hold("path escapes expected root")
     cursor = path
     while cursor != root.parent:
@@ -72,7 +74,12 @@ def parse_service(plist: Path, home: Path) -> dict:
     if not LABEL.fullmatch(name) or plist.name != name + ".plist":
         raise Hold("unrecognised bridge plist")
     raw = safe_file(plist, home)
-    obj = plistlib.loads(raw)
+    try:
+        obj = plistlib.loads(raw)
+    except (plistlib.InvalidFileException, ValueError, TypeError) as exc:
+        raise Hold(f"malformed LaunchAgent registration: {name}") from exc
+    if not isinstance(obj, dict):
+        raise Hold(f"non-object LaunchAgent registration: {name}")
     if obj.get("Label") != name:
         raise Hold(f"plist label differs: {name}")
     args = obj.get("ProgramArguments")
