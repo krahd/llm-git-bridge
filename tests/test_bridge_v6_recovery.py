@@ -1,5 +1,7 @@
 """Offline tests; never invoke launchctl or touch the operator's machine."""
 import importlib.util
+import io
+import sys
 import json
 import plistlib
 import tempfile
@@ -221,6 +223,43 @@ class RecoveryTests(unittest.TestCase):
         report=recovery.inventory(**kw)
         self.assertTrue(report["containment_ready"])
         self.assertEqual(len(report["remote_queues"]),2)
+
+    def test_mismatched_plist_label_exposes_only_valid_control_plane_name(self):
+        label=self.labels[1]
+        path=self.agents/(label+".plist")
+        obj=plistlib.loads(path.read_bytes())
+        obj["Label"]="net.laurenzo.local-executor-bridge-v6-staging"
+        path.write_bytes(plistlib.dumps(obj))
+        with self.assertRaises(recovery.Hold) as cm:
+            recovery.inventory(**self.inputs())
+        self.assertIn("filename="+label, str(cm.exception))
+        self.assertIn("declared=net.laurenzo.local-executor-bridge-v6-staging", str(cm.exception))
+
+    def test_failed_read_only_inspection_writes_json_hold_not_empty_file(self):
+        output=io.StringIO()
+        errors=io.StringIO()
+        with (patch.object(recovery.sys,"platform","darwin"),
+              patch.object(recovery.sys,"argv",["bridge_v6_recovery.py","--inspect"]),
+              patch.object(recovery,"inventory",side_effect=recovery.Hold("plist label differs: test")),
+              patch("sys.stdout",output), patch("sys.stderr",errors)):
+            rc=recovery.main()
+        self.assertEqual(rc,4)
+        data=json.loads(output.getvalue())
+        self.assertFalse(data["inspection_complete"])
+        self.assertFalse(data["containment_ready"])
+        self.assertEqual(data["holds"],["plist label differs: test"])
+        self.assertFalse(data["mutations_performed"])
+        self.assertIn("HOLD",errors.getvalue())
+
+    def test_failed_containment_does_not_falsely_claim_no_mutations(self):
+        output=io.StringIO()
+        with (patch.object(recovery.sys,"platform","darwin"),
+              patch.object(recovery.sys,"argv",["bridge_v6_recovery.py","--contain","0"*64]),
+              patch.object(recovery,"inventory",side_effect=recovery.Hold("failure after partial operation")),
+              patch("sys.stdout",output), patch("sys.stderr",io.StringIO())):
+            rc=recovery.main()
+        self.assertEqual(rc,4)
+        self.assertEqual(output.getvalue(),"")
 
     def test_nonfinite_approval_expiry_is_unverifiable(self):
         pending=self.states[self.labels[1]]/"approvals/pending/x.json"
