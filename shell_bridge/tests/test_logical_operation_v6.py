@@ -176,6 +176,11 @@ class LogicalOperationTests(unittest.TestCase):
                          ["status"], "rejected")
 
 
+    def admitted_digest(self, request_id="original"):
+        raw = self.requests[request_id + ".json"]
+        validated = b.validate_request(json.loads(raw), request_id + ".json", self.root, 60)
+        return b.canonical_operation_payload(validated, self.cfg)
+
     def test_torn_original_terminal_marker_does_not_replay_completion(self):
         self.payload("original")
         self.payload("later")
@@ -187,7 +192,8 @@ class LogicalOperationTests(unittest.TestCase):
         marker["status"] = "rejected"
         (source / "finished.json").write_text(json.dumps(marker))
         self.assertIsNone(b._verified_logical_original(
-            self.state, "original", "one-logical-work"))
+            self.state, "original", "one-logical-work",
+            self.cfg, self.admitted_digest()))
         self.run_requests(["later"])
         out = json.loads((self.state / "requests" / "later" / "result.json").read_text())
         self.assertEqual(out["status"], "indeterminate")
@@ -206,6 +212,35 @@ class LogicalOperationTests(unittest.TestCase):
         self.assertEqual(out["status"], "indeterminate")
         self.assertEqual(self.execute_count, 1)
 
+    def test_hash_consistent_but_replaced_original_command_cannot_replay(self):
+        self.payload("original")
+        self.payload("later")
+        self.run_requests(["original"])
+        source = self.state / "requests" / "original"
+        admitted = self.admitted_digest()
+        replacement = json.loads((source / "request.json").read_text())
+        replacement["command"] = "printf UNAUTHORISED_CHANGE"
+        tampered_raw = json.dumps(replacement).encode("utf-8")
+        tampered_sha = b.sha256_bytes(tampered_raw)
+        # Even if every receipt marker is rewritten to agree with the
+        # substituted request SHA, it is not the originally admitted command.
+        (source / "request.json").write_bytes(tampered_raw)
+        (source / "started.json").write_text(json.dumps(
+            {"request_sha256": tampered_sha}))
+        (source / "finished.json").write_text(json.dumps(
+            {"request_sha256": tampered_sha, "status": "completed"}))
+        terminal = json.loads((source / "result.json").read_text())
+        terminal["request_sha256"] = tampered_sha
+        (source / "result.json").write_text(json.dumps(terminal))
+        self.assertIsNone(b._verified_logical_original(
+            self.state, "original", "one-logical-work", self.cfg, admitted))
+        self.run_requests(["later"])
+        reply = json.loads(
+            (self.state / "requests" / "later" / "result.json").read_text())
+        self.assertEqual(reply["status"], "indeterminate")
+        self.assertNotEqual(reply.get("replayed"), True)
+        self.assertEqual(self.execute_count, 1)
+
     def test_prestart_rejection_remains_a_valid_terminal_original(self):
         operation_id = "one-logical-work"
         self.payload("original", operation_id=operation_id)
@@ -219,6 +254,7 @@ class LogicalOperationTests(unittest.TestCase):
         (folder / "finished.json").write_text(json.dumps({
             "status": "rejected", "request_sha256": b.sha256_bytes(raw)}))
         self.assertEqual(b._verified_logical_original(
-            self.state, "original", operation_id)["status"], "rejected")
+            self.state, "original", operation_id,
+            self.cfg, self.admitted_digest())["status"], "rejected")
 
 if __name__=='__main__':unittest.main()
