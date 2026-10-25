@@ -169,9 +169,11 @@ def journal_activity(state: Path) -> dict:
     if not root.is_dir():
         raise Hold(f"missing/linked journal: {state.name}")
     # Count evidence without opening arbitrary request content.
+    started_at=time.monotonic()
     for entry in root.iterdir():
         out["scanned"] += 1
-        if out["scanned"] > 100000 or entry.is_symlink() or not entry.is_dir():
+        if (out["scanned"] > 100000 or time.monotonic()-started_at > 45 or
+                entry.is_symlink() or not entry.is_dir()):
             raise Hold(f"unexpected journal entry/budget: {state.name}")
         for marker in ("active.json", "started.json", "finished.json", "result.json"):
             if (entry / marker).is_symlink():
@@ -317,11 +319,12 @@ def containment(report: dict, home: Path, expected: str) -> None:
     fresh = inventory(home)
     if fresh["fingerprint"] != expected or not fresh["containment_ready"]:
         raise Hold("environment changed after operator review")
-    if archive.exists():
-        safe_path(archive, home)
-        if archive.stat().st_uid != os.getuid() or archive.stat().st_mode & 0o077:
-            raise Hold("unsafe archive permissions")
-    dest.mkdir(parents=True,mode=0o700)
+    safe_path(archive, home)
+    archive.mkdir(parents=True, mode=0o700, exist_ok=True)
+    safe_path(archive, home)
+    if archive.stat().st_uid != os.getuid() or archive.stat().st_mode & 0o077:
+        raise Hold("unsafe archive permissions")
+    dest.mkdir(mode=0o700)
     safe_path(dest, home)
     report_path = dest / "containment.jsonl"
     def log(event:dict) -> None:
@@ -367,9 +370,26 @@ def containment(report: dict, home: Path, expected: str) -> None:
             current_pids = ps_table(command(["/bin/ps","-axo","pid=,ppid=,pgid=,command="]))
             if s["pid"] in current_pids:
                 raise Hold("daemon PID still alive after bootout; manual hold")
-        os.rename(source,target)
-        if source.exists() or digest(target.read_bytes())!=s["registration_sha256"]:
-            raise Hold("archive verification failed; manual hold")
+        # Hard link is NOREPLACE (unlike POSIX rename, which can overwrite a
+        # destination created after the existence check). Link first, verify,
+        # then unlink the auto-start registration. Same-volume storage required.
+        os.link(source, target, follow_symlinks=False)
+        if (target.is_symlink() or
+                digest(target.read_bytes()) != s["registration_sha256"]):
+            raise Hold("archive copy unverifiable; original registration retained")
+        fd = os.open(dest, os.O_RDONLY | os.O_DIRECTORY)
+        try:
+            os.fsync(fd)
+        finally:
+            os.close(fd)
+        os.unlink(source)
+        if source.exists() or source.is_symlink():
+            raise Hold("auto-start registration still exists; manual hold")
+        fd = os.open(source.parent, os.O_RDONLY | os.O_DIRECTORY)
+        try:
+            os.fsync(fd)
+        finally:
+            os.close(fd)
         log({"event":"archived","label":label,"sha256":s["registration_sha256"]})
     final = inventory(home)
     if final["targets"] or sorted(x["label"] for x in final["services"].values())!=[KEEP]:
