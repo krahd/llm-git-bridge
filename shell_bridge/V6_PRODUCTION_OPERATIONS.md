@@ -62,8 +62,13 @@ descendant of `bridge.py daemon`.
 2. **Stage an inert release** (reads Drive, writes nothing to the journal,
    the mailbox or `~/Library/LaunchAgents`):
 
+   Use a system interpreter: the installer refuses a `python3`/`rclone`
+   resolved from inside the allowed root (e.g. a project virtualenv on
+   `PATH`), because a repository-scoped request could replace it.
+
    ```bash
    C=$(git rev-parse HEAD)
+   PATH=/opt/homebrew/bin:/usr/bin:/bin:/usr/sbin:/sbin \
    INSTALL_DIR=~/.local/share/local-executor-bridge-releases/$C \
    CONFIG_DIR=~/.config/local-executor-bridge-releases/$C \
    PLIST=~/.local/share/local-executor-bridge-releases/$C/launchagent.plist \

@@ -38,7 +38,7 @@ class InstallPreflightGuardTests(unittest.TestCase):
         self.assertIn('direct install cannot adopt an existing durable journal', INSTALL)
         self.assertIn('if [ "$STAGE_ONLY" -eq 0 ]', INSTALL)
         self.assertLess(INSTALL.index('direct install cannot adopt an existing durable journal'),
-                        INSTALL.index("choose_allowed_root" + chr(10) + "choose_remote"))
+                        INSTALL.index("\nchoose_allowed_root\n"))
 
     def test_legacy_retirement_flag_is_rejected_before_mac_side_effects(self):
         script = Path(__file__).resolve().parents[1] / "install.sh"
@@ -95,7 +95,7 @@ class InstallPreflightGuardTests(unittest.TestCase):
 
     def test_installer_checks_target_immutability_before_any_remote_mutation(self):
         self.assertLess(INSTALL.index("for protected_target in"),
-                        INSTALL.index("choose_allowed_root\nchoose_remote"))
+                        INSTALL.index("\nchoose_allowed_root\n"))
         self.assertLess(INSTALL.index("loaded bridge ownership is ambiguous; stage an isolated build"),
                         INSTALL.index("ensure_mailbox\n"))
         self.assertLess(INSTALL.index("verify_unclaimed_target_mailbox ||"),
