@@ -179,7 +179,11 @@ class QuiescentJournalTests(unittest.TestCase):
                     verify(self.state)
         replay_result.write_text(json.dumps(valid_replay))
         (original / "started.json").unlink()
-        with self.assertRaisesRegex(UnresolvedJournalError, "no STARTED"):
+        # Both receipts are now invalid. Which HOLD is reported first depends
+        # on directory enumeration order (hash order on Linux ext4), so accept
+        # either fail-closed diagnosis.
+        with self.assertRaisesRegex(UnresolvedJournalError,
+                                    "no STARTED|replay source receipt is missing"):
             verify(self.state)
 
     def test_completed_replay_does_not_accept_tampered_original(self):

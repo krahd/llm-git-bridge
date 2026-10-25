@@ -2,35 +2,26 @@
 
 This repository implements `llm-git-bridge`, a provider-agnostic bridge between LLM/agent clients and local Git repositories.
 
-## Live macOS safety hold (2026-10-12)
+## Production bridge: exactly one v6 owner
 
-**Never submit side-effecting commands to the installed v6 staging mailbox**
-`15ql2yACOq7H6qo0IgzosySqW8nHgUKXv`. The installed candidate at
-`0b84b2f` demonstrably executed ONE read-only request twice concurrently
-under distinct child PIDs (25404 and 25405), with different inherited
-`TMPDIR` identities. This confirms a split-brain mailbox-owner failure,
-not merely duplicate Drive result publication. The independent Drive
-result IDs and exact request SHA are preserved in issue #39. Even a seemingly
-idempotent Git/write action could run twice and corrupt or race the working
-tree. **Do not use staging for repository edits, cutover, service changes,
-approvals, or write-scope canaries.** Read-only investigations must preserve
-unique request IDs and check every result file by immutable Drive ID.
+The only supported production architecture is Local Executor Bridge v6 under
+the single LaunchAgent `net.laurenzo.local-executor-bridge`. The canonical
+install, upgrade, consolidation and recovery procedure is
+[`shell_bridge/V6_PRODUCTION_OPERATIONS.md`](shell_bridge/V6_PRODUCTION_OPERATIONS.md)
+using `shell_bridge/v6_consolidate.py`. v5 is retired, not a fallback.
 
-The production mailbox `1PRsQHgVsgXhIYT_8akGFRGdhdlw9Lmk6` has a stale
-heartbeat reporting older v6 and multiple installed LaunchAgents configured
-for the same root. Do not assume that this is v5 or that stale heartbeat means
-no daemon is loaded. Do not run `v6_release_once.sh` or `cutover.sh`
-against an already-v6 production root, stop any legacy service by guessed
-label/PID, replay ambiguous mutations, delete journals, or sunset v5 on source
-qualification alone.
-
-Canonical source PR #45 introduces stable cross-TMPDIR OS mailbox locking,
-but source integration **does not update installed Mac binaries** or
-retroactively prevent old daemons with different TMPDIRs from executing.
-The next production change requires independent Mac-local loaded-owner and
-journal verification, stopped-old-consumer proof, operator-authorized
-handover, native approval test, mailbox canary uniqueness, and rollback
-qualification. Keep issue #39 as the durable current acceptance gate.
+- Never create an additional bridge LaunchAgent (no per-candidate,
+  staging, verify or rollback labels) and never place a candidate plist in
+  `~/Library/LaunchAgents`; stage releases inertly under
+  `~/.local/share/local-executor-bridge-releases/<commit>/`.
+- Never run service-management, install or migration commands through a
+  bridge mailbox; they run in an operator Terminal on the Mac.
+- Never weaken the mailbox lock union, the per-request claim, the
+  no-replace STARTED marker or their regression tests
+  (`shell_bridge/tests/test_mailbox_exclusivity_v6.py`): their absence let v5
+  and v6, and two staging builds, execute the same requests (issue #39).
+- Never delete or rewrite journals, approval records or ledgers, and never
+  replay an `indeterminate` request automatically.
 
 When modifying the project:
 
@@ -42,4 +33,4 @@ When modifying the project:
 - minimise mailbox/Drive round trips without racing ambiguous Drive writes; Google Drive permits duplicate filenames;
 - every ChatGPT Shell Bridge protocol-1 request must include a concise, non-empty, human-readable `explanation` describing what the command will do and why; this applies to read-only diagnostics as well as mutations;
 - keep the standard-library-only runtime unless a dependency has a clear benefit;
-- run `PYTHONPATH=src python3 -m unittest discover -s tests -v` before committing.
+- run `PYTHONPATH=src python3 -m unittest discover -s tests -v` and `python3 -m unittest discover -s shell_bridge/tests` before committing.

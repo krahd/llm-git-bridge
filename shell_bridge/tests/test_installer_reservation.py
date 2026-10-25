@@ -45,18 +45,31 @@ class InstallerReservationTests(unittest.TestCase):
     def test_two_simultaneous_atomic_reservations_have_one_winner(self):
         with tempfile.TemporaryDirectory() as td:
             root = Path(td) / "bridge-installer-active.lock"
-            command = ["/bin/bash", "-c",
-                       '(umask 077; mkdir "$1")', "sh", str(root)]
-            first = subprocess.Popen(command, stdout=subprocess.PIPE,
-                                     stderr=subprocess.PIPE)
-            second = subprocess.Popen(command, stdout=subprocess.PIPE,
-                                      stderr=subprocess.PIPE)
-            p1 = first.communicate(timeout=5)
-            p2 = second.communicate(timeout=5)
-            self.assertEqual(sorted([first.returncode, second.returncode]),
-                             [0, 1], (p1, p2))
-            self.assertTrue(root.is_dir())
-            self.assertEqual(root.stat().st_mode & 0o077, 0)
+            # Exercise the installer's exact reservation command, repeatedly:
+            # a non-atomic mkdir(1) produced two winners in ~1% of races.
+            line = next(l for l in INSTALL.splitlines()
+                        if l.startswith("(umask 077;") and "INSTALL_LOCK_DIR" in l)
+            reservation = line.rsplit(")", 1)[0] + ")"
+            reservation = reservation.replace('"$INSTALL_LOCK_DIR"', '"$1"')
+            for attempt in range(60):
+                lock = root.with_name(f"{root.name}.{attempt}")
+                command = ["/bin/bash", "-c", reservation, "sh", str(lock)]
+                first = subprocess.Popen(command, stdout=subprocess.PIPE,
+                                         stderr=subprocess.PIPE)
+                second = subprocess.Popen(command, stdout=subprocess.PIPE,
+                                          stderr=subprocess.PIPE)
+                p1 = first.communicate(timeout=10)
+                p2 = second.communicate(timeout=10)
+                self.assertEqual(sorted([first.returncode, second.returncode]),
+                                 [0, 1], (attempt, p1, p2))
+                self.assertTrue(lock.is_dir())
+                self.assertEqual(lock.stat().st_mode & 0o077, 0)
+
+    def test_reservation_does_not_depend_on_mkdir_utility_semantics(self):
+        reservation = next(l for l in INSTALL.splitlines()
+                           if l.startswith("(umask 077;") and "INSTALL_LOCK_DIR" in l)
+        self.assertIn("os.mkdir(", reservation)
+        self.assertNotIn("; mkdir ", reservation)
 
     def test_lock_is_acquired_before_remote_discovery_and_any_install_copy(self):
         self.assertLess(INSTALL.index('INSTALL_LOCK_HELD=1'),

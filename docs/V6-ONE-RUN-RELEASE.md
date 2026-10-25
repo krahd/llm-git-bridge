@@ -1,5 +1,9 @@
 # v5 to v6: one-invocation guarded local release
 
+> **Superseded (2026-10-25).** Retained as history only. Production installs,
+> upgrades and recovery use [`V6_PRODUCTION_OPERATIONS.md`](../shell_bridge/V6_PRODUCTION_OPERATIONS.md).
+
+
 ## Scope
 
 The supported operator entrypoint is `shell_bridge/v6_release_once.sh`. Run it

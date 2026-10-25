@@ -1,5 +1,9 @@
 # Prepare a v6 replacement without stopping production
 
+> **Superseded (2026-10-25).** Retained as history only. Production installs,
+> upgrades and recovery use [`V6_PRODUCTION_OPERATIONS.md`](V6_PRODUCTION_OPERATIONS.md).
+
+
 Use the new `stage_v6_upgrade.sh` from a **verified local source checkout**
 only after a source config and exact intended commit have been selected. The
 script is a staging mechanism, **not** a duplicate-owner remediation command.

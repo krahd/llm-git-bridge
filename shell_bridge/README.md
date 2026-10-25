@@ -136,7 +136,14 @@ Reconciliation must inspect the exact request, affected repository/remote
 state, and publication evidence separately under a controlled local process.
 Even zero findings from triage do not authorize cutover.
 
-### Guarded v6-to-v6 replacement: source pre-stop contract
+### Upgrading or consolidating an existing installation
+
+Use [V6_PRODUCTION_OPERATIONS.md](V6_PRODUCTION_OPERATIONS.md): stage an inert
+release, review `v6_consolidate.py census`, then `v6_consolidate.py migrate`.
+The sections below describe the superseded, label-per-candidate controllers
+and are kept as history only.
+
+### (Superseded) Guarded v6-to-v6 replacement: source pre-stop contract
 
 For an existing v6 installation, use the separately controlled
 `stage_v6_upgrade.sh` / `install.sh --upgrade-stage-only` workflow described
@@ -251,9 +258,10 @@ The live Drive root contains `health.json`, which reports the bridge version, pi
 Local state lives under:
 
 ```text
-~/.config/chatgpt-shell-bridge/
-~/.local/state/local-executor-bridge/
-~/.local/share/local-executor-bridge/
+~/.local/share/local-executor-bridge/     -> immutable release (symlink)
+~/.config/local-executor-bridge-releases/<commit>/
+~/.local/state/chatgpt-shell-bridge/      (production journal on migrated hosts)
+~/.local/state/local-executor-bridge-locks/
 ```
 
 See [`../docs/shell-bridge-v5-architecture.md`](../docs/shell-bridge-v5-architecture.md) and [`../docs/shell-bridge-v5-adversarial-audit.md`](../docs/shell-bridge-v5-adversarial-audit.md) for the design and threat-model details.

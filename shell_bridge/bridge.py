@@ -202,6 +202,26 @@ def atomic_write(path: Path, data: bytes) -> None:
             os.unlink(tmp)
 
 
+def atomic_create(path: Path, data: bytes) -> None:
+    """Durably create a marker that must never replace an existing one.
+
+    link(2) fails with FileExistsError when the name exists, unlike rename.
+    """
+    parent = path.parent
+    ensure_directory_durable(parent, sync_existing=False)
+    fd, tmp = tempfile.mkstemp(prefix=path.name + ".", dir=str(parent))
+    try:
+        with os.fdopen(fd, "wb") as f:
+            f.write(data)
+            f.flush()
+            os.fsync(f.fileno())
+        os.link(tmp, path)
+    finally:
+        if os.path.exists(tmp):
+            os.unlink(tmp)
+    _sync_directory(parent)
+
+
 def load_json_bytes(data: bytes) -> dict:
     # A raw Google Drive upload or Google Docs export may carry the single
     # permitted UTF-8 BOM. Keep the original bytes for request SHA/idempotency,
@@ -1218,9 +1238,60 @@ def _active_marker_matches(marker: Path, rid: str) -> int | None:
         return None
 
 
+def _boot_time() -> float | None:
+    """Wall-clock time of the current OS boot, or None when unknown."""
+    try:
+        if sys.platform == "darwin":
+            cp = subprocess.run(["/usr/sbin/sysctl", "-n", "kern.boottime"],
+                                capture_output=True, text=True, timeout=5, check=False)
+            match = re.search(r"\bsec\s*=\s*(\d+)", cp.stdout)
+            return float(match.group(1)) if match else None
+        with open("/proc/stat", encoding="ascii") as f:
+            for line in f:
+                if line.startswith("btime "):
+                    return float(line.split()[1])
+    except (OSError, ValueError, subprocess.SubprocessError):
+        return None
+    return None
+
+
+def _recorded_spawn_predates_boot(marker: Path) -> bool:
+    # A process group recorded before the current boot cannot still exist.
+    # Its numeric PGID may since have been reused by an unrelated process.
+    try:
+        spawned_at = float(json.loads(marker.read_text("utf-8"))["spawned_at"])
+    except Exception:
+        return False
+    boot = _boot_time()
+    return boot is not None and spawned_at < boot
+
+
+def _claim_request(state_dir: Path, rid: str):
+    """Hold an exclusive per-request claim for the whole admission/execution.
+
+    The STARTED existence check and its creation are otherwise separate steps,
+    so two workers or processes sharing a journal could both execute.
+    Returns None when another holder is already processing this request.
+    """
+    claims = state_dir / "request-claims"
+    ensure_directory_durable(claims, mode=0o700)
+    handle = _open_instance_lock_file(claims / f"{rid}.lock")
+    try:
+        fcntl.flock(handle.fileno(), fcntl.LOCK_EX | fcntl.LOCK_NB)
+    except BlockingIOError:
+        handle.close()
+        return None
+    except BaseException:
+        handle.close()
+        raise
+    return handle
+
+
 def _contain_recorded_active(active_marker: Path, rid: str) -> None:
     pgid = _active_marker_matches(active_marker, rid)
     if pgid is None:
+        return
+    if _recorded_spawn_predates_boot(active_marker):
         return
     try:
         os.killpg(pgid, 0)
@@ -1234,6 +1305,19 @@ def _contain_recorded_active(active_marker: Path, rid: str) -> None:
 
 
 def _process_one_request(name: str, cfg: dict, preloaded_raw: bytes | None = None) -> None:
+    rid_guess = validate_request_name(name)
+    claim = _claim_request(Path(cfg["state_dir"]).expanduser(), rid_guess)
+    if claim is None:
+        # Another worker or process owns this exact request right now.
+        # Leave the Drive request for that owner; never execute or publish.
+        return
+    try:
+        _process_claimed_request(name, cfg, preloaded_raw)
+    finally:
+        claim.close()
+
+
+def _process_claimed_request(name: str, cfg: dict, preloaded_raw: bytes | None = None) -> None:
     rid_guess = validate_request_name(name)
     state_dir = Path(cfg["state_dir"]).expanduser()
     allowed_root = Path(cfg["allowed_root"]).expanduser()
@@ -1440,10 +1524,16 @@ def _process_one_request(name: str, cfg: dict, preloaded_raw: bytes | None = Non
             _persist_then_publish(result, local_result, finished_marker, name, cfg)
             return
 
-    atomic_write(started_marker, json.dumps({
-        "request_sha256": request_sha,
-        "started_at": time.time(),
-    }, sort_keys=True).encode("utf-8"))
+    try:
+        atomic_create(started_marker, json.dumps({
+            "request_sha256": request_sha,
+            "started_at": time.time(),
+        }, sort_keys=True).encode("utf-8"))
+    except FileExistsError:
+        # STARTED appeared after the earlier check: some other executor
+        # admitted this request. Never run it a second time here.
+        print(f"request {name}: STARTED already exists; refusing duplicate execution", flush=True)
+        return
 
     def on_spawn(pgid: int, spawned_at: float) -> None:
         atomic_write(active_marker, json.dumps({
@@ -1844,6 +1934,10 @@ def load_config(path: Path) -> dict:
     return cfg
 
 
+def _lock_digest(identity: str) -> str:
+    return hashlib.sha256(identity.encode("utf-8")).hexdigest()[:32]
+
+
 def _instance_lock_path(cfg: dict) -> Path:
     """Return a per-user lock path stable across state-dir/config migrations."""
     folder = cfg.get("drive_root_folder_id")
@@ -1855,17 +1949,59 @@ def _instance_lock_path(cfg: dict) -> Path:
         remote = str(cfg.get("remote", ""))
         base = str(cfg.get("base_path", ""))
         identity = f"mailbox:{remote}|{base}"
-    digest = hashlib.sha256(identity.encode("utf-8")).hexdigest()[:32]
     lock_root = Path(tempfile.gettempdir()) / f"chatgpt-shell-bridge-{os.getuid()}"
     # Pure path derivation; _open_instance_lock_file performs owner-verified,
     # no-follow creation rather than chmodding pre-existing directories.
-    return lock_root / f"{digest}.lock"
+    return lock_root / f"{_lock_digest(identity)}.lock"
 
 
 def _stable_instance_lock_path(cfg: dict) -> Path:
     # Canonical per-user location, independent of launchd TMPDIR.
     old_path = _instance_lock_path(cfg)
     return Path("/tmp") / old_path.parent.name / old_path.name
+
+
+def _durable_lock_root() -> Path:
+    # Temporary directories are periodically cleaned on macOS; an unlinked
+    # lock file lets a later claimant flock a NEW inode while the old owner
+    # still runs. This per-user location is never cleaned automatically.
+    return Path.home() / ".local" / "state" / "local-executor-bridge-locks"
+
+
+def _mailbox_lock_identities(cfg: dict) -> list[str]:
+    """Every identity under which any released build has locked this mailbox.
+
+    Builds before the pinned-ID lock (v5 and early v6) locked
+    ``instance:<bridge_instance_id>``; later v6 builds locked
+    ``drive-mailbox:<root>``. Two such builds on one mailbox therefore held
+    disjoint locks and both executed requests. Holding the union makes any
+    historical build sharing the instance, root or named mailbox contend.
+    """
+    identities = []
+    folder = cfg.get("drive_root_folder_id")
+    if isinstance(folder, str) and folder.strip():
+        identities.append(f"drive-mailbox:{folder.strip()}")
+    remote, base = cfg.get("remote"), cfg.get("base_path")
+    if not identities or (remote and base):
+        identities.append(f"mailbox:{remote or ''}|{base or ''}")
+    instance = cfg.get("bridge_instance_id")
+    if isinstance(instance, str) and instance.strip():
+        identities.append(f"instance:{instance.strip()}")
+    return identities
+
+
+def _mailbox_lock_paths(cfg: dict) -> list[Path]:
+    lock_dir = f"chatgpt-shell-bridge-{os.getuid()}"
+    roots = [Path(tempfile.gettempdir()) / lock_dir, Path("/tmp") / lock_dir,
+             _durable_lock_root()]
+    # /tmp and /private/tmp can name the same directory on macOS.
+    # Deduplicate by canonical parent identity to avoid double-flocking an inode.
+    unique_paths = {}
+    for identity in _mailbox_lock_identities(cfg):
+        for root in roots:
+            path = root / f"{_lock_digest(identity)}.lock"
+            unique_paths.setdefault(path.parent.resolve(strict=False) / path.name, path)
+    return sorted(unique_paths.values(), key=str)
 
 
 def _open_instance_lock_file(path: Path):
@@ -1887,55 +2023,87 @@ def _open_instance_lock_file(path: Path):
         raise
 
 
+def _flock_lock_path(path: Path):
+    handle = _open_instance_lock_file(path)
+    try:
+        fcntl.flock(handle.fileno(), fcntl.LOCK_EX | fcntl.LOCK_NB)
+    except BlockingIOError as exc:
+        handle.close()
+        raise RuntimeError("another shell-bridge instance already holds the instance lock") from exc
+    except BaseException:
+        handle.close()
+        raise
+    meta = os.fstat(handle.fileno())
+    return handle, (meta.st_dev, meta.st_ino)
+
+
+def _record_lock_owner(handle) -> None:
+    handle.seek(0)
+    handle.truncate()
+    handle.write("pid=" + str(os.getpid()) + chr(10))
+    handle.flush()
+
+
 class _HeldMailboxLocks:
-    def __init__(self, files):
-        self.files = files
+    def __init__(self, held):
+        # held: list of [path, handle, (st_dev, st_ino)]
+        self.held = held
+        self.superseded = []
+
+    @property
+    def files(self):
+        return [handle for _, handle, _ in self.held]
+
+    def verify(self) -> bool:
+        """Confirm every lock path still names a flocked inode we hold.
+
+        A path that was unlinked or replaced (for example by temporary-file
+        cleanup) is re-asserted on its new inode. If another process already
+        holds the new inode, exclusive ownership is lost: return False.
+        """
+        for entry in self.held:
+            path, _, identity = entry
+            try:
+                meta = os.stat(path, follow_symlinks=False)
+                if (meta.st_dev, meta.st_ino) == identity:
+                    continue
+            except FileNotFoundError:
+                pass
+            except OSError:
+                return False
+            try:
+                handle, identity = _flock_lock_path(path)
+            except (OSError, RuntimeError):
+                return False
+            _record_lock_owner(handle)
+            # Keep the superseded descriptor: closing it gains nothing and a
+            # lingering legacy claimant may still be blocked on that inode.
+            self.superseded.append(entry[1])
+            entry[1], entry[2] = handle, identity
+        return True
 
     def close(self):
-        for file in reversed(self.files):
-            file.close()
-        self.files.clear()
+        for handle in reversed(self.files + self.superseded):
+            handle.close()
+        self.held.clear()
+        self.superseded.clear()
 
 
 def acquire_instance_lock(cfg: dict):
-    # Hold the historical TMPDIR lock AND a fixed /tmp lock until shutdown.
-    # Legacy binaries can coexist during a migration; the release owner audit
-    # must still rule out a legacy daemon with a DIFFERENT TMPDIR.
-    # A legacy bridge may identify the exact same mailbox only by rclone
-    # remote+folder path rather than canonical Drive root ID. Also acquire
-    # its name-based identity when available, preserving a shared fixed lock
-    # across both v6 config formats and distinct macOS TMPDIR environments.
-    identities = [cfg]
-    if cfg.get("drive_root_folder_id") and cfg.get("remote") and cfg.get("base_path"):
-        alias = dict(cfg)
-        alias.pop("drive_root_folder_id", None)
-        identities.append(alias)
-    # /tmp and /private/tmp can name the same directory on macOS.
-    # Deduplicate by canonical parent identity to avoid double-flocking an inode.
-    unique_paths = {}
-    for identity_cfg in identities:
-        for path in (_instance_lock_path(identity_cfg),
-                     _stable_instance_lock_path(identity_cfg)):
-            identity = path.parent.resolve(strict=False) / path.name
-            unique_paths.setdefault(identity, path)
-    paths = sorted(unique_paths.values(), key=str)
-    files = []
+    # Hold every historical lock identity (pinned root, named mailbox and
+    # bridge instance) in the launchd TMPDIR, the fixed /tmp directory and a
+    # durable per-user directory until shutdown. Any build that ever served
+    # this mailbox therefore contends for at least one of the same inodes.
+    held = []
     try:
-        for path in paths:
-            handle = _open_instance_lock_file(path)
-            files.append(handle)
-            try:
-                fcntl.flock(handle.fileno(), fcntl.LOCK_EX | fcntl.LOCK_NB)
-            except BlockingIOError as exc:
-                raise RuntimeError("another shell-bridge instance already holds the instance lock") from exc
-        for handle in files:
-            handle.seek(0)
-            handle.truncate()
-            handle.write("pid=" + str(os.getpid()) + chr(10))
-            handle.flush()
-        return _HeldMailboxLocks(files)
+        for path in _mailbox_lock_paths(cfg):
+            handle, identity = _flock_lock_path(path)
+            held.append([path, handle, identity])
+        for _, handle, _ in held:
+            _record_lock_owner(handle)
+        return _HeldMailboxLocks(held)
     except BaseException:
-        for handle in reversed(files):
+        for _, handle, _ in reversed(held):
             handle.close()
         raise
 
@@ -2292,11 +2460,19 @@ def daemon(config_path: Path) -> None:
     last_health = 0.0
     _SHUTDOWN.clear()
     old_handlers = {}
+    lock_lost = False
     for sig in (signal.SIGTERM, signal.SIGINT):
         old_handlers[sig] = signal.signal(sig, _signal_shutdown)
     try:
         while not _SHUTDOWN.is_set():
             threads = {t for t in threads if t.is_alive()}
+            if not lock_file.verify():
+                # Another claimant may own the mailbox. Stop admitting new
+                # requests at once, but let admitted work finish rather than
+                # aborting it into an indeterminate result.
+                print("MAILBOX_LOCK_LOST: stopping admission; draining admitted work", flush=True)
+                lock_lost = True
+                break
             names: list[str] = []
             try:
                 names = list_requests_cfg(cfg)
@@ -2326,18 +2502,22 @@ def daemon(config_path: Path) -> None:
                 last_health = now
             _SHUTDOWN.wait(poll)
     finally:
-        _SHUTDOWN.set()
-        _signal_shutdown(signal.SIGTERM, None)
+        if not lock_lost:
+            _SHUTDOWN.set()
+            _signal_shutdown(signal.SIGTERM, None)
         try:
             # This intentionally has no duration cap. A still-running request
             # worker makes a clean ownership handover impossible.
             _drain_workers_before_unlock(threads)
         finally:
+            _SHUTDOWN.set()
             wake.close()
             _WAKE_LEASE = None
             lock_file.close()
             for sig, handler in old_handlers.items():
                 signal.signal(sig, handler)
+    if lock_lost:
+        raise SystemExit(75)
 
 
 def once(config_path: Path) -> None:

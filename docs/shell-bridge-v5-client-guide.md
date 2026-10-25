@@ -1,4 +1,6 @@
-# Shell Bridge v5 client guide
+# Local Executor Bridge client guide (formerly Shell Bridge v5)
+
+The production service is Local Executor Bridge v6; this guide applies unchanged.
 
 This is a compact instruction template for an LLM or agent that has access to the Google Drive mailbox created by `shell_bridge/install.sh`.
 
@@ -30,8 +32,11 @@ Before any repository mutation establish the current branch, worktree state, rem
 Use the installed workspace coordinator for substantial, long-running, or concurrent work:
 
 ```text
-~/.local/share/chatgpt-shell-bridge/workspace.py
+~/.local/share/local-executor-bridge/workspace.py
 ```
+
+The historical `~/.local/share/chatgpt-shell-bridge/workspace.py` path remains a
+compatibility link to the same coordinator.
 
 A repository-changing task is complete only when the intended change is committed, pushed to the intended remote/branch, and the remote ref is independently verified, unless the user explicitly requested local-only work.
 
