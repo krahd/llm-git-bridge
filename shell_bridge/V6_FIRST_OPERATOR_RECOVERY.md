@@ -1,40 +1,49 @@
-# Bridge v6-first recovery: operator package
+# Bridge v6-first recovery: Mac operator package
 
-## What this package does
+**Status (25 October 2026): containment utility hardened and tested offline, but NOT accepted on the user's Mac. Do not treat an isolated unit-test pass as approval for production service changes.**
 
-`bridge_v6_recovery.py` is an out-of-band macOS utility for the **containment phase only** of the v6 migration. It does NOT promote v6. Its default mode is a read-only inventory. The optional guarded containment operation retires verified obsolete bridge LaunchAgents and leaves v5 as the sole **temporary** production owner until a newly qualified v6 can be promoted.
+The included `bridge_v6_recovery.py` implements the *inspection and conditional containment* portions of issue #39. It does **not** perform the subsequent v5-to-v6 handover. The earlier `bridge_cleanup.py` is withdrawn.
 
-The previously supplied `bridge_cleanup.py` is withdrawn and must not be used.
+## Read-only Mac Terminal preflight
 
-## First action (safe read-only preflight)
+Extract the archive or obtain the exact script from the reviewed GitHub PR. Run directly in Terminal, **never through the bridge**:
 
-1. Extract this archive to your Downloads folder, or download `bridge_v6_recovery.py` directly.
-2. Open **Mac Terminal**, not a ChatGPT bridge request, and run:
-
-   ```bash
-   python3 ~/Downloads/bridge_v6_recovery.py --inspect > ~/Desktop/bridge-v6-preflight.json
-   ```
-
-3. Review or share the preflight JSON. Exit 3 means HOLD; no mutation is performed. Some paths and PID metadata may be sensitive; no command bodies or credentials are emitted.
-
-The output includes a `fingerprint` tied to the exact launchd/config/process snapshot. The script reports `containment_ready` and reasons when it is not ready. A pending approval file can be expired, but is preserved regardless.
-
-## Containment only after review
-
-The user has authorised removing duplicate and obsolete services, but this package should **not** be run with `--contain` until a current preflight report and mailbox quiescence are independently reviewed. An accepted operator command would be:
-
-```bash
-python3 ~/Downloads/bridge_v6_recovery.py --contain EXACT_64_CHARACTER_FINGERPRINT
+```sh
+python3 ~/Downloads/bridge_v6_recovery.py --inspect > ~/Desktop/bridge-v6-preflight.json
 ```
 
-This disables and boots out exact non-v5 bridge services and archives their direct LaunchAgent plists outside the autostart folder, preserving configs and journals. It refuses unknown daemons, running children, active journal markers, incomplete STARTED records and live or unverifiable approvals. A partial operation is a HOLD; do not automatically rerun or restore.
+Inspect the JSON. Exit code `3` means a HOLD. The inspection reads local launchd, process, journals, approvals and configured request folders on Google Drive via `rclone lsf` rooted at immutable Drive folder IDs. It does not execute, move or delete bridge requests. Do not share the JSON publicly: it contains service paths, PIDs, state paths and immutable mailbox identifiers (not command bodies or credentials).
 
-## What remains after containment
+Requires macOS, Python 3.10+, rclone, configured remote access, and a normal login Terminal process. No `sudo`.
 
-- Verify the one-owner v5 temporary state.
-- Resolve production journal and approval handover blockers without deleting history or replaying commands.
-- Merge and qualify missing v6 safety changes (notably PR #76, open when this package was prepared).
-- Stage a fresh trusted v6 build in isolation.
-- Promote v6 through a separately guarded maintenance-window cutover, then verify approval, exactly-once request handling, and reboot persistence.
+## What the guard checks
 
-GitHub issue: https://github.com/krahd/llm-git-bridge/issues/39
+- Explicitly pinned v5 *temporary* keeper and all recognised v6, staging, candidate and rollback LaunchAgents; unknown/loaded/unmanaged bridge processes block action.
+- Exact script/config/process identities and locally owned non-group-writable registration/config files; symlinked path/ancestor and unexpected mailbox roots block.
+- Children of the keeper **and** the targets, pending approval records (including malformed or nonfinite expiry), active and incomplete journal receipts.
+- Complete bounded listings of the **pinned Drive requests folder IDs** for every active mailbox: any executable `.json` request or failed remote query blocks.
+- Fingerprint time-bucket, recorded byte digests, and fresh inspection before applying and before each service action.
+
+An exit code 0 from `--inspect` is **not** permission to run `--contain` automatically. It is one snapshot subject to concurrent changes and Drive eventual consistency; establish a maintenance window and operator approval first.
+
+## Later: guarded containment only, not promotion
+
+After explicit review of current local/Drive preflight and maintenance freeze, the separately authorised command would be:
+
+```sh
+python3 ~/Downloads/bridge_v6_recovery.py --contain EXACT_CURRENT_64_CHARACTER_FINGERPRINT
+```
+
+`--contain` refuses bridge-child invocation, recomputes the snapshot, disables and boots out exact obsolete LaunchAgent labels, verifies process exit, hard-links registration into a private archival directory without destination replacement, durably syncs it, removes the on-login registration, and verifies the temporary v5-only state. Configuration, Git work, historical receipts and approvals are preserved. A partial failure is **HOLD**: do not blindly rerun or reinstate another daemon. The report is under `~/Library/Application Support/llm-git-bridge/retired-launchagents/`.
+
+The utility cannot make an atomic transaction out of live Google Drive operations and `launchctl`. In particular a request can arrive during the inspection-to-bootout interval; a maintenance freeze and independent acceptance remain necessary. No claim of exactly-once behaviour is made from this utility alone.
+
+## Subsequent migration steps
+
+1. Reconcile the historical production journal and approval state without deleting or replaying indeterminate work.
+2. Qualify current v6 source, including required admission-digest hardening and exact-head native macOS CI.
+3. Stage v6 without attaching a second executor to the production mailbox.
+4. Perform a guarded exclusive one-owner v5-to-v6 handover.
+5. Prove unique execution, native approval Allow/Reject, Git workspace operations, and exclusive restart after login/reboot.
+
+Tracked at https://github.com/krahd/llm-git-bridge/issues/39 and draft PR #78.
