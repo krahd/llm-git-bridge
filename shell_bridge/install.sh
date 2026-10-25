@@ -102,7 +102,10 @@ then
   fail "installer lock parent is not an operator-owned non-writable-by-others directory"
 fi
 INSTALL_LOCK_DIR="$INSTALL_LOCK_PARENT/bridge-installer-active.lock"
-(umask 077; mkdir "$INSTALL_LOCK_DIR") ||
+# Exclusive creation must come from mkdir(2) itself. Some mkdir(1)
+# implementations (uutils coreutils 0.10 on Ubuntu 26.04) report success when
+# a concurrent caller created the directory first, giving two winners.
+(umask 077; python3 -c 'import os,sys; os.mkdir(sys.argv[1], 0o700)' "$INSTALL_LOCK_DIR" 2>/dev/null) ||
   fail "another installer is active or previous installation ended indeterminately; inspect before retry"
 INSTALL_LOCK_HELD=1
 normalize_remote(){ case "$1" in *:) printf '%s\n' "$1";; *) printf '%s:\n' "$1";; esac; }
