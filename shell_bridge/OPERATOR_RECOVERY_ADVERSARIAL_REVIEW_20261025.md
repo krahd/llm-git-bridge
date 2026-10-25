@@ -34,3 +34,15 @@ Original version: **reject for production**. Hardened version: **offline tests p
 ## Operator decision
 
 Run a new **read-only** `--inspect` from a Mac Terminal that is not a child of the bridge. Review its holds and direct pinned remote listings; keep this PR draft. **Do not run `--contain` or attempt v6 promotion until Mac evidence, release CI, maintenance freeze and explicit acceptance are satisfied.** No Mac services were changed in this review.
+
+## Second independent adversarial pass (25 October 2026)
+
+Further inspection discovered **three distinct defects** not covered by the original 24 tests:
+
+1. `Path.is_relative_to` accepts unnormalised `../` components lexically. `safe_path` consequently accepted `root/../other`. Now explicitly rejects any `..` component before filesystem access.
+2. The launchd inventory regex omitted parked labels in the `com.tom.chatgpt-shell-bridge-*` and `io.llm-git-bridge.*` namespaces, allowing dormant variants to revive at login unseen. The inventory recognises their families and refuses malformed/unknown registrations.
+3. Mutable service configs were the sole source of truth for Drive request and result folder IDs, allowing a changed config to point the remote emptiness check at another folder. Now binds production and staging to the exact separately audited root/request/result ID tuples, and rejects mismatches.
+
+The hardened script's malformed plist path is normalised to a `Hold` rather than an uncaught exception. Added **five focused regression tests**, bringing offline `unittest` to **29/29 passed**. Current GitHub blob SHA1s independently matched the tested local files after these edits: script `f8bbb7a0ddb4aa01e1cbc6e423fe08a6b02558dc`, tests `e8632ec8ba3ce8dac72feef635280ded2fd5b6d2`. The source was compiled with Python 3.13, and its macOS gate refused on Linux with exit code 2.
+
+**Safety disposition unchanged:** Linux offline tests do not substitute for authenticated native Mac execution. No bridge service can safely be stopped through the duplicate-owner mailbox transport. The script is containment only, not a final v6 installer. The last available user Mac data is historic and does not establish current quiescence, exact installed binary, no worker descendants, or safe approval replay. Live Mac `--contain` remains prohibited without out-of-band `--inspect`, maintenance freeze, code qualification and independent acceptance.
