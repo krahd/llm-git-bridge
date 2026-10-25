@@ -240,6 +240,74 @@ def verify_operator_context() -> None:
     raise Hold("operator ancestry exceeds limit")
 
 
+def registration_census(home: Path, *, launch: str | None = None) -> dict:
+    """Read-only, bounded inspection of all bridge-labelled login registrations.
+
+    This intentionally does not trust the plist basename to be the launchd
+    identity. A malformed plist must be visible in the report, but never makes
+    service shutdown eligible. No arguments, commands or credentials are shown.
+    """
+    agents = home / "Library/LaunchAgents"
+    safe_path(agents, home)
+    if not agents.is_dir():
+        raise Hold("LaunchAgents directory unavailable")
+    launch = command(["/bin/launchctl", "list"]) if launch is None else launch
+    loaded = {}
+    for line in launch.splitlines():
+        fields = line.split(None, 2)
+        if len(fields) == 3 and LABEL.fullmatch(fields[2]):
+            loaded[fields[2]] = int(fields[0]) if fields[0].isdecimal() else None
+    paths = sorted(agents.glob("*.plist"))
+    if len(paths) > 512:
+        raise Hold("LaunchAgents directory exceeds census size limit")
+    records = []
+    for path in paths:
+        name = path.stem
+        labelled_by_filename = bool(LABEL.fullmatch(name))
+        label = None
+        problem = None
+        props = None
+        try:
+            raw = safe_file(path, home)
+            item = plistlib.loads(raw)
+            if not isinstance(item, dict):
+                raise ValueError("non-dictionary plist")
+            candidate = item.get("Label")
+            if isinstance(candidate, str) and LABEL.fullmatch(candidate):
+                label = candidate
+            if label or labelled_by_filename:
+                props = {
+                    "keep_alive": bool(item.get("KeepAlive", False)),
+                    "run_at_load": bool(item.get("RunAtLoad", False)),
+                    "registration_sha256": digest(raw),
+                }
+                if candidate != name:
+                    problem = "filename_and_declared_label_disagree"
+                if label is None:
+                    problem = "unknown_declared_service_label"
+        except (Hold, OSError, ValueError, TypeError, plistlib.InvalidFileException) as exc:
+            if labelled_by_filename:
+                problem = "registration_unverifiable:" + type(exc).__name__
+        if not (label or labelled_by_filename):
+            continue
+        rec = {"filename": path.name, "declared_label": label,
+               "filename_matches_label": bool(label and name == label),
+               "loaded": bool(label in loaded), "pid": loaded.get(label),
+               "problem": problem}
+        if props is not None:
+            rec.update(props)
+        records.append(rec)
+    declared = {}
+    for rec in records:
+        if rec["declared_label"]:
+            declared.setdefault(rec["declared_label"], []).append(rec["filename"])
+    dup = {label: names for label,names in declared.items() if len(names)>1}
+    return {"registrations": records,
+            "duplicate_declared_labels": dup,
+            "loaded_without_registration": sorted(set(loaded)-set(declared)),
+            "incomplete": bool(dup) or any(r["problem"] for r in records)
+             or bool(set(loaded)-set(declared))}
+
 def inventory(home: Path, *, now: float | None = None, launch: str | None = None,
               ps: str | None = None, remote_listings: dict | None = None) -> dict:
     now = time.time() if now is None else now
@@ -442,11 +510,17 @@ def main() -> int:
         # Do not emit 'mutations_performed': false after a failed --contain,
         # because that failure might occur after disabling a service.
         if not args.contain:
-            print(json.dumps({
+            report = {
                 "schema": 2, "mode": "read_only", "inspection_complete": False,
                 "containment_ready": False, "holds": [reason],
                 "mutations_performed": False,
-            }, indent=2, sort_keys=True))
+            }
+            try:
+                report["registration_census"] = registration_census(Path.home())
+            except (Hold, OSError, ValueError, subprocess.TimeoutExpired) as diag_exc:
+                # A partial report is NOT approval for any service mutation.
+                report["registration_census_error"] = type(diag_exc).__name__
+            print(json.dumps(report, indent=2, sort_keys=True))
         print("HOLD: " + reason, file=sys.stderr)
         return 4
     return 0
