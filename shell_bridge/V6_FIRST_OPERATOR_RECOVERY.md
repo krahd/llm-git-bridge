@@ -47,3 +47,25 @@ The utility cannot make an atomic transaction out of live Google Drive operation
 5. Prove unique execution, native approval Allow/Reject, Git workspace operations, and exclusive restart after login/reboot.
 
 Tracked at https://github.com/krahd/llm-git-bridge/issues/39 and draft PR #78.
+
+## Mismatched historical LaunchAgent plist labels
+
+A Mac operator preflight on 25 October 2026 stopped with:
+
+```
+HOLD: plist label differs:
+net.laurenzo.local-executor-bridge-v6-staging.candidate-c90c9758c48345f6d9af26c64f580f6d64f66d7f
+```
+
+This is a **correct safety hold**: the filename and the plist's internal launchd `Label` disagree. It is not a verified inactive or safe-to-delete registration. macOS uses the internal `Label` for service identity, so do not blindly `bootout`, rename, remove, or disable the basename as if it were the actual service label. No cleanup action was performed.
+
+The latest inspector returns a machine-readable **partial HOLD** JSON on stdout instead of an empty output file when parsing fails; `inspection_complete=false` and `containment_ready=false` prohibit using it as a valid preflight fingerprint. For a targeted **read-only** local diagnosis:
+
+```sh
+p="$HOME/Library/LaunchAgents/net.laurenzo.local-executor-bridge-v6-staging.candidate-c90c9758c48345f6d9af26c64f580f6d64f66d7f.plist"
+/usr/bin/plutil -lint "$p"
+/usr/bin/plutil -extract Label raw -o - "$p"
+/bin/launchctl list | /usr/bin/grep -F 'local-executor-bridge-v6-staging' || :
+```
+
+Reconcile the internal label, file path, loaded launchd identity, daemon PID, mailbox/config, and possible future-login registration *before* any alteration. If it is an inactive stale plist, a separate audited operator-only quarantine procedure may be appropriate; otherwise resolve active ownership first.
