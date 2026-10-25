@@ -11,6 +11,8 @@ import argparse
 import datetime as dt
 import hashlib
 import json
+import math
+import stat
 import os
 from pathlib import Path
 import plistlib
@@ -27,6 +29,7 @@ REQUIRED = ("bridge_instance_id", "drive_root_folder_id", "requests_folder_id",
             "results_folder_id", "state_dir")
 LABEL = re.compile(r"(?:com\.tom\.chatgpt-shell-bridge|io\.llm-git-bridge\.daemon|net\.laurenzo\.local-executor-bridge(?:[-.][A-Za-z0-9._-]+)?)\Z")
 BRIDGE_ARG = re.compile(r"(?:^|/)bridge\.py\s+daemon(?:\s|$)")
+FINGERPRINT_SECONDS = 600
 
 class Hold(RuntimeError):
     pass
@@ -40,12 +43,29 @@ def command(argv: list[str], *, max_seconds: int = 12) -> str:
 def digest(raw: bytes) -> str:
     return hashlib.sha256(raw).hexdigest()
 
+def safe_path(path: Path, root: Path, *, regular: bool = False) -> None:
+    """Reject lexical escapes, symlinked ancestors, and non-owned regular files."""
+    if not path.is_absolute() or not root.is_absolute() or not path.is_relative_to(root):
+        raise Hold("path escapes expected root")
+    cursor = path
+    while cursor != root.parent:
+        if cursor.is_symlink():
+            raise Hold("symlinked path or ancestor")
+        cursor = cursor.parent
+    if regular:
+        if not path.is_file():
+            raise Hold("missing regular file")
+        info = path.stat()
+        if not stat.S_ISREG(info.st_mode) or info.st_uid != os.getuid() or (info.st_mode & 0o022):
+            raise Hold("unsafe file owner or permissions")
+
+
 def safe_file(path: Path, home: Path) -> bytes:
-    if not path.is_absolute() or path.is_symlink() or home not in path.parents:
-        raise Hold("linked or outside-home file")
-    if not path.is_file() or path.stat().st_size > 65536:
-        raise Hold("missing or oversized configuration/registration")
+    safe_path(path, home, regular=True)
+    if path.stat().st_size > 65536:
+        raise Hold("oversized configuration/registration")
     return path.read_bytes()
+
 
 def parse_service(plist: Path, home: Path) -> dict:
     name = plist.stem
@@ -66,26 +86,27 @@ def parse_service(plist: Path, home: Path) -> dict:
     if len(confs) != 1:
         raise Hold(f"ambiguous config: {name}")
     script, config = Path(args[scripts[0]]), Path(confs[0])
-    if (not str(script).startswith(str(home / ".local/share/") ) or
-        not str(config).startswith(str(home / ".config/") )):
-        raise Hold(f"unexpected executable or config root: {name}")
-    # No modification or execution of these files: inspect their identities only.
-    if not script.is_file() or script.is_symlink():
-        raise Hold(f"missing/linked daemon executable: {name}")
+    safe_path(script, home / ".local/share", regular=True)
+    safe_path(config, home / ".config", regular=True)
     raw_conf = safe_file(config, home)
     cfg = json.loads(raw_conf)
     if not isinstance(cfg, dict) or not all(isinstance(cfg.get(x), str) and cfg[x] for x in REQUIRED):
         raise Hold(f"invalid required config fields: {name}")
     if cfg["drive_root_folder_id"] not in (PRODUCTION, STAGING):
         raise Hold(f"unknown mailbox: {name}")
+    remote=cfg.get("remote")
+    if not isinstance(remote,str) or not re.fullmatch(r"[A-Za-z0-9_-]+:",remote):
+        raise Hold(f"missing/unrecognised rclone remote: {name}")
     state = Path(cfg["state_dir"]).expanduser()
-    if not state.is_absolute() or not str(state).startswith(str(home / ".local/state/")):
-        raise Hold(f"unexpected journal location: {name}")
+    safe_path(state, home / ".local/state")
+    if not state.is_dir():
+        raise Hold(f"missing journal location: {name}")
     return {"label":name,"plist":str(plist),"pid":None,"loaded":False,
             "script":str(script),"config":str(config),"state":str(state),
             "mailbox":cfg["drive_root_folder_id"],
             "requests":cfg["requests_folder_id"],"results":cfg["results_folder_id"],
-            "registration_sha256":digest(raw),"config_sha256":digest(raw_conf)}
+            "registration_sha256":digest(raw),"config_sha256":digest(raw_conf),
+            "script_sha256":digest(script.read_bytes()), "remote":remote}
 
 def ps_table(raw: str) -> dict[int, tuple[int,int,str]]:
     out = {}
@@ -108,9 +129,11 @@ def approval_summary(state: Path, now: float) -> dict:
     root = state / "approvals"
     pending = root / "pending"
     data = {"total":0,"expired":0,"unexpired":0,"unverifiable":0}
+    if pending.is_symlink() or root.is_symlink():
+        raise Hold(f"linked approval directory: {state.name}")
     if not pending.exists():
         return data
-    if pending.is_symlink() or not pending.is_dir():
+    if not pending.is_dir():
         raise Hold(f"linked/broken approval directory: {state.name}")
     paths = list(pending.iterdir())
     if len(paths) > 4096:
@@ -124,9 +147,13 @@ def approval_summary(state: Path, now: float) -> dict:
             if path.stat().st_size > 65536:
                 raise ValueError("oversized")
             record = json.loads(path.read_text())
-            if record.get("kind") != "operator_approval_request" or record.get("request_id") != path.stem:
+            if (record.get("kind") != "operator_approval_request" or
+                    record.get("request_id") != path.stem or
+                    record.get("protocol") != 1):
                 raise ValueError("invalid request")
             deadline = float(record["expires_at"])
+            if not math.isfinite(deadline) or deadline <= 0:
+                raise ValueError("invalid expiry")
             if deadline <= now:
                 data["expired"] += 1
             else:
@@ -138,25 +165,66 @@ def approval_summary(state: Path, now: float) -> dict:
 def journal_activity(state: Path) -> dict:
     out = {"scanned":0,"active_markers":0,"started_unfinished":0}
     root = state / "requests"
-    if not root.is_dir() or root.is_symlink():
+    safe_path(root, state)
+    if not root.is_dir():
         raise Hold(f"missing/linked journal: {state.name}")
     # Count evidence without opening arbitrary request content.
     for entry in root.iterdir():
         out["scanned"] += 1
         if out["scanned"] > 100000 or entry.is_symlink() or not entry.is_dir():
             raise Hold(f"unexpected journal entry/budget: {state.name}")
+        for marker in ("active.json", "started.json", "finished.json", "result.json"):
+            if (entry / marker).is_symlink():
+                raise Hold(f"linked journal receipt marker: {state.name}")
         if (entry / "active.json").exists():
             out["active_markers"] += 1
         if (entry / "started.json").exists() and not (entry / "finished.json").exists():
             out["started_unfinished"] += 1
     return out
 
+def remote_request_queue(remote: str, folder_id: str) -> list[str]:
+    """List by the immutable Drive requests-folder ID, never by folder name."""
+    if not re.fullmatch(r"[A-Za-z0-9_-]+:", remote):
+        raise Hold("unsafe rclone remote")
+    if not re.fullmatch(r"[A-Za-z0-9_-]{12,128}", folder_id):
+        raise Hold("unsafe pinned Drive folder ID")
+    raw = command(["rclone", "--drive-root-folder-id", folder_id, "--timeout", "20s",
+                   "lsf", remote, "--files-only", "--max-depth", "1"],max_seconds=30)
+    if len(raw.encode()) > 1024*1024:
+        raise Hold("remote listing exceeds bounded output")
+    names=raw.splitlines()
+    if len(names)>4096 or any(not name or "/" in name or "\x00" in name for name in names):
+        raise Hold("remote listing is incomplete or malformed")
+    # The bridge processes raw *.json request files; legacy *.disabled and
+    # historic *.txt artifacts do not execute. Preserve them untouched.
+    return sorted(name for name in names if name.endswith(".json"))
+
+
+def verify_operator_context() -> None:
+    """Prohibit bridge-child service management, even if run on macOS."""
+    processes = ps_table(command(["/bin/ps", "-axo", "pid=,ppid=,pgid=,command="]))
+    ancestor=os.getpid()
+    for _ in range(32):
+        if ancestor == 1:
+            return
+        if ancestor not in processes:
+            raise Hold("cannot verify operator process ancestry")
+        parent,_,cmdline=processes[ancestor]
+        if BRIDGE_ARG.search(cmdline):
+            raise Hold("refuse bridge-child service management")
+        if parent <= 0 or parent == ancestor:
+            raise Hold("invalid operator process ancestry")
+        ancestor=parent
+    raise Hold("operator ancestry exceeds limit")
+
+
 def inventory(home: Path, *, now: float | None = None, launch: str | None = None,
-              ps: str | None = None) -> dict:
+              ps: str | None = None, remote_listings: dict | None = None) -> dict:
     now = time.time() if now is None else now
     launch = command(["/bin/launchctl","list"]) if launch is None else launch
     ps = command(["/bin/ps","-axo","pid=,ppid=,pgid=,command="]) if ps is None else ps
     agents = home / "Library/LaunchAgents"
+    safe_path(agents, home)
     all_plists = sorted(p for p in agents.glob("*.plist") if LABEL.fullmatch(p.stem))
     if not all_plists or len(all_plists) > 64:
         raise Hold("no/too many bridge LaunchAgent plists")
@@ -192,16 +260,25 @@ def inventory(home: Path, *, now: float | None = None, launch: str | None = None
     if services[KEEP]["mailbox"] != PRODUCTION:
         raise Hold("v5 service does not own expected production mailbox")
     states = {}
+    queues = {}
     for s in services.values():
         st = s["state"]
         if st not in states:
             states[st] = {"approvals":approval_summary(Path(st),now),
                           "activity":journal_activity(Path(st))}
+        ident=(s["remote"],s["requests"])
+        if ident not in queues:
+            if remote_listings is None:
+                queues[ident]=remote_request_queue(*ident)
+            else:
+                if ident not in remote_listings:
+                    raise Hold("missing independent remote queue snapshot")
+                queues[ident]=remote_listings[ident]
     targets = sorted(x for x in services if x != KEEP)
     reasons = []
     if not targets:
         reasons.append("no targets to contain")
-    for label in targets:
+    for label in sorted(services):
         s=services[label]
         if s.get("children"):
             reasons.append(f"live child process(es) of {label}")
@@ -210,17 +287,28 @@ def inventory(home: Path, *, now: float | None = None, launch: str | None = None
             reasons.append(f"actionable or unverifiable approvals in {state_path}")
         if state["activity"]["active_markers"] or state["activity"]["started_unfinished"]:
             reasons.append(f"active/incomplete journal state in {state_path}")
-    # The report is the proof to use for a separate operator-authorised apply.
-    evidence = {"services":services,"states":states,"targets":targets}
+    for (remote,folder_id),entries in queues.items():
+        if entries:
+            reasons.append(f"executable remote requests queued in {folder_id}")
+    # Include both mailbox observations and their pinned identities in the
+    # operator's fingerprint. Never trust a stale, unrelated Drive listing.
+    queue_evidence=[{"remote":a,"folder_id":b,"pending":queues[(a,b)]}
+                    for a,b in sorted(queues)]
+    evidence = {"services":services,"states":states,"targets":targets,
+                "remote_queues":queue_evidence,
+                "time_window":int(now // FINGERPRINT_SECONDS)}
     token = digest(json.dumps(evidence,sort_keys=True,separators=(",",":")).encode())
-    return {"schema":1,"mode":"read_only","keeper":KEEP,"targets":targets,
-            "services":services,"states":states,"holds":sorted(set(reasons)),
+    return {"schema":2,"mode":"read_only","keeper":KEEP,"targets":targets,
+            "services":services,"states":states,"remote_queues":queue_evidence,
+            "holds":sorted(set(reasons)),
             "containment_ready":not reasons,"fingerprint":token}
 
 def containment(report: dict, home: Path, expected: str) -> None:
     if not report["containment_ready"] or report["fingerprint"] != expected:
         raise Hold("read-only preflight failed or fingerprint changed")
+    verify_operator_context()
     archive = home / "Library/Application Support/llm-git-bridge/retired-launchagents"
+    safe_path(archive, home)
     run_id = dt.datetime.now(dt.timezone.utc).strftime("%Y%m%dT%H%M%SZ")
     dest = archive / run_id
     if dest.exists():
@@ -229,7 +317,12 @@ def containment(report: dict, home: Path, expected: str) -> None:
     fresh = inventory(home)
     if fresh["fingerprint"] != expected or not fresh["containment_ready"]:
         raise Hold("environment changed after operator review")
+    if archive.exists():
+        safe_path(archive, home)
+        if archive.stat().st_uid != os.getuid() or archive.stat().st_mode & 0o077:
+            raise Hold("unsafe archive permissions")
     dest.mkdir(parents=True,mode=0o700)
+    safe_path(dest, home)
     report_path = dest / "containment.jsonl"
     def log(event:dict) -> None:
         with report_path.open("a",encoding="utf-8") as f:
@@ -241,8 +334,20 @@ def containment(report: dict, home: Path, expected: str) -> None:
         s=fresh["services"][label]
         source = Path(s["plist"])
         target = dest / source.name
-        if source.is_symlink() or digest(source.read_bytes())!=s["registration_sha256"]:
-            raise Hold("registration changed during containment")
+        safe_path(source, home, regular=True)
+        if (digest(source.read_bytes())!=s["registration_sha256"] or
+                digest(Path(s["config"]).read_bytes()) != s["config_sha256"] or
+                digest(Path(s["script"]).read_bytes()) != s["script_sha256"]):
+            raise Hold("registration, config or executable changed during containment")
+        if target.exists() or target.is_symlink():
+            raise Hold("existing archive target must not be overwritten")
+        # Recheck live work before each irreversible service operation. The
+        # original snapshot must still describe the installation identity;
+        # previous targets have already been removed, so cannot reuse its hash.
+        latest = inventory(home)
+        if (not latest["containment_ready"] or label not in latest["targets"] or
+                latest["services"][label]["registration_sha256"] != s["registration_sha256"]):
+            raise Hold("live preflight changed before service modification")
         log({"event":"start","label":label,"pid":s["pid"]})
         unit=f"gui/{os.getuid()}/{label}"
         command(["/bin/launchctl","disable",unit])
@@ -262,7 +367,7 @@ def containment(report: dict, home: Path, expected: str) -> None:
             current_pids = ps_table(command(["/bin/ps","-axo","pid=,ppid=,pgid=,command="]))
             if s["pid"] in current_pids:
                 raise Hold("daemon PID still alive after bootout; manual hold")
-        os.replace(source,target)
+        os.rename(source,target)
         if source.exists() or digest(target.read_bytes())!=s["registration_sha256"]:
             raise Hold("archive verification failed; manual hold")
         log({"event":"archived","label":label,"sha256":s["registration_sha256"]})
