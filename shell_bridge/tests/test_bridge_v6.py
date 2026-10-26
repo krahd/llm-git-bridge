@@ -211,6 +211,8 @@ class BridgeV6SecurityTests(unittest.TestCase):
         # Automatically showing a possibly obscured window is not an inspection.
         presentation = source.split("private func reviewRequest(", 1)[1].split("private func closeReview", 1)[0]
         self.assertNotIn("reviewed[req.request_id] =", presentation)
+        self.assertLess(presentation.index("alert.layout()"), presentation.index("alert.window.makeKeyAndOrderFront(nil)", presentation.index("alert.accessoryView = scroll")))
+        self.assertLess(presentation.index("alert.layout()"), presentation.index("button.keyEquivalent"))
         inspection = source.split("@objc private func review(", 1)[1].split("private func reviewRequest", 1)[0]
         self.assertIn("reviewed[req.request_id] = req.payload_sha256", inspection)
         self.assertIn("alert.window.makeKeyAndOrderFront(nil)", source)

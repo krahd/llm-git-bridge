@@ -170,6 +170,9 @@ final class ApprovalController: NSObject, NSApplicationDelegate {
         alert.addButton(withTitle: "Reject")
         alert.addButton(withTitle: "Review later")
         alert.addButton(withTitle: "Allow once")
+        // runModal used to perform this layout implicitly. Nonmodal windows need it
+        // before presentation so the entire command accessory is actually visible.
+        alert.layout()
         let actions = [#selector(rejectReview(_:)), #selector(deferReview(_:)), #selector(allowReview(_:))]
         for (button, action) in zip(alert.buttons, actions) {
             button.target = self
@@ -265,6 +268,7 @@ final class ApprovalController: NSObject, NSApplicationDelegate {
         alert.alertStyle = .informational
         alert.addButton(withTitle: "OK")
         NSApp.activate(ignoringOtherApps: true)
+        alert.layout()
         alert.buttons[0].target = self
         alert.buttons[0].action = #selector(closeAbout(_:))
         alert.buttons[0].keyEquivalent = ""
