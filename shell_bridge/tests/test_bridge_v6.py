@@ -213,6 +213,8 @@ class BridgeV6SecurityTests(unittest.TestCase):
         self.assertNotIn("reviewed[req.request_id] =", presentation)
         self.assertLess(presentation.index("alert.layout()"), presentation.index("alert.window.makeKeyAndOrderFront(nil)", presentation.index("alert.accessoryView = scroll")))
         self.assertLess(presentation.index("alert.layout()"), presentation.index("button.keyEquivalent"))
+        self.assertIn("alert.window.initialFirstResponder = contents", presentation)
+        self.assertIn("alert.window.makeFirstResponder(contents)", presentation)
         inspection = source.split("@objc private func review(", 1)[1].split("private func reviewRequest", 1)[0]
         self.assertIn("reviewed[req.request_id] = req.payload_sha256", inspection)
         self.assertIn("alert.window.makeKeyAndOrderFront(nil)", source)

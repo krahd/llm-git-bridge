@@ -183,7 +183,9 @@ final class ApprovalController: NSObject, NSApplicationDelegate {
         activeRequest = req
         NSApp.activate(ignoringOtherApps: true)
         alert.window.center()
+        alert.window.initialFirstResponder = contents
         alert.window.makeKeyAndOrderFront(nil)
+        alert.window.makeFirstResponder(contents)
         refresh()
     }
 
