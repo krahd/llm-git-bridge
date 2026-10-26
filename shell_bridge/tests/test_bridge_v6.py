@@ -208,6 +208,11 @@ class BridgeV6SecurityTests(unittest.TestCase):
         self.assertNotIn("runModal()", source)
         self.assertIn('button.keyEquivalent = ""', source)
         self.assertIn("activeReview = alert", source)
+        # Automatically showing a possibly obscured window is not an inspection.
+        presentation = source.split("private func reviewRequest(", 1)[1].split("private func closeReview", 1)[0]
+        self.assertNotIn("reviewed[req.request_id] =", presentation)
+        inspection = source.split("@objc private func review(", 1)[1].split("private func reviewRequest", 1)[0]
+        self.assertIn("reviewed[req.request_id] = req.payload_sha256", inspection)
         self.assertIn("alert.window.makeKeyAndOrderFront(nil)", source)
         self.assertIn("menu.autoenablesItems = false", source)
         self.assertIn("submenu.autoenablesItems = false", source)

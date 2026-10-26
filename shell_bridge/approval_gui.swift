@@ -112,6 +112,12 @@ final class ApprovalController: NSObject, NSApplicationDelegate {
         }
         foregrounded[req.request_id] = req.payload_sha256
         reviewRequest(requestID: req.request_id, payloadHash: req.payload_sha256)
+        // Only an explicit inspection enables approval from the summary menu.
+        if activeRequest?.request_id == req.request_id,
+           activeRequest?.payload_sha256 == req.payload_sha256 {
+            reviewed[req.request_id] = req.payload_sha256
+            refresh()
+        }
     }
 
     private func reviewRequest(requestID: String, payloadHash: String) {
@@ -172,7 +178,6 @@ final class ApprovalController: NSObject, NSApplicationDelegate {
         }
         activeReview = alert
         activeRequest = req
-        reviewed[req.request_id] = req.payload_sha256
         NSApp.activate(ignoringOtherApps: true)
         alert.window.center()
         alert.window.makeKeyAndOrderFront(nil)
@@ -197,6 +202,7 @@ final class ApprovalController: NSObject, NSApplicationDelegate {
 
     @objc private func allowReview(_ sender: NSButton) {
         guard let req = activeRequest else { return }
+        reviewed[req.request_id] = req.payload_sha256
         decideRequest(req, "allow")
     }
 
@@ -255,7 +261,7 @@ final class ApprovalController: NSObject, NSApplicationDelegate {
         }
         let alert = NSAlert()
         alert.messageText = "Local Executor Bridge"
-        alert.informativeText = "New approvals open a review window. Inspect exact command brings it forward. After opening the exact command, Allow once and Reject are available in the menu. No identity authentication."
+        alert.informativeText = "New approvals open a review window. Inspect exact command brings it forward. Choose Inspect exact command to enable Allow once in the menu. Reject is always available. No identity authentication."
         alert.alertStyle = .informational
         alert.addButton(withTitle: "OK")
         NSApp.activate(ignoringOtherApps: true)
