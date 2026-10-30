@@ -33,7 +33,7 @@ This Mac's in-place v5-to-v6 migration intentionally preserves the verified live
 
 The daemon executes accepted commands with `/bin/zsh -lc` as Tomas and returns exact shell results, but v6 now applies an execution-authority gate before the child shell starts. With the default `write_scope=auto`, commands outside Git are filesystem-and-network read-only; raw commands inside an existing repository/worktree are filesystem-write-scoped to that repository/Git metadata and have network access denied; the trusted workspace coordinator receives its governed repository/state scope and may use network/credentials only for its own fetch/checkpoint/push/integration lifecycle. Broader `system` writes and recognised high-impact external/control-plane mutations require explicit local operator confirmation before `STARTED`. An approved `system` request intentionally restores the logged-in user's ordinary authority, so v6 remains a shell transport rather than a Git abstraction or VM boundary.
 
-`health.json` is the first diagnostic surface when the request path appears unhealthy. It reports bridge version, pinned Drive IDs, active requests, process ceiling, and STARTED-without-FINISHED state without requiring a shell request.
+`health.json` is the first diagnostic surface when the request path appears unhealthy. Verify `bridge_version`, `build_code_integrity=matches_manifest`, `build_source_commit`, pinned Drive IDs, active requests, process ceiling, and STARTED-without-FINISHED state. A stale heartbeat by itself is advisory, not proof the daemon failed. Distinguish the installed build from the GitHub default branch.
 
 ## Repository locations
 
@@ -70,7 +70,7 @@ Recognised high-impact operations—such as GitHub repository/content control-pl
 
 ## Confirmation policy
 
-For v5, use write_scope auto for normal repository work and reserve system scope for actions that genuinely leave repository recovery boundaries. Ordinary repository edits, commits, tests, builds, worktrees, and non-force pushes should not be escalated merely because they use a shell or network.
+For v6, use `write_scope: "auto"` for ordinary work. The local daemon resolves least authority. Raw repository shell execution has **no network**, so use the trusted bundled `workspace.py` for governed Git fetch/checkpoint/push/integration, not a raw shell network bypass. `system` always requires explicit local operator approval; do not request it merely because a repository operation involves network access. The approval queue shows the intended effect first and exposes the exact command for inspection; an operator's explicit click is required. Declined or expired approvals are terminal rejections before STARTED. Never submit duplicate IDs or bypass the local approval queue.
 
 ## Result and crash semantics
 
@@ -116,7 +116,7 @@ The goal is to minimise total orchestration latency and duplicate side effects: 
 
 ## Durable workspace coordinator
 
-Installed coordinator: `/Users/tom/.local/share/local-executor-bridge/workspace.py`.
+Installed coordinator: `/Users/tom/.local/share/local-executor-bridge/workspace.py`. The historical `/Users/tom/.local/share/chatgpt-shell-bridge/workspace.py` is a compatibility symlink, not a second trusted implementation. Check its resolved target if using an older client.
 
 Use it for substantial editing, for work likely to span context windows, and whenever multiple conversations may operate on the same repository. It provides a durable job branch + Git worktree + job metadata, periodic pushed checkpoints, conflict/reconciliation detection, and a short canonical integration gate.
 
@@ -184,6 +184,10 @@ For ambiguous push/mutation outcomes, inspect actual remote/filesystem state bef
 9. Garbage-collect only jobs whose integration is verified and whose worktree is safe to remove.
 
 For tiny, inherently atomic repository changes, ordinary Git on an appropriately isolated clean branch remains acceptable; raw bridge concurrency itself is never evidence that concurrent mutations are safe.
+
+## Production operation safety
+
+Exactly one `net.laurenzo.local-executor-bridge` LaunchAgent must own the mailbox. Never run v5/protocol-v2 alongside it, delete mailbox lock files to force a restart, or replay an indeterminate mutation. Installation, upgrade, consolidation and recovery must follow `shell_bridge/V6_PRODUCTION_OPERATIONS.md` from an interactive Mac Terminal: **never launch bridge maintenance through its own mailbox**. Preserve journals, pending approvals, indeterminate receipts, and local worktrees. A verified v6 heartbeat does not establish that the whole acceptance suite has run.
 
 ## Drive hygiene
 
