@@ -6,7 +6,7 @@ This repository is publicly readable, but has **no explicit licence yet** ([issu
 
 ## Changes and trust boundaries
 
-Read [AGENTS.md](AGENTS.md), [v6 architecture](docs/local-executor-bridge-v6.md), [security](docs/security.md), and the [canonical production operations](shell_bridge/V6_PRODUCTION_OPERATIONS.md) before making bridge changes.
+Read [AGENTS.md](AGENTS.md), [v6 architecture](docs/local-executor-bridge-v6.md), [v6 security architecture](docs/local-executor-bridge-v6.md), and the [canonical production operations](shell_bridge/V6_PRODUCTION_OPERATIONS.md) before making bridge changes.
 
 Keep these invariants:
 
