@@ -8,7 +8,7 @@ import unittest
 
 
 ROOT = Path(__file__).resolve().parents[1]
-INSTALLER = ROOT / "install.sh"
+INSTALLER = ROOT / "scripts" / "install-protocol-v2.sh"
 WRAPPER = ROOT / "bin" / "llm-git-bridge"
 
 
