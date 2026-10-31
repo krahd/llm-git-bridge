@@ -4,7 +4,7 @@
 
 # Installation and setup
 
-This guide sets up `llm-git-bridge` with the current Google Drive / `rclone` transport. The recommended path is deliberately interactive and re-runnable so that installation and later configuration use the same workflow.
+This archived guide documents the old protocol-v2 Git bridge using the Google Drive / `rclone` transport. It is retained only for compatibility maintenance and tests. Local Executor Bridge v6 is the supported installation.
 
 ## 1. Prerequisites
 
@@ -22,11 +22,12 @@ The reference production host currently uses Python 3.14, Apple Git 2.50, and rc
 
 ## 2. Recommended: run the installer
 
-Download the bootstrap script from the canonical repository and run it:
+For **explicit legacy compatibility testing only**, run the archived v2 script from a checkout. Do not run it on a Mac that already has v6 installed:
 
 ```bash
-curl -fsSLO https://raw.githubusercontent.com/krahd/llm-git-bridge/main/install.sh
-sh install.sh
+git clone https://github.com/krahd/llm-git-bridge.git
+cd llm-git-bridge
+sh scripts/install-protocol-v2.sh
 ```
 
 The installer:
