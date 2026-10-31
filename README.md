@@ -67,7 +67,7 @@ The supplied [agent skill](skills/mac-git-bridge/SKILL.md) includes a portable o
 
 `auto` resolves the minimum permitted authority locally, regardless of what the remote client requests. High-impact commands have an additional approval gate. Agents may create GitHub repositories only explicitly **private**; requests to create a public repository or change visibility to public are non-waivable rejections.
 
-Never expose secrets in requests, disable safety checks to work around a failed command, share a mailbox with untrusted actors, or run two daemons against one mailbox. See [security guidance](docs/security.md) and [operations](shell_bridge/V6_PRODUCTION_OPERATIONS.md).
+Never expose secrets in requests, disable safety checks to work around a failed command, share a mailbox with untrusted actors, or run two daemons against one mailbox. See [v6 security architecture](docs/local-executor-bridge-v6.md), [client safety and failure guidance](docs/v6-client-guide.md), and [operations](shell_bridge/V6_PRODUCTION_OPERATIONS.md).
 
 ## Develop and verify
 
