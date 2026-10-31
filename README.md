@@ -78,4 +78,4 @@ python3 -m unittest discover -s shell_bridge/tests
 
 These tests are necessary but do **not** replace first-install and approval acceptance on a real macOS host. The installed daemon can lag GitHub source; check `health.json` for `bridge_version`, `build_source_commit` and `build_code_integrity` rather than assuming deployment.
 
-Contributions: [CONTRIBUTING.md](CONTRIBUTING.md). Legacy protocol-v2 installation (historical only): [archive](docs/legacy-protocol-v2-installation.md).
+Measured [read-only v6 client smoke evidence](docs/v6-client-smoke-2026-10-30.md) is available; it is not a substitute for full release qualification.\n\nContributions: [CONTRIBUTING.md](CONTRIBUTING.md). Legacy protocol-v2 installation (historical only): [archive](docs/legacy-protocol-v2-installation.md).
