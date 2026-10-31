@@ -1,200 +1,96 @@
 ---
 name: mac-git-bridge
-description: Use Tomas Laurenzo's installed Local Executor Bridge v6 as the single shell and Git bridge to repositories on his Mac through Google Drive. Trigger whenever a conversation needs to inspect, edit, test, commit, branch, merge, rebase, fetch, pull, push, or otherwise operate on local repositories under the configured root, especially when direct filesystem/Git access is unavailable. GitHub is canonical shared state, the Mac checkout is authoritative local execution state, and Drive is transport only. Use the bundled durable workspace coordinator for substantial work and complete repository mutations only after intended commits are pushed and the canonical remote is independently verified, unless the user explicitly requests local-only work.
+description: Use an operator-installed Local Executor Bridge v6 to inspect, test and modify Git repositories on a Mac through its Google Drive request/result mailbox. Use for local Git work requiring local working-tree state, sandboxed command execution, or durable coordinator workspaces when direct Mac filesystem access is unavailable. Verify the installed v6 build, allowed root and mailbox before submitting requests; never replay ambiguous mutations. For substantial Git changes, checkpoint in a workspace and verify intended pushed refs against the canonical remote.
 ---
 
-# Local Executor Bridge v6
+# Mac Git Bridge (Local Executor Bridge v6 client)
 
-Use the installed Local Executor Bridge v6 as the normal path from a web conversation to Tomas's Mac. It is the single production daemon for both shell and Git capability. Do not fall back to the old semantic LLM-Git-Bridge protocol unless explicitly requested for compatibility work.
+This is a **distributable client template**, not a preconfigured access grant. It requires the operator's own private deployment details: allowed repository root, pinned Drive mailbox folder IDs, and a functioning authenticated raw-file upload/download client. Do not use example paths, stale conversation memory or another person's IDs as live settings.
 
-## Authority hierarchy
+## Authority and operating rules
 
-**Repository visibility is a non-waivable boundary.** Never create a public repository or make an existing repository public. Any agent-created repository must be explicitly private. A request to publish repository visibility must stop before that action and leave it to the human operator; the bridge must reject such agent commands rather than treating them as approvable high-impact operations.
+1. The GitHub remote is canonical shared repository state.
+2. The Mac checkout/worktrees determine current local execution state (including uncommitted work).
+3. Google Drive is request/result transport only, never repository authority.
+4. One Local Executor Bridge v6 daemon must own each live mailbox. Never start a legacy protocol-v2 watcher beside v6.
+5. Do not reset, clean, discard, overwrite, force-push or auto-replay ambiguous commands.
+6. Repository-changing work completes only after validation, commit/checkpoint, intended push and independently verified remote ref, unless explicitly local-only.
 
-Keep these roles distinct:
+## Identify the live deployment first
 
-1. **GitHub remote is canonical repository state.** Published branches/commits on the intended GitHub repository are the canonical shared project record.
-2. **The Mac checkout is authoritative for current local execution state.** Its working tree, index, local branches, uncommitted changes, worktrees, and command results determine what can safely happen next.
-3. **Google Drive is transport only.** The shell-bridge mailbox carries commands/results; it is not a repository or source of truth.
+Obtain the operator's **configured mailbox** and allowed root from the actual installation, not a public sample. The mailbox has `requests/`, `results/` and root `health.json`. Resolve and retain exact Drive folder IDs rather than relying on folder-name searches. Verify these current health fields:
 
-Never treat conversation memory, Drive artefacts, or a local `HEAD` alone as canonical repository state. Preserve unpublished local work even when GitHub is canonical: do not reset, clean, overwrite, or force-update merely to match the remote.
+- `bridge_version` must be `6`;
+- `build_code_integrity` must be `matches_manifest`;
+- `build_source_commit` identifies the **installed** build, which may be older than the GitHub main branch;
+- pinned root, requests and results folder IDs must correspond to the selected mailbox;
+- `active_requests` and STARTED-without-FINISHED counts inform pending/recovery work.
 
-For repository-changing work the default completion gate is: intended change committed -> pushed to the intended remote/branch -> remote ref independently verified. Skip commit/push only for explicitly local-only work or read-only tasks.
+A stale heartbeat is advisory, not proof of a dead daemon. Check the exact result and local process/journal state before any restart. The source of truth for installation/upgrade is [V6_PRODUCTION_OPERATIONS.md](../../shell_bridge/V6_PRODUCTION_OPERATIONS.md).
 
-## Canonical v6 transport
+## Submit one bounded raw request
 
-This Mac's in-place v5-to-v6 migration intentionally preserves the verified live mailbox. Pin its identity by Drive IDs, not folder-name resolution:
+Use a unique lower-case ASCII `id` containing only letters, digits, dots, underscores or hyphens (at most 128 characters). Never reuse an ID for a new request.
 
-- Root ID: `1PRsQHgVsgXhIYT_8akGFRGdhdlw9Lmk6`
-- Requests ID: `1jvTV0g4JVypFJ5olOovIPtCRIlawl4MP`
-- Results ID: `1SMdHzWEj2w2zRcOsCBc6fGT44ltco1fL`
-- Human path: `/Google Drive/llm-git-bridge/ChatGPT Shell Bridge`
-- Health: `health.json` at the live root.
-
-The daemon executes accepted commands with `/bin/zsh -lc` as Tomas and returns exact shell results, but v6 now applies an execution-authority gate before the child shell starts. With the default `write_scope=auto`, commands outside Git are filesystem-and-network read-only; raw commands inside an existing repository/worktree are filesystem-write-scoped to that repository/Git metadata and have network access denied; the trusted workspace coordinator receives its governed repository/state scope and may use network/credentials only for its own fetch/checkpoint/push/integration lifecycle. Broader `system` writes and recognised high-impact external/control-plane mutations require explicit local operator confirmation before `STARTED`. An approved `system` request intentionally restores the logged-in user's ordinary authority, so v6 remains a shell transport rather than a Git abstraction or VM boundary.
-
-`health.json` is the first diagnostic surface when the request path appears unhealthy. Verify `bridge_version`, `build_code_integrity=matches_manifest`, `build_source_commit`, pinned Drive IDs, active requests, process ceiling, and STARTED-without-FINISHED state. A stale heartbeat by itself is advisory, not proof the daemon failed. Distinguish the installed build from the GitHub default branch.
-
-## Repository locations
-
-The repository universe is rooted at `/Users/tom/tom-repos`; `/Users/tom/tom-repos/projects` is nested inside it. Repositories exist at both levels. Discover uncertain paths with bounded reads, never a recursive scan of the whole home directory.
-
-## Request protocol
-
-Create a raw JSON file named `<id>.json` in the requests folder. IDs must be unique lowercase ASCII, start with a letter or digit, use only letters/digits/`.`/`_`/`-`, and be at most 128 characters. Never reuse an ID.
+Create **raw UTF-8 JSON**, named `<id>.json`, in the installed mailbox `requests/` folder. Replace the example `cwd` with an existing directory under the operator-configured allowed root.
 
 ```json
 {
   "protocol": 1,
-  "id": "interaction-commons-status-001",
-  "cwd": "/Users/tom/tom-repos/projects/interaction-commons",
+  "id": "repo-status-2026-001",
+  "cwd": "/Users/you/repos/example",
   "command": "git status --short --branch",
-  "explanation": "Check the repository status before making changes.",
-  "write_scope": "auto",
-  "timeout_seconds": 30
+  "explanation": "Read the current Git branch and working-tree status without changing files.",
+  "timeout_seconds": 30,
+  "write_scope": "read_only"
 }
 ```
 
-Optional exact binary stdin may be supplied as `stdin_b64`. `explanation` is required on every request and must be a concise, human-readable statement of intent. Requests with a missing, blank, non-string, or oversized explanation are rejected before execution. The explanation is shown prominently in any local approval dialogue so the operator should not need to reverse-engineer shell syntax to understand the request. Upload requests as raw JSON files, not Google Docs, then read the matching raw JSON result.
+Every v6 request requires a concise, bounded, truthful `explanation` of intended effect, including read-only diagnostics. It is displayed in local approval. Optional `stdin_b64` carries exact binary stdin; do not include secrets in commands, explanations or stdin since request/journal bytes may persist.
 
-### Execution authority and local confirmation
+**Client capability gate:** Verify that an available tool can actually upload a raw file into the pinned Drive folder and read the matching raw result. Google Docs creation, a local temporary file, a search result, or connector metadata do not constitute a raw upload. Some Drive plugins require a tool-generated `file_uri` and do **not** accept local container paths. If the file handoff/upload fails, classify that as a client/transport blocker; **do not claim the command ran and do not fabricate a result**. A failed upload acknowledged as such may be followed by an alternative verified upload mechanism; do not blindly resubmit if delivery status was ambiguous.
 
-`write_scope` is optional and defaults to `auto`:
+Once submitted, retain the exact ID. Read the matching `results/<id>.json` rather than scanning/polling the entire folder. Check terminal `status`, `exit_code`, output and any timeout/output-limit flags. `completed` with nonzero `exit_code` is not success. If no exact result appears, read `health.json` once; pending is not failure.
 
-- `auto`: when `cwd` is inside an existing Git repository/worktree, permit filesystem writes only within that repository/worktree and its Git metadata while denying raw-shell network access; otherwise deny filesystem writes and network access;
-- `read_only`: force the filesystem-and-network read-only sandbox;
-- `repository`: require an existing Git repository/worktree and confine filesystem writes to it;
-- `system`: request ordinary logged-in-user authority; this always requires the local operator to approve the exact request before `STARTED`.
+## v6 authority and confirmation
 
-Recognised high-impact operations—such as GitHub repository/content control-plane changes, mutating `gh api` or obvious mutating HTTP calls, direct remote-shell/copy commands, force/delete pushes, destructive local Git, and recursive forced deletion—also require the local confirmation dialogue even from repository scope. **Never relabel, wrap, or disguise a mutation to evade the gate.** If an unrecognised write fails under the read-only sandbox, re-evaluate the intended effect and, when genuinely required, submit a new uniquely identified request with the appropriate broader scope; never replay the failed mutation ambiguously.
+- `auto` (default): local daemon resolves least appropriate authority.
+- `read_only`: filesystem reads (subject to local policy), no persistent writes or network.
+- `repository`: writes constrained to one existing Git repository/worktree and its metadata; **raw shell has no network**. Do not use raw repository-scope shell to fetch/push, invoke `gh`, or make HTTP calls.
+- Installed trusted `workspace.py`: known coordinator subcommands are a separate capability with governed Git fetch/checkpoint/push/integration. Remote-provided workspace `exec` and integration validation are re-sandboxed without ambient credentials or network.
+- `system`: user-level authority after explicit, local, click-only approval; do not request it just to bypass restrictions.
 
-## Confirmation policy
+High-impact effects can require additional approval. The Mac menu-bar approval queue shows intended effects first and allows inspection of exact command details. Rejection or expiry is terminal before STARTED. Never disguise a mutation to avoid the gate. Agents may create repositories only explicitly private; publication/visibility change to public is not an approvable automated action.
 
-For v6, use `write_scope: "auto"` for ordinary work. The local daemon resolves least authority. Raw repository shell execution has **no network**, so use the trusted bundled `workspace.py` for governed Git fetch/checkpoint/push/integration, not a raw shell network bypass. `system` always requires explicit local operator approval; do not request it merely because a repository operation involves network access. The approval queue shows the intended effect first and exposes the exact command for inspection; an operator's explicit click is required. Declined or expired approvals are terminal rejections before STARTED. Never submit duplicate IDs or bypass the local approval queue.
+## Crash and delivery recovery
 
-## Result and crash semantics
+- `completed`: terminal result; still check exit code and intended effects.
+- `rejected`: not executed; inspect why before making a new request.
+- `indeterminate`: STARTED persisted, FINISHED unproven. **Never replay automatically**; inspect local Git, filesystem and remote effects first.
+- `timed_out` or `output_limited`: narrow the operation and reconcile effects before retrying.
 
-Treat results as authoritative local execution evidence, not canonical repository state.
+A ChatGPT delivery timeout differs from a shell command timeout. After ambiguous tool delivery, inspect the **exact request ID** and actual Git/remote state once before any new mutation. Do not busy-poll, create competing daemons or clear lock/journal files.
 
-- `completed`: process reached a terminal state; still inspect `exit_code`.
-- `rejected`: request never ran; fix it and use a new ID.
-- `indeterminate`: STARTED was durable but FINISHED cannot be proved. Never replay a mutation automatically. Inspect actual filesystem/Git/remote state first.
-- `timed_out` or `output_limited`: shrink the operation; do not repeat the same scope blindly.
+## Durable repository work
 
-v6 records active process-group identity. On timeout/restart it attempts descendant containment; a STARTED request without a proven FINISHED state is never silently re-executed.
-
-## Concurrency and execution limits
-
-v6 is **concurrent**, not single-worker. Each accepted request runs as its own supervised process group. The daemon admits multiple requests up to a bounded configured ceiling (`max_active_requests`; currently auto-resolved by health). Independent raw shell requests may overlap.
-
-Do not confuse transport concurrency with safe Git concurrency. Raw shell does not infer repository semantics. For long-lived or concurrent repository mutation, use the workspace coordinator described below.
-
-Design each request to stay comfortably within:
-
-- maximum command timeout: 300 s;
-- request: 2 MiB;
-- command text: 256 KiB;
-- decoded stdin: 1 MiB;
-- stdout/stderr: 16 MiB each.
-
-Use non-interactive commands and small resumable requests. The bridge is non-PTY. All rclone operations are bounded by a transport timeout.
-
-## Conversation delivery-timeout discipline
-
-A ChatGPT **“Message delivery timed out. Please try again.”** error is not, by itself, evidence that the Mac bridge failed. Avoid turning a UI/orchestration timeout into a bridge incident.
-
-- Keep each orchestration step bounded. Do not keep one assistant turn alive with long chains of Drive searches, repeated folder listings, or speculative follow-up canaries.
-- After uploading a request, record its exact request ID. Check the matching result directly by exact ID/name. Do not busy-poll the whole results folder in a tight loop.
-- If the expected result is not yet visible, inspect `health.json` once. If health is current and the request is active/pending, treat the bridge as healthy and the request as pending; do not resubmit it.
-- If a ChatGPT message-delivery timeout occurs, first inspect the authoritative result for every request already submitted in that turn. Never repeat a mutation merely because the assistant response timed out.
-- Distinguish layers explicitly: `timed_out: true` in a bridge result means the **Mac command** timed out; a ChatGPT “Message delivery timed out” error means the **conversation/tool-orchestration response** failed to deliver. Recover them differently.
-- Prefer one bounded request plus one verification request over multi-purpose shell chains. For long tests/builds, split work or use the durable workspace/checkpoint path rather than repeated connector polling.
-- Once the predefined completion/acceptance gates pass, stop. Do not add exploratory canaries, redundant health probes, or another full test cycle unless a specific gate failed or new evidence requires it.
-- After any ambiguous delivery failure, reconcile actual Git/Drive/runtime state first, persist the exact next action when needed, then execute only the missing step.
-
-The goal is to minimise total orchestration latency and duplicate side effects: **submit once, identify exactly, inspect reality, and avoid polling loops.**
-
-## Durable workspace coordinator
-
-Installed coordinator: `/Users/tom/.local/share/local-executor-bridge/workspace.py`. The historical `/Users/tom/.local/share/chatgpt-shell-bridge/workspace.py` is a compatibility symlink, not a second trusted implementation. Check its resolved target if using an older client.
-
-Use it for substantial editing, for work likely to span context windows, and whenever multiple conversations may operate on the same repository. It provides a durable job branch + Git worktree + job metadata, periodic pushed checkpoints, conflict/reconciliation detection, and a short canonical integration gate.
-
-Core invariants:
-
-- A conversation does **not** edit canonical `main` directly for substantial work.
-- Each job gets its own branch/worktree.
-- Different jobs in a large repository (for example different papers inside `research/`) may work concurrently.
-- Repository identity is not treated as a lock boundary. Logical `resource` keys and changed-path overlap detect relevant collisions.
-- Checkpoints are committed and pushed so work survives chat/context/worktree loss.
-- Canonical-branch integration is serialized briefly per repo+target branch.
-- Integration fetches the latest target, verifies ancestry/staleness, checks path/resource overlap, optionally requires explicit reconciliation, validates in a detached integration worktree, creates a canonical commit, pushes, and verifies remote state.
-- A failed validation or conflict leaves the job recoverable; it must not silently partially integrate.
-
-Useful commands:
+For substantial/concurrent changes, use the **installed** coordinator only:
 
 ```bash
-python3 /Users/tom/.local/share/local-executor-bridge/workspace.py create \
-  --repo /path/to/repo --resource papers/example --job-id <unique-id> --push-initial
-
-python3 /Users/tom/.local/share/local-executor-bridge/workspace.py exec \
-  --job <id> --command '<bounded command>' --checkpoint-message '<message>'
-
-python3 /Users/tom/.local/share/local-executor-bridge/workspace.py ready --job <id>
-
-python3 /Users/tom/.local/share/local-executor-bridge/workspace.py integrate \
-  --job <id> --validate '<repo-root validation command>' --timeout <seconds>
-
-python3 /Users/tom/.local/share/local-executor-bridge/workspace.py show --job <id>
-python3 /Users/tom/.local/share/local-executor-bridge/workspace.py list
-python3 /Users/tom/.local/share/local-executor-bridge/workspace.py recover --repo /path/to/repo
-python3 /Users/tom/.local/share/local-executor-bridge/workspace.py gc --repo /path/to/repo
+python3 ~/.local/share/local-executor-bridge/workspace.py create \
+  --repo /path/to/repo --resource docs/example --job-id unique-job-id --push-initial
+python3 ~/.local/share/local-executor-bridge/workspace.py exec \
+  --job unique-job-id --command 'bounded validation or edit' --checkpoint-message 'Checkpoint'
+python3 ~/.local/share/local-executor-bridge/workspace.py ready --job unique-job-id
+python3 ~/.local/share/local-executor-bridge/workspace.py integrate \
+  --job unique-job-id --validate 'repo-root-relative test command' --timeout 300
 ```
 
-Integration validation runs from the temporary repository root. Paths in `--validate` must therefore be repository-root-relative.
+The coordinator creates isolated branches/worktrees and pushed checkpoints. Integration checks latest target, ancestry, changed-path/resource overlap, validation, canonical push and independent remote ref. Inspect `workspace.py list/show` on resumption to avoid duplicating jobs. Do not edit canonical `main` directly for substantive work.
 
-### Conversation death / context exhaustion
+## Production and safety boundary
 
-Conversation lifetime and work lifetime are deliberately decoupled. Before a long/context-heavy step, checkpoint. If a conversation disappears, inspect `workspace.py list/show` and the job's pushed branch before creating new work. Resume the existing job when appropriate; do not assume missing chat context means missing work.
+Never run daemon installation, upgrade, cutover, consolidation, launchd maintenance, or migration **through its own mailbox**. Those operations must follow [canonical production operations](../../shell_bridge/V6_PRODUCTION_OPERATIONS.md) in an interactive operator Terminal. Preserve journals, pending approvals and old worktrees. Do not replace v6 with protocol-v2.
 
-If a recorded worktree is missing but the checkpoint branch is present remotely, the pushed branch remains the durable recovery source. Do not discard or overwrite it. Reconcile/recover deliberately.
+The bridge's sandbox is not a VM. Operator-approved `system` execution has the logged-in user's authority. Keep mailbox ACLs private and minimise permitted repository roots. Public source documentation is not proof that a particular daemon or client upload path has passed end-to-end acceptance.
 
-## Git operating rules
-
-Before mutation, establish branch, worktree state, remotes/upstream and relevant expected base. Identify the intended GitHub remote rather than assuming `origin` when multiple remotes exist.
-
-Synchronise from GitHub before new edits unless explicitly offline/local-only. Fetch first. Fast-forward a clean branch only when doing so cannot overwrite unpublished work. If there are uncommitted changes, local-only commits, detached HEAD, multiple worktrees or divergence, preserve them and reconcile deliberately.
-
-Never discard, reset, clean, stash, overwrite, or incorporate unrelated pre-existing work just to make a task easier. Use isolated worktrees/branches when appropriate.
-
-Before push, verify the target remote/branch. Do not force-push unless the task genuinely requires history rewriting and the target has been inspected. After push independently verify with `git ls-remote` or an equivalent fetched-ref comparison.
-
-For ambiguous push/mutation outcomes, inspect actual remote/filesystem state before another mutation.
-
-## Standard substantial-work workflow
-
-1. Resolve exact repo path and inspect current state.
-2. Fetch the intended GitHub remote and reconcile the safe base.
-3. For substantial/concurrent work, create or resume a workspace job with a narrow logical resource key.
-4. Work in bounded commands and checkpoint coherent progress; pushed checkpoints are the durability boundary.
-5. Before context-heavy work, explicitly checkpoint.
-6. Mark the finished checkpoint ready.
-7. Integrate through the workspace gate with appropriate validation.
-8. Independently verify the canonical remote ref and intended content.
-9. Garbage-collect only jobs whose integration is verified and whose worktree is safe to remove.
-
-For tiny, inherently atomic repository changes, ordinary Git on an appropriately isolated clean branch remains acceptable; raw bridge concurrency itself is never evidence that concurrent mutations are safe.
-
-## Production operation safety
-
-Exactly one `net.laurenzo.local-executor-bridge` LaunchAgent must own the mailbox. Never run v5/protocol-v2 alongside it, delete mailbox lock files to force a restart, or replay an indeterminate mutation. Installation, upgrade, consolidation and recovery must follow `shell_bridge/V6_PRODUCTION_OPERATIONS.md` from an interactive Mac Terminal: **never launch bridge maintenance through its own mailbox**. Preserve journals, pending approvals, indeterminate receipts, and local worktrees. A verified v6 heartbeat does not establish that the whole acceptance suite has run.
-
-## Drive hygiene
-
-Do not reuse request IDs. Consumed requests are normally removed; results are durable evidence and should not be deleted casually. The only folder named exactly `ChatGPT Shell Bridge` should be the live mailbox. Release packages and legacy mailbox evidence belong in clearly named archive/deprecated folders, never as competing live roots.
-
-## Trust boundary and residual OAuth warning
-
-The bridge daemon runs as Tomas's macOS user, and the initial `cwd` must be under `/Users/tom/tom-repos`. Default child-shell scopes are constrained by the macOS execution sandbox described above; raw repository scope denies network access, while the trusted workspace coordinator may use network/credentials only for its governed Git lifecycle. An explicitly approved `system` request deliberately runs with the logged-in user's normal authority. Treat the Drive mailbox as privileged and the confirmation gate as defence in depth, not as a VM boundary. Never put passwords, tokens, private keys or other secrets directly in request commands because command bytes and journal state may persist.
-
-The currently functioning `chatgpt-git-bridge:` rclone remote still reports rclone's 2026 retirement warning for the shared Google Drive OAuth client ID. This is an external credential/configuration risk, not a v6 concurrency defect. Surface it in diagnostics and migrate to a private OAuth client when credentials/authorisation are available; do not silently alter credentials.
+Project documentation: [README](../../README.md), [installation](../../docs/installation.md), and [v6 architecture](../../docs/local-executor-bridge-v6.md).
