@@ -13,7 +13,8 @@ def generate_info(path: Path, label: str, approval_root: Path):
     fragment = INSTALLER.split("<<'PYAPPPLIST'\n", 1)[1].split("\nPYAPPPLIST", 1)[0]
     proc = subprocess.run(
         [sys.executable, "-c", fragment, str(path), str(approval_root),
-         "/opt/bridge/approval_helper.py", sys.executable, label],
+         "/opt/bridge/approval_helper.py", sys.executable, label,
+         "6", "a" * 40, "2026-10-30T09:45:00-06:00"],
         text=True, capture_output=True, timeout=8,
     )
     if proc.returncode:
@@ -41,6 +42,11 @@ class UniqueApprovalBundleIdentityTests(unittest.TestCase):
                 "net.laurenzo.local-executor-approval."))
             self.assertTrue(production["CFBundleIdentifier"].startswith(
                 "net.laurenzo.local-executor-approval."))
+            self.assertEqual(staging["BridgeVersion"], "6")
+            self.assertEqual(staging["CFBundleShortVersionString"], "6.0")
+            self.assertEqual(staging["BridgeSourceCommit"], "a" * 40)
+            self.assertEqual(staging["BridgeSourceUpdatedAt"], "2026-10-30T15:45:00Z")
+            self.assertEqual(production["BridgeSourceUpdatedAt"], "2026-10-30T15:45:00Z")
             self.assertEqual(staging["ApprovalRoot"], str(base / "staging-approvals"))
             self.assertEqual(production["ApprovalRoot"], str(base / "production-approvals"))
             self.assertIn("v6-candidate", staging["ApprovalInstanceLabel"])
@@ -49,6 +55,14 @@ class UniqueApprovalBundleIdentityTests(unittest.TestCase):
                                 production["ApprovalInstanceLabel"])
             self.assertTrue(staging["LSUIElement"])
             self.assertTrue(production["LSUIElement"])
+
+    def test_build_metadata_has_validated_timestamp_and_commit(self):
+        with tempfile.TemporaryDirectory(dir=Path.cwd()) as temp:
+            root = Path(temp)
+            plist = generate_info(root / "about.plist", "v6-candidate-alpha", root / "approvals")
+            self.assertEqual(plist["BridgeVersion"], "6")
+            self.assertEqual(plist["BridgeSourceCommit"], "a" * 40)
+            self.assertTrue(plist["BridgeSourceUpdatedAt"].endswith("Z"))
 
     def test_rebuild_of_same_agent_retains_bundle_identity(self):
         with tempfile.TemporaryDirectory(dir=Path.cwd()) as temp:

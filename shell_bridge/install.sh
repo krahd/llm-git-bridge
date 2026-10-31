@@ -339,6 +339,8 @@ cp "$SCRIPT_DIR/bridge_mailbox_inspector.py" "$INSTALL_DIR/bridge_mailbox_inspec
 cp "$SCRIPT_DIR/ssh_pinned_helper.py" "$INSTALL_DIR/ssh_pinned_helper.py"
 chmod 700 "$INSTALL_DIR/bridge.py" "$INSTALL_DIR/workspace.py" "$INSTALL_DIR/approval_helper.py" "$INSTALL_DIR/trusted_operations.py" "$INSTALL_DIR/bridge_mailbox_inspector.py" "$INSTALL_DIR/ssh_pinned_helper.py"
 SOURCE_COMMIT="$(git -C "$SCRIPT_DIR/.." rev-parse HEAD)"
+SOURCE_UPDATED_AT="$(git -C "$SCRIPT_DIR/.." show -s --format=%cI HEAD)"
+BRIDGE_VERSION="$(tr -d '\r\n' < "$SCRIPT_DIR/VERSION")"
 python3 - "$INSTALL_DIR/install-manifest.json" "$SOURCE_COMMIT" "$INSTALL_DIR/bridge.py" "$INSTALL_DIR/workspace.py" "$INSTALL_DIR/approval_helper.py" "$INSTALL_DIR/trusted_operations.py" "$INSTALL_DIR/bridge_mailbox_inspector.py" "$INSTALL_DIR/ssh_pinned_helper.py" <<'PYMAN'
 import hashlib,json,sys
 manifest_path,source_commit,bridge_path,workspace_path,approval_helper_path,trusted_path,inspector_path,ssh_path=sys.argv[1:]
@@ -478,13 +480,22 @@ SWIFT_SDK="$DEVELOPER_DIR_VALUE/Platforms/MacOSX.platform/Developer/SDKs/MacOSX.
 mkdir -p "$APP_BUNDLE/Contents/MacOS" "$APP_BUNDLE/Contents/Resources"
 install -m 644 "$SCRIPT_DIR/assets/bridge-menubar.png" "$APP_BUNDLE/Contents/Resources/bridge-menubar.png"
 APPROVAL_ROOT="$STATE_DIR/approvals"
-python3 - "$APP_BUNDLE/Contents/Info.plist" "$APPROVAL_ROOT" "$INSTALL_DIR/approval_helper.py" "$PYTHON_BIN" "$LABEL" <<'PYAPPPLIST'
-import hashlib,plistlib,sys
-path,approval_root,helper_path,python_path,label=sys.argv[1:]
+python3 - "$APP_BUNDLE/Contents/Info.plist" "$APPROVAL_ROOT" "$INSTALL_DIR/approval_helper.py" "$PYTHON_BIN" "$LABEL" "$BRIDGE_VERSION" "$SOURCE_COMMIT" "$SOURCE_UPDATED_AT" <<'PYAPPPLIST'
+import datetime,hashlib,plistlib,re,sys
+path,approval_root,helper_path,python_path,label,version,source_commit,source_updated_at=sys.argv[1:]
+if not re.fullmatch(r'[0-9]+(?:\.[0-9]+)*',version) or not re.fullmatch(r'[0-9a-f]{40}',source_commit):
+    raise SystemExit('invalid bridge version or source build')
+try:
+    source_updated_at=datetime.datetime.fromisoformat(source_updated_at)
+    if source_updated_at.tzinfo is None:
+        raise ValueError('source date requires timezone')
+except ValueError as exc:
+    raise SystemExit('invalid source commit update date') from exc
+source_updated_at=source_updated_at.astimezone(datetime.timezone.utc).isoformat().replace('+00:00','Z')
 # Each installed LaunchAgent must have a distinct native approval app identity.
 # Otherwise Launch Services can activate an older staging app for production.
 bundle_id='net.laurenzo.local-executor-approval.'+hashlib.sha256(label.encode('utf-8')).hexdigest()[:16]
-obj={'CFBundleIdentifier':bundle_id,'CFBundleName':'Local Executor Approval','CFBundleDisplayName':'Local Executor Approval','CFBundlePackageType':'APPL','CFBundleExecutable':'local-executor-approval','CFBundleVersion':'1','CFBundleShortVersionString':'1.0','LSUIElement':True,'NSHighResolutionCapable':True,'ApprovalRoot':approval_root,'ApprovalHelperPath':helper_path,'ApprovalPythonPath':python_path,'ApprovalInstanceLabel':label}
+obj={'CFBundleIdentifier':bundle_id,'CFBundleName':'Local Executor Approval','CFBundleDisplayName':'Local Executor Approval','CFBundlePackageType':'APPL','CFBundleExecutable':'local-executor-approval','CFBundleVersion':version.split('.')[0],'CFBundleShortVersionString':version if '.' in version else version+'.0','BridgeVersion':version,'BridgeSourceCommit':source_commit,'BridgeSourceUpdatedAt':source_updated_at,'LSUIElement':True,'NSHighResolutionCapable':True,'ApprovalRoot':approval_root,'ApprovalHelperPath':helper_path,'ApprovalPythonPath':python_path,'ApprovalInstanceLabel':label}
 with open(path,'wb') as f: plistlib.dump(obj,f,fmt=plistlib.FMT_XML,sort_keys=True)
 PYAPPPLIST
 "$SWIFTC_BIN" -sdk "$SWIFT_SDK" "$SCRIPT_DIR/approval_gui.swift" -framework AppKit -framework Foundation -o "$APP_BUNDLE/Contents/MacOS/local-executor-approval"

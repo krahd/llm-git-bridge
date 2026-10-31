@@ -98,6 +98,10 @@ Then confirm: one daemon owns the mailbox; the `health.json` build manifest matc
 
 **The test suites do not replace these Mac acceptance checks.** Do not treat example output or a health heartbeat as proof that end-to-end client upload and readback work.
 
+## About dialog and installed version
+
+Choose **About Local Executor Bridge** in the installed Mac menu-bar approval queue to see the installed bridge version, source commit's update date (UTC), complete source revision, author credit for Tomas Laurenzo, and buttons opening https://laurenzo.net and `mailto:tomas@laurenzo.net`. The date is taken from the *installed release's source commit* (not the latest GitHub commit and not the current date). A newer source commit does not change the dialog until an operator installs an approved update through the procedure below. The installer records this information in the signed-off bundle metadata; CI checks the values and native Swift typecheck, while a GUI interaction still requires Mac acceptance.
+
 ## 7. Existing installation, upgrade or recovery
 
 Stop here if any prior v5/v6 service, LaunchAgent, journal or mailbox may exist. Do not run a new daemon against the same mailbox. Follow [V6_PRODUCTION_OPERATIONS.md](../shell_bridge/V6_PRODUCTION_OPERATIONS.md) for the interactive, inert-stage `v6_consolidate.py` process. It checks loaded labels, journal claims, locks, approvals, exact build and pinned mailbox identity before handover.
