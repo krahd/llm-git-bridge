@@ -4,7 +4,7 @@ A **local-first, operator-controlled bridge** for letting an LLM or agent perfor
 
 **Status:** Local Executor Bridge v6 is the supported production architecture in this repository. The older protocol-v2 Git bridge remains as compatibility and historical code, **not a second service to run**. The code is available for independent installations, but this repository does not claim a universally qualified, one-click release or completed third-party macOS acceptance testing.
 
-## What it does
+**Licensing:** This repository is publicly readable and cloneable, but no licence has yet been selected. Do not assume rights to redistribute or incorporate the code in another product. See [licence decision issue #82](https://github.com/krahd/llm-git-bridge/issues/82).\n\n## What it does
 
 - Runs read-only shell queries with filesystem and network restrictions.
 - Allows scoped writes within an existing Git repository/worktree while keeping raw shell network disabled.
