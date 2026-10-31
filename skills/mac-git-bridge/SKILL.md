@@ -50,6 +50,16 @@ Every v6 request requires a concise, bounded, truthful `explanation` of intended
 
 **Client capability gate:** Verify that an available tool can actually upload a raw file into the pinned Drive folder and read the matching raw result. Google Docs creation, a local temporary file, a search result, or connector metadata do not constitute a raw upload. Some Drive plugins require a tool-generated `file_uri` and do **not** accept local container paths. In the tested Google Drive connector, an exported/created file reference's `file_uri.file_id` string was accepted by `upload_file`, while passing the whole object was rejected by schema validation; inspect the actual tool schema before applying this adapter-specific rule. If the file handoff/upload fails, classify that as a client/transport blocker; **do not claim the command ran and do not fabricate a result**. A failed upload acknowledged as such may be followed by an alternative verified upload mechanism; do not blindly resubmit if delivery status was ambiguous.
 
+**Offline client acceptance:** Use the bundled, non-submitting `scripts/v6_client_check.py` to check the raw local JSON before upload and to verify the matching result against **the exact original request bytes** afterwards:
+
+```bash
+python3 scripts/v6_client_check.py request /path/to/<id>.json
+python3 scripts/v6_client_check.py result /path/to/results/<id>.json --request /path/to/requests/<id>.json
+python3 scripts/v6_client_check.py health /path/to/health.json
+```
+
+These are example local paths, not the Mac's configured path. Run this script from the installed skill directory or use its full path. The validator checks transport envelope identity, request hash, completion, exit code and incomplete-output flags. It **does not** submit, authorize, sandbox, or authenticate the sender of a request; nor does it prove remote Git mutations. Never transform or re-encode the saved request after uploading it: verification is against exact bytes. See [the complete v6 client guide](https://github.com/krahd/llm-git-bridge/blob/main/docs/v6-client-guide.md).
+
 Once submitted, retain the exact ID. Read the matching `results/<id>.json` rather than scanning/polling the entire folder. Check terminal `status`, `exit_code`, output and any timeout/output-limit flags. `completed` with nonzero `exit_code` is not success. If no exact result appears, read `health.json` once; pending is not failure.
 
 ## v6 authority and confirmation
