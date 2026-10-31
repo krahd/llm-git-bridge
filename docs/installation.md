@@ -67,7 +67,9 @@ Replace `cwd` with a real repository beneath the allowed root, and choose a uniq
 
 `health.json` in the mailbox root identifies the installed version and build, live folder IDs and active work. If an exact result is not immediately visible, check health once rather than constantly listing the results folder. A stale heartbeat alone does not prove daemon death. If delivery is ambiguous, **do not resubmit a mutation** until its journal and actual effects are reconciled.
 
-For the currently tested Google Drive connector, a tool-produced file reference is accepted by `upload_file` as the **string** `file_uri.file_id`, not the surrounding `file_uri` object; verify the actual interface contract of your connector. The [2026-10-30 read-only smoke report](v6-client-smoke-2026-10-30.md) records this adapter-specific mismatch and measured result.\n\nA reusable [Mac Git Bridge skill](../skills/mac-git-bridge/SKILL.md) is supplied as a **template**. Replace the per-installation mailbox IDs and paths with your own, preferably in a private configuration. Never publish another user's mailbox IDs, credentials or personal repository paths.
+For the currently tested Google Drive connector, a tool-produced file reference is accepted by `upload_file` as the **string** `file_uri.file_id`, not the surrounding `file_uri` object; verify the actual interface contract of your connector. The [2026-10-30 read-only smoke report](v6-client-smoke-2026-10-30.md) records this adapter-specific mismatch and measured result.
+
+A reusable [Mac Git Bridge skill](../skills/mac-git-bridge/SKILL.md) is supplied as a **template**. Replace the per-installation mailbox IDs and paths with your own, preferably in a private configuration. Never publish another user's mailbox IDs, credentials or personal repository paths.
 
 ## 5. Understand permission and approval behaviour
 
@@ -102,4 +104,4 @@ Stop here if any prior v5/v6 service, LaunchAgent, journal or mailbox may exist.
 
 Do **not** delete journals or lock files, restart blindly, run a second watcher as a smoke test, replay an `indeterminate` result, or attempt production upgrades through the mailbox. Historical protocol-v2 commands and installer are not the v6 upgrade path.
 
-For additional architecture and security details, see [Local Executor Bridge v6](local-executor-bridge-v6.md) and the [shell reference](../shell_bridge/README.md).
+For agent-side transport, verification and common failures, see the [v6 client guide](v6-client-guide.md). For additional architecture and security details, see [Local Executor Bridge v6](local-executor-bridge-v6.md) and the [shell reference](../shell_bridge/README.md).
