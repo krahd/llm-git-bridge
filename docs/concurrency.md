@@ -1,4 +1,6 @@
-# Concurrency and multiple clients
+# Legacy protocol-v2 concurrency and multiple clients
+
+**Historical reference:** These transactions, watcher and `max_workers` rules are not v6 production guidance. For current v6 request concurrency, sandbox and durable Git work, see [v6 architecture](local-executor-bridge-v6.md) and [v6 client workflow](v6-client-guide.md).
 
 `llm-git-bridge` `1.0.0rc7` retains the RC6 bounded-concurrency and watcher-owned automatic-discovery design: local execution may overlap across different canonical repositories while one watcher owns mailbox/registry side effects. Root-policy and setup changes do not alter same-repository serialisation. `max_workers` still defaults to `1` as a conservative migration policy; operators can explicitly enable the recommended initial setting of two workers after qualification on their host.
 
