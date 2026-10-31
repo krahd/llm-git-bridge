@@ -1,234 +1,105 @@
-# Installation and setup
+# Install Local Executor Bridge v6
 
-This guide sets up `llm-git-bridge` with the current Google Drive / `rclone` transport. The recommended path is deliberately interactive and re-runnable so that installation and later configuration use the same workflow.
+This guide is for a **new installation** on an operator-controlled Mac. It does not migrate or replace a running v5/v6 bridge. The [production operations procedure](../shell_bridge/V6_PRODUCTION_OPERATIONS.md) is the single supported process for upgrades, consolidation and recovery. The older protocol-v2 guide is [archived](legacy-protocol-v2-installation.md).
 
-## 1. Prerequisites
+## 1. Decide whether this is appropriate
 
-You need:
+Use the bridge only when an agent needs locally executed shell/Git work that a direct GitHub integration cannot perform, such as inspecting uncommitted code or running local tests. The bridge runs commands under your macOS account. A Drive mailbox with write access can submit commands to this trusted daemon; **do not share it with strangers or untrusted collaborators**.
 
-- Python 3.11 or newer;
-- Git;
-- `rclone`;
-- a Google Drive account available through an `rclone` remote;
-- one or more local directories beneath which you keep Git repositories.
+Requirements:
 
-The repository directories are **not** hardcoded by the project. Every host chooses its own repository roots during setup, and a host may configure zero, one, or many roots.
+- macOS with a logged-in operator for approval dialogs;
+- Git and Python 3 available on a trusted system path;
+- `rclone` with a Google Drive remote configured;
+- an existing directory of Git repositories (the `ALLOWED_ROOT`);
+- access to a client tool that can upload **raw JSON files** into Drive and retrieve their contents.
 
-The reference production host currently uses Python 3.14, Apple Git 2.50, and rclone 1.75, but those exact versions are not required by the protocol.
+The bridge's installer rejects an interpreter or rclone binary resolved from inside the agent-writable allowed root. Install them outside that directory and verify the executables that will be used. Do not create an allowed root spanning your entire home directory merely for convenience.
 
-## 2. Recommended: run the installer
+## 2. Configure Drive
 
-Download the bootstrap script from the canonical repository and run it:
+Install [rclone](https://rclone.org/install/) and follow its [Google Drive configuration](https://rclone.org/drive/) to run:
 
 ```bash
-curl -fsSLO https://raw.githubusercontent.com/krahd/llm-git-bridge/main/install.sh
-sh install.sh
+rclone config
+rclone listremotes
 ```
 
-The installer:
+Use a Google account under your control. A user-owned OAuth Desktop client is recommended for sustained use. A dedicated remote and mailbox are preferable to sharing one with other automation. The installer will choose a single configured remote or ask you to select one. Its default mailbox name is `Local Executor Bridge`.
 
-1. verifies Git, Python 3.11+, and `rclone`;
-2. clones the canonical repository on first use, or fast-forwards an existing clean installation on later runs;
-3. creates `~/.local/bin/llm-git-bridge` by default;
-4. offers `rclone config` when no remote exists;
-5. invokes `llm-git-bridge setup` for transport, repository roots, and root push policy;
-6. on macOS, offers to install the bundled LaunchAgent.
+Configure and verify the remote **before** installation. Do not commit `rclone.conf`, OAuth tokens, Drive credentials or a production mailbox marker into this repository.
 
-It never contains or guesses repository roots. Those are chosen only in the setup wizard.
-
-The installer is safe to run again. It refuses to overwrite local source modifications, uses fast-forward-only Git updates, and keeps bridge configuration outside the source checkout. Re-running it therefore acts as both an updater and a configuration entry point.
-
-Useful installer overrides for advanced use:
-
-```text
-LLM_GIT_BRIDGE_REPO_URL
-LLM_GIT_BRIDGE_REF
-LLM_GIT_BRIDGE_INSTALL_DIR
-LLM_GIT_BRIDGE_BIN_DIR
-```
-
-`--no-setup` and `--no-daemon` are available for scripted installation.
-
-## 3. Manual installation
-
-If you prefer to manage the source checkout yourself:
+## 3. Install from a complete checkout
 
 ```bash
 git clone https://github.com/krahd/llm-git-bridge.git
 cd llm-git-bridge
-bin/llm-git-bridge setup
+bash shell_bridge/install.sh
 ```
 
-The bundled wrapper runs the project directly from `src/`; package installation is optional. An editable package install remains available:
+The compatibility entry point `sh install.sh` runs the same v6 installer from a full checkout. Do not download that wrapper by itself: it intentionally refuses an incomplete checkout rather than installing the obsolete protocol-v2 service.
 
-```bash
-python3 -m pip install -e .
-```
+The interactive installation asks for a local folder to expose, for example `$HOME/repos`. If you are setting up unattended *fresh* installation, provide `ALLOWED_ROOT` and `RCLONE_REMOTE` explicitly, but do not use unattended mode as an upgrade workaround.
 
-If you already know the name of an `rclone` remote, setup also accepts it explicitly:
+The installer verifies its targets, refuses an existing installation/journal or conflicting active mailbox owner, creates one mailbox, pins Drive folder IDs, installs one macOS LaunchAgent and approval application, runs doctor, and attempts a harmless end-to-end smoke. A failed acceptance must be investigated; do not equate a successful file copy with a working bridge.
 
-```bash
-bin/llm-git-bridge setup --remote YOUR_REMOTE_NAME
-```
+**Never run the installer, launchd operations or migration commands through the bridge's own mailbox.** Those actions require an interactive Terminal on the Mac.
 
-## 4. Configure one or more repository roots
+## 4. Configure the agent / client
 
-Interactive `setup` asks repeatedly for directories containing Git repositories. A root is an ongoing discovery and policy boundary, not a one-time import list. For example, one person might keep repositories under `~/code` and `~/research`, while another might use a single `~/repos` root.
+Authorize your chosen agent-side client to upload a **raw UTF-8 JSON file** to the Drive mailbox `requests/` folder and fetch the matching raw file from `results/`. Not every Google Drive integration offers raw-file creation. Connector text search, Google Docs creation and creating a file in the agent's temporary container do not, by themselves, establish that this upload path works.
 
-For each root, setup asks whether the LLM may push validated safe bridge branches for repositories beneath it. New repositories later created or cloned beneath that root inherit the same policy automatically.
-
-You can inspect or modify roots non-interactively:
-
-```bash
-llm-git-bridge roots list
-llm-git-bridge roots add ~/code --push enable
-llm-git-bridge roots add ~/research --push disable
-llm-git-bridge roots remove ~/research
-llm-git-bridge roots scan
-```
-
-Nested roots with the same effective policy are redundant and are compacted. A nested root with a different policy is meaningful; the **most-specific containing root wins**.
-
-The remote repository registry contains stable repository IDs and effective capabilities, never local filesystem paths. While the watcher runs, repositories created, cloned, removed, or moved beneath approved roots are reconciled automatically (30 seconds by default). `roots scan` is available for an immediate refresh. `configure-discovery --interval SECONDS` changes the bounded 5–3600 second discovery interval.
-
-## 5. Configure validation commands
-
-Remote requests cannot send arbitrary command lines. They may request only symbolic commands configured locally for a repository.
-
-Example:
-
-```bash
-llm-git-bridge configure-command my-repo test \
-  python3 -m unittest discover -s tests -v
-```
-
-A transaction can then contain:
+A minimal read-only request:
 
 ```json
-"run": ["test"]
+{
+  "protocol": 1,
+  "id": "example-status-2026-001",
+  "cwd": "/Users/you/repos/example",
+  "command": "git status --short --branch",
+  "explanation": "Read the branch and working tree state of this repository.",
+  "timeout_seconds": 30,
+  "write_scope": "read_only"
+}
 ```
 
-Only configure commands for patched code you are willing to execute under your local user account. See [security.md](security.md#configured-command-trust-boundary).
+Replace `cwd` with a real repository beneath the allowed root, and choose a unique request ID for **each new request**. Upload the bytes as `requests/example-status-2026-001.json` (not as a Google Doc or text pasted into a comment). Retrieve `results/example-status-2026-001.json` by exact name/ID; inspect `status` and `exit_code`. A `completed` envelope with nonzero exit code is not a passing command.
 
-## 6. Push policy and exceptions
+`health.json` in the mailbox root identifies the installed version and build, live folder IDs and active work. If an exact result is not immediately visible, check health once rather than constantly listing the results folder. A stale heartbeat alone does not prove daemon death. If delivery is ambiguous, **do not resubmit a mutation** until its journal and actual effects are reconciled.
 
-Push has two independent gates:
+For the currently tested Google Drive connector, a tool-produced file reference is accepted by `upload_file` as the **string** `file_uri.file_id`, not the surrounding `file_uri` object; verify the actual interface contract of your connector. The [2026-10-30 read-only smoke report](v6-client-smoke-2026-10-30.md) records this adapter-specific mismatch and measured result.\n\nA reusable [Mac Git Bridge skill](../skills/mac-git-bridge/SKILL.md) is supplied as a **template**. Replace the per-installation mailbox IDs and paths with your own, preferably in a private configuration. Never publish another user's mailbox IDs, credentials or personal repository paths.
 
-1. local policy must permit push for the repository, normally inherited from its most-specific configured root;
-2. the individual remote transaction must explicitly contain `"push": true`.
+## 5. Understand permission and approval behaviour
 
-A repository can override its root policy when necessary:
+| Scope | Behaviour |
+| --- | --- |
+| `auto` (default) | Resolve the least authority available for the actual command |
+| `read_only` | No persistent writes and no network |
+| `repository` | Writes restricted to the selected existing repository/worktree; raw shell network disabled |
+| trusted coordinator | Dedicated `workspace.py` can fetch/checkpoint/push for its governed Git lifecycle; remotely supplied commands are re-sandboxed |
+| `system` | Logged-in-user execution after explicit local operator confirmation |
+
+High-impact effects require an additional approval gate. Approval is effect-first, with exact-command inspection and explicit clicks in the Mac menu-bar queue. Do not confuse the scope requested by the agent with authority actually granted by the local daemon.
+
+For substantial repository edits, use isolated durable workspaces with the installed coordinator. The coordinator must be the actual installed `~/.local/share/local-executor-bridge/workspace.py`, not a similarly named untrusted script. Do not attempt raw network Git push under `repository` scope.
+
+## 6. Validate on the Mac
+
+From the source checkout, run the repository's two suites:
 
 ```bash
-llm-git-bridge configure-push my-repo enable
-llm-git-bridge configure-push my-repo disable
-llm-git-bridge configure-push my-repo inherit
+PYTHONPATH=src python3 -m unittest discover -s tests
+python3 -m unittest discover -s shell_bridge/tests
 ```
 
-`inherit` removes the repository exception and returns to root policy. Repository overrides are bound to the bridge's history-based repository identity, so replacing an unrelated repository at the same path does not inherit the old exception.
+Then confirm: one daemon owns the mailbox; the `health.json` build manifest matches; a unique harmless read-only request completes exactly once; the Mac approval queue can allow, reject and expire a request; sandbox-denied writes/network are contained; timeouts preserve descendant containment; and a trusted workspace can create, checkpoint and integrate safely.
 
-Safe-prefix branches remain the default write target. RC9 retains the separate global, default-off authority for transactions that target the repository's exact currently checked-out branch, including `main`:
+**The test suites do not replace these Mac acceptance checks.** Do not treat example output or a health heartbeat as proof that end-to-end client upload and readback work.
 
-```bash
-llm-git-bridge configure-current-branch-write enable
-```
+## 7. Existing installation, upgrade or recovery
 
-Ordinary repository/root push permission is still required for a requested remote push. Current-branch transactions require exact current HEAD and a tracked-clean checkout and advance the checkout only with fast-forward Git. RC9 still does not force-push or remotely merge.
+Stop here if any prior v5/v6 service, LaunchAgent, journal or mailbox may exist. Do not run a new daemon against the same mailbox. Follow [V6_PRODUCTION_OPERATIONS.md](../shell_bridge/V6_PRODUCTION_OPERATIONS.md) for the interactive, inert-stage `v6_consolidate.py` process. It checks loaded labels, journal claims, locks, approvals, exact build and pinned mailbox identity before handover.
 
-RC9 also provides a separate bridge-only self-update authority. It is disabled by default and should be enabled only after the stable runtime/updater launchers have been installed:
+Do **not** delete journals or lock files, restart blindly, run a second watcher as a smoke test, replay an `indeterminate` result, or attempt production upgrades through the mailbox. Historical protocol-v2 commands and installer are not the v6 upgrade path.
 
-```bash
-llm-git-bridge configure-self-update enable
-```
-
-The remote protocol cannot supply updater commands or paths. A self-update target must already have a local full-test qualification receipt and must be the exact tip of its named safe source branch.
-
-## 7. Reconfigure later
-
-Run the same wizard at any time:
-
-```bash
-llm-git-bridge setup
-```
-
-Existing roots are shown first and retained by default. The wizard can add more roots, change their push policy, rescan repositories, and report Git/rclone/daemon readiness. A first persisted migration from the old version-1 configuration format preserves the original file once as the private `config.v1-backup.json` before writing version 2.
-
-For automation that must not prompt:
-
-```bash
-llm-git-bridge setup --non-interactive --remote YOUR_REMOTE_NAME
-```
-
-## 8. Start the watcher
-
-Foreground:
-
-```bash
-llm-git-bridge watch
-```
-
-One-shot processing is useful for development only when no persistent watcher is active:
-
-```bash
-llm-git-bridge watch --once
-```
-
-If the daemon is already running, `watch --once` correctly fails with `another bridge watcher is already running`; do not delete the lock file.
-
-### macOS LaunchAgent
-
-The installer offers this automatically. Manual installation is also available:
-
-```bash
-llm-git-bridge daemon install \
-  --command "$(command -v llm-git-bridge)"
-```
-
-Management commands:
-
-```bash
-llm-git-bridge daemon start
-llm-git-bridge daemon stop
-llm-git-bridge daemon restart
-llm-git-bridge daemon uninstall
-```
-
-The LaunchAgent writes logs under:
-
-```text
-~/.local/state/llm-git-bridge/daemon.out.log
-~/.local/state/llm-git-bridge/daemon.err.log
-```
-
-On other operating systems, run `watch` under your preferred process supervisor. The repository currently provides first-class daemon management only for macOS.
-
-## 9. Recommended: private Google OAuth client
-
-For sustained use, configure a user-owned Google OAuth Desktop client instead of relying indefinitely on rclone's shared client identity. The repository includes a hardened migration helper:
-
-```bash
-python3 scripts/google_drive_oauth.py --help
-```
-
-Read [google-drive-oauth.md](google-drive-oauth.md) before running it. The browser authorisation step is necessarily interactive.
-
-A remote `doctor` request reports whether a custom Drive OAuth client ID is configured.
-
-## 10. Verify the installation
-
-Check local state and roots:
-
-```bash
-llm-git-bridge status
-llm-git-bridge roots list
-```
-
-Materialise a repository snapshot:
-
-```bash
-llm-git-bridge materialize my-repo
-```
-
-For remote verification, submit a protocol-v2 `doctor` request. A healthy rclone-RC setup should report a successful transport with `rc_enabled` and `rc_socket_healthy` true.
-
-Continue with [usage.md](usage.md).
+For additional architecture and security details, see [Local Executor Bridge v6](local-executor-bridge-v6.md) and the [shell reference](../shell_bridge/README.md).

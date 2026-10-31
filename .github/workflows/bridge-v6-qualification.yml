@@ -21,6 +21,11 @@ jobs:
           # Validate every shell entrypoint, not only the historical shortlist.
           find shell_bridge -maxdepth 1 -type f -name '*.sh' -print0 |
             xargs -0 -n 1 bash -n
+      - name: Validate public v6 installer entrypoint
+        run: |
+          sh -n install.sh
+          sh install.sh --help | grep -q 'Usage: install.sh'
+          grep -q 'exec /bin/bash "$V6_INSTALLER" "$@"' install.sh
       - name: Compile all bridge and test Python sources before regressions
         run: |
           python3 -m compileall -q shell_bridge src tests

@@ -1,91 +1,22 @@
 # Local Executor Bridge v6
 
-`llm-git-bridge` targets **one production bridge architecture**: Local Executor Bridge v6. One daemon owns the mailbox, shell execution, durable request/replay state, operator approvals, and the trusted Git workspace coordinator. Git is not a second remote bridge. Substantial repository work is a first-class capability of the same local executor.
+A **local-first, operator-controlled bridge** for letting an LLM or agent perform bounded shell and Git work on your Mac. Commands travel through a Google Drive mailbox; one macOS daemon validates requests, applies local permission policy, executes them, and publishes durable results. The agent does not need direct SSH access to the Mac.
 
-The repository still retains the older protocol-v2 Git implementation for compatibility, migration, and historical tests, but it is **not** the recommended production architecture and should not run as a second daemon beside v6.
+**Status:** Local Executor Bridge v6 is the supported production architecture in this repository. The older protocol-v2 Git bridge remains as compatibility and historical code, **not a second service to run**. The code is available for independent installations, but this repository does not claim a universally qualified, one-click release or completed third-party macOS acceptance testing.
 
-> **Deployment is independent of source:** this repository documents the intended v6 architecture; do not infer that your running daemon is v6. See the [2026-10-09 v6 audit and implementation plan](docs/plans/BRIDGE-V6-TRANSPARENT-EXECUTION-2026-10-09.md) and verify the live mailbox/build before migrating or retiring v5.
+**Licensing:** This repository is publicly readable and cloneable, but no licence has yet been selected. Do not assume rights to redistribute or incorporate the code in another product. See [licence decision issue #82](https://github.com/krahd/llm-git-bridge/issues/82).\n\n## What it does
 
-## Production operation
+- Runs read-only shell queries with filesystem and network restrictions.
+- Allows scoped writes within an existing Git repository/worktree while keeping raw shell network disabled.
+- Uses a trusted, bundled Git workspace coordinator for isolated branches/worktrees, durable checkpoints, controlled fetch/push/integration and remote verification.
+- Requires explicit local, click-only approval for system authority and high-impact effects.
+- Records STARTED/FINISHED states to prevent accidental replay after crashes or transport timeouts.
 
-Run exactly one v6 daemon per Mac under the LaunchAgent
-`net.laurenzo.local-executor-bridge`. Install, upgrade, consolidate and
-recover it only with [`shell_bridge/V6_PRODUCTION_OPERATIONS.md`](shell_bridge/V6_PRODUCTION_OPERATIONS.md).
+The bridge is **not** a VM, a general secure multi-tenant shell service, or a GitHub replacement. An approved system-scoped action has the logged-in Mac user's authority. Mailbox access must be treated as privileged.
 
-## Architecture
+## Install on your own Mac
 
-```text
-LLM / agent
-    |
-    | request JSON
-    v
-transport adapter (Google Drive/rclone today)
-    |
-    v
-Local Executor Bridge v6 — one daemon / one mailbox / one state tree
-    |
-    +-- sandboxed shell execution
-    |      +-- read-only outside repositories
-    |      +-- repository-scoped writes, offline by default
-    |      +-- explicit approved system elevation
-    |
-    +-- trusted Git workspace coordinator
-           +-- isolated branch + worktree
-           +-- bounded validation
-           +-- checkpoint + push
-           +-- stale/conflict reconciliation
-           +-- serialized integration + remote verification
-```
-
-GitHub is the canonical shared repository state. The Mac checkout/worktrees are authoritative for current local execution state. The mailbox is transport only.
-
-## Permission and approval model
-
-Every request carries a required plain-language `explanation`. The bridge resolves authority locally; the remote caller cannot grant itself permissions.
-
-The execution scopes are:
-
-- `read_only`: no filesystem writes and no network;
-- `repository`: writes only to the selected Git repository/worktree and its Git metadata; raw repository shell network is denied in v6;
-- trusted workspace coordinator: privileged only for bridge-owned Git/worktree/checkpoint/push lifecycle; remotely supplied `workspace exec` and integration validation payloads are sandboxed again inside the worktree and run without network or ambient credentials;
-- `system`: normal logged-in-user authority, always requiring local operator approval.
-
-`auto` resolves to the least authority that fits the request. High-impact operations are an additional approval gate, not the primary sandbox. Approval is **effect-before-command**: the dialog explains the intended action and required authority first, then exposes request ID, working directory, and exact command as inspectable details. Elevated approval is click-only, with no Return/Space shortcut selecting an action. Missing UI support fails closed.
-
-Repository visibility is stricter than the normal approval model: agent requests that create a public repository or make a repository public are rejected outright and cannot be approved through the operator dialogue. Agent-created repositories must be explicitly private. Existing public repositories remain operable under normal policy.
-
-Recognised high-impact operations include GitHub control-plane mutation, mutating HTTP calls, remote shell/copy, destructive Git pushes/local resets, recursive forced deletion, and non-repository system/package mutation. Ordinary substantial Git work should use the workspace coordinator instead of asking for broad shell elevation.
-
-## Durable Git work
-
-The same bridge ships `workspace.py`. For substantial or concurrent repository changes, use it instead of editing canonical `main` directly:
-
-```bash
-python3 ~/.local/share/local-executor-bridge/workspace.py create   --repo /path/to/repo --resource docs/example --job-id example-001 --push-initial
-python3 ~/.local/share/local-executor-bridge/workspace.py exec   --job example-001 --command '...' --checkpoint-message 'Checkpoint'
-python3 ~/.local/share/local-executor-bridge/workspace.py ready --job example-001
-python3 ~/.local/share/local-executor-bridge/workspace.py integrate   --job example-001 --validate 'python3 -m unittest discover -s tests' --timeout 300
-```
-
-Workspace checkpoints are committed and pushed. Integration re-fetches the canonical target, checks stale/overlap/conflict conditions, validates in an isolated integration worktree, pushes the target, and independently verifies the remote ref. A conversation timeout does not imply bridge failure and never authorises replay of an ambiguous mutation.
-
-## Request example
-
-```json
-{
-  "protocol": 1,
-  "id": "repo-status-001",
-  "cwd": "/Users/me/repos/example",
-  "command": "git status --short --branch",
-  "explanation": "Check repository state before making changes.",
-  "timeout_seconds": 30,
-  "write_scope": "auto"
-}
-```
-
-Request IDs are unique and never reused. Terminal results distinguish `completed`, `rejected`, `indeterminate`, timeout, and output-limit outcomes. STARTED without a provable FINISHED state is never silently replayed.
-
-## Installation
+Requirements: macOS, Python 3, Git, `rclone`, a Google Drive account, and a local folder of repositories you choose to expose. Configure a Google Drive remote with `rclone config` first; prefer your own OAuth Desktop client for sustained use.
 
 ```bash
 git clone https://github.com/krahd/llm-git-bridge.git
@@ -93,23 +24,58 @@ cd llm-git-bridge
 bash shell_bridge/install.sh
 ```
 
-The source directory remains `shell_bridge/` for compatibility with existing installations and client instructions; the product/runtime identity is Local Executor Bridge v6. The installer creates/adopts one verified mailbox, pins its Drive IDs, installs one LaunchAgent, runs `doctor`, and performs an end-to-end smoke test.
+The installer asks for an existing allowed local root (for example `$HOME/repos`), chooses a configured Drive remote, creates and pins one mailbox, installs the daemon and macOS approval helper, and performs its built-in doctor/smoke procedure. Choose the narrowest practical allowed root.
 
-For an existing installation, stage an inert release with `install.sh --upgrade-stage-only` and hand over with `shell_bridge/v6_consolidate.py`; it retires every other bridge LaunchAgent (including the obsolete v5 `com.tom.chatgpt-shell-bridge` and `io.llm-git-bridge.daemon`) so exactly one owner remains.
+**Important:** A fresh install is **not** an upgrade. If any bridge instance or durable journal already exists, do not rerun the installer against the live installation and do not start a second daemon. Follow [production operations](shell_bridge/V6_PRODUCTION_OPERATIONS.md) from an interactive Terminal, including inert staging, owner census and guarded migration. Never manage the live daemon through its own request mailbox.
 
-## One bridge, not two
+The top-level `sh install.sh` is a compatibility wrapper for the same v6 installer when run from a full checkout. Old tutorials recommending the top-level bootstrap script to install protocol-v2 are obsolete.
 
-The historical protocol-v2 implementation remains in this repository because it contains compatibility machinery, migration evidence, and tests. Do not treat it as a second production service. New client/skill documentation should target Local Executor Bridge v6 and its workspace capability.
+For a complete first-install walkthrough and client setup, see [installation](docs/installation.md). For architecture and security detail, see [v6 design](docs/local-executor-bridge-v6.md) and [shell bridge reference](shell_bridge/README.md).
 
-The separate Conversation Harness/Buork work-continuity system owns WorkThreads, provider/session continuity, browser handoff, and higher-level work state. It consumes executor/workspace capabilities; those concerns do not belong in the bridge.
+## Connect an agent
 
-## Security boundary
+Your agent needs authenticated permission to **upload raw JSON files** to the chosen Drive `requests/` folder and read their matching results from `results/`. Google Docs are **not** a valid request format. Some connectors support reading Drive but cannot write raw files; a file-upload tool and its file-reference handoff must be verified before relying on the bridge. A generated local file is not evidence that Drive received it.
 
-The bridge is least-privilege infrastructure, not a VM. Sandboxed shell/workspace payloads deny unrelated home reads, ambient credentials, network where not required, and writes outside declared roots. Explicitly approved `system` execution intentionally restores the logged-in user's authority. The mailbox is privileged infrastructure; never place secrets directly in command bytes because request/result/journal data may persist.
+Each request needs a unique ID and a truthful plain-language `explanation`:
 
-See [`docs/local-executor-bridge-v6.md`](docs/local-executor-bridge-v6.md), [`docs/shell-bridge-v5-architecture.md`](docs/shell-bridge-v5-architecture.md), and [`shell_bridge/README.md`](shell_bridge/README.md) for implementation and migration detail.
+```json
+{
+  "protocol": 1,
+  "id": "example-read-2026-001",
+  "cwd": "/Users/you/repos/example",
+  "command": "git status --short --branch",
+  "explanation": "Inspect the repository working-tree state without changing it.",
+  "timeout_seconds": 30,
+  "write_scope": "read_only"
+}
+```
 
-### v6 approval UX and policy
+Upload as `requests/example-read-2026-001.json`. Read the **exact** `results/example-read-2026-001.json` and check terminal status and `exit_code`. If the result is not yet available, inspect `health.json` once, not a tight polling loop. After ambiguous delivery, reconcile the exact request before resubmitting any mutation. Reusing an ID is never a valid retry.
 
-v6 uses **effect-before-command approval**, not scope-before-command approval. Merely requesting broad `system` authority does not grant it and does not by itself create an approval prompt: safe requests are downgraded to repository or read-only authority. Approval is reserved for operations whose concrete effect is destructive/high-impact, escapes the repository boundary, or is not reasonably recoverable inside the normal Git workflow. The approval helper is a persistent menu-bar queue: popups are an attention mechanism, while pending approvals remain accessible from the menu bar until allowed, rejected, or expired. Approval is click-only; it must never require Touch ID, a password, LocalAuthentication, Secure Enclave user-presence, or equivalent identity authentication.
+The supplied [agent skill](skills/mac-git-bridge/SKILL.md) describes the transport, permission model, workspace coordinator, and safe recovery workflow. Each operator must configure their own allowed root and mailbox IDs; example paths/IDs are not credentials or production defaults.
 
+## Security model
+
+| Mode | Local authority |
+| --- | --- |
+| `read_only` | Filesystem reads within local policy; no network and no persistent writes |
+| `repository` | Writes to one existing repository/worktree and its Git metadata; no raw shell network |
+| trusted `workspace.py` | Governed Git lifecycle with network for coordinator operations only; user-supplied commands remain sandboxed |
+| `system` | Full logged-in-user authority only after local approval |
+
+`auto` resolves the minimum permitted authority locally, regardless of what the remote client requests. High-impact commands have an additional approval gate. Agents may create GitHub repositories only explicitly **private**; requests to create a public repository or change visibility to public are non-waivable rejections.
+
+Never expose secrets in requests, disable safety checks to work around a failed command, share a mailbox with untrusted actors, or run two daemons against one mailbox. See [security guidance](docs/security.md) and [operations](shell_bridge/V6_PRODUCTION_OPERATIONS.md).
+
+## Develop and verify
+
+Run the available test suites from the repository checkout:
+
+```bash
+PYTHONPATH=src python3 -m unittest discover -s tests
+python3 -m unittest discover -s shell_bridge/tests
+```
+
+These tests are necessary but do **not** replace first-install and approval acceptance on a real macOS host. The installed daemon can lag GitHub source; check `health.json` for `bridge_version`, `build_source_commit` and `build_code_integrity` rather than assuming deployment.
+
+Measured [read-only v6 client smoke evidence](docs/v6-client-smoke-2026-10-30.md) is available; it is not a substitute for full release qualification.\n\nContributions: [CONTRIBUTING.md](CONTRIBUTING.md). Legacy protocol-v2 installation (historical only): [archive](docs/legacy-protocol-v2-installation.md).
