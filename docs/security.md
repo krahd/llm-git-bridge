@@ -1,4 +1,8 @@
-# Security — legacy protocol-v2 reference\n\n> **Version scope:** The threat model below describes the retired protocol-v2 implementation. New installations use Local Executor Bridge v6; see [v6 architecture and security](local-executor-bridge-v6.md) and [v6 installation](installation.md). Do not use protocol-v2 security assumptions to configure a v6 mailbox.\n\n# Security model
+# Security — legacy protocol-v2 reference
+
+> **Version scope:** The threat model below describes the retired protocol-v2 implementation. New installations use Local Executor Bridge v6; see [v6 architecture and security](local-executor-bridge-v6.md), [v6 installation](installation.md), and [v6 client workflow](v6-client-guide.md). Do not use protocol-v2 security assumptions to configure a v6 mailbox.
+
+# Security model
 
 The bridge deliberately exposes less protocol surface than a shell or a general-purpose Git token. It is nevertheless an automation system that can execute locally configured validation commands against remotely supplied patches, so its trust boundaries need to be explicit.
 
