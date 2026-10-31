@@ -19,6 +19,9 @@ final class ApprovalController: NSObject, NSApplicationDelegate {
     private let helperPath: String
     private let pythonPath: String
     private let instanceLabel: String
+    private let bridgeVersion: String
+    private let bridgeSourceCommit: String
+    private let bridgeSourceUpdatedAt: String
     private var statusItem: NSStatusItem!
     private var lastDecisionError: String?
     // A summary cannot authorize. Exact payload must be inspected in this app session.
@@ -37,6 +40,9 @@ final class ApprovalController: NSObject, NSApplicationDelegate {
         helperPath = info["ApprovalHelperPath"] as? String ?? ""
         pythonPath = info["ApprovalPythonPath"] as? String ?? ""
         instanceLabel = info["ApprovalInstanceLabel"] as? String ?? "unidentified"
+        bridgeVersion = info["BridgeVersion"] as? String ?? "Unknown"
+        bridgeSourceCommit = info["BridgeSourceCommit"] as? String ?? "Unknown"
+        bridgeSourceUpdatedAt = info["BridgeSourceUpdatedAt"] as? String ?? ""
         approvalRoot = URL(fileURLWithPath: root, isDirectory: true)
         super.init()
     }
@@ -258,6 +264,17 @@ final class ApprovalController: NSObject, NSApplicationDelegate {
         refresh()
     }
 
+    private func aboutUpdateDate() -> String {
+        let parser = ISO8601DateFormatter()
+        guard let updated = parser.date(from: bridgeSourceUpdatedAt) else {
+            return "Unknown (build metadata unavailable)"
+        }
+        let formatter = DateFormatter()
+        formatter.dateStyle = .medium
+        formatter.timeZone = TimeZone(secondsFromGMT: 0)
+        return formatter.string(from: updated) + " (UTC)"
+    }
+
     @objc private func showAbout(_ sender: NSMenuItem) {
         if let alert = aboutAlert {
             NSApp.activate(ignoringOtherApps: true)
@@ -266,17 +283,48 @@ final class ApprovalController: NSObject, NSApplicationDelegate {
         }
         let alert = NSAlert()
         alert.messageText = "Local Executor Bridge"
-        alert.informativeText = "New approvals open a review window. Inspect exact command brings it forward. Choose Inspect exact command to enable Allow once in the menu. Reject is always available. No identity authentication."
+        alert.informativeText = """
+            Version: \(bridgeVersion)
+            Last updated (installed source): \(aboutUpdateDate())
+            Build: \(bridgeSourceCommit)
+
+            Developed by Tomas Laurenzo
+            Website: https://laurenzo.net
+            Email: tomas.laurenzo@colorado.edu
+
+            Approvals require explicit command inspection before Allow once.
+            No identity authentication.
+            """
         alert.alertStyle = .informational
-        alert.addButton(withTitle: "OK")
+        let ok = alert.addButton(withTitle: "OK")
+        ok.target = self
+        ok.action = #selector(closeAbout(_:))
+        ok.keyEquivalent = ""
+        let website = alert.addButton(withTitle: "Website")
+        website.target = self
+        website.action = #selector(openAboutWebsite(_:))
+        website.keyEquivalent = ""
+        let email = alert.addButton(withTitle: "Email")
+        email.target = self
+        email.action = #selector(openAboutEmail(_:))
+        email.keyEquivalent = ""
         NSApp.activate(ignoringOtherApps: true)
         alert.layout()
-        alert.buttons[0].target = self
-        alert.buttons[0].action = #selector(closeAbout(_:))
-        alert.buttons[0].keyEquivalent = ""
         aboutAlert = alert
         alert.window.center()
         alert.window.makeKeyAndOrderFront(nil)
+    }
+
+    @objc private func openAboutWebsite(_ sender: NSButton) {
+        if let url = URL(string: "https://laurenzo.net") {
+            NSWorkspace.shared.open(url)
+        }
+    }
+
+    @objc private func openAboutEmail(_ sender: NSButton) {
+        if let url = URL(string: "mailto:tomas.laurenzo@colorado.edu") {
+            NSWorkspace.shared.open(url)
+        }
     }
 
     @objc private func closeAbout(_ sender: NSButton) {
@@ -300,7 +348,7 @@ final class ApprovalController: NSObject, NSApplicationDelegate {
         }) { closeReview() }
         menu.autoenablesItems = false
         menu.removeAllItems()
-        menu.addItem(disabledItem("Local Executor Bridge v6"))
+        menu.addItem(disabledItem("Local Executor Bridge v" + bridgeVersion))
         if let lastDecisionError {
             menu.addItem(disabledItem("Error: " + short(lastDecisionError, 100)))
         }
