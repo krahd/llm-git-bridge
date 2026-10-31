@@ -1,4 +1,6 @@
-# Using llm-git-bridge
+# Legacy protocol-v2 usage
+
+**Legacy only:** This document describes the retired protocol-v2 repository transaction client. For new v6 installations and agent commands use the [v6 client guide](v6-client-guide.md), [installation](installation.md), and [Mac Git Bridge skill](../skills/mac-git-bridge/SKILL.md). The `llm-git-bridge setup` command below does **not** install or configure Local Executor Bridge v6.
 
 ## Repository discovery and roots
 

@@ -1,4 +1,6 @@
-# Troubleshooting
+# Legacy protocol-v2 troubleshooting
+
+**Version scope:** This document contains old protocol-v2 watcher, inbox and daemon instructions (including a legacy LaunchAgent name). **Do not apply its restart/installation commands to v6.** For the supported v6 daemon, use [v6 client diagnostics](v6-client-guide.md#failures-and-triage) and [canonical production operations](../shell_bridge/V6_PRODUCTION_OPERATIONS.md).
 
 ## `another bridge watcher is already running`
 
