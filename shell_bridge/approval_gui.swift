@@ -290,7 +290,7 @@ final class ApprovalController: NSObject, NSApplicationDelegate {
 
             Developed by Tomas Laurenzo
             Website: https://laurenzo.net
-            Email: tomas.laurenzo@colorado.edu
+            Email: tomas@laurenzo.net
 
             Approvals require explicit command inspection before Allow once.
             No identity authentication.
@@ -322,7 +322,7 @@ final class ApprovalController: NSObject, NSApplicationDelegate {
     }
 
     @objc private func openAboutEmail(_ sender: NSButton) {
-        if let url = URL(string: "mailto:tomas.laurenzo@colorado.edu") {
+        if let url = URL(string: "mailto:tomas@laurenzo.net") {
             NSWorkspace.shared.open(url)
         }
     }
