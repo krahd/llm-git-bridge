@@ -1,4 +1,6 @@
-# Architecture
+# Legacy protocol-v2 architecture
+
+**Historical reference:** This describes the retired protocol-v2 repository transaction architecture, not Local Executor Bridge v6. New users should begin with the [v6 architecture](local-executor-bridge-v6.md), [v6 client workflow](v6-client-guide.md) and [installation](installation.md).
 
 `llm-git-bridge` has three layers.
 
