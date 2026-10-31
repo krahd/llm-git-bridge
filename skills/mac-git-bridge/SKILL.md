@@ -26,7 +26,7 @@ Obtain the operator's **configured mailbox** and allowed root from the actual in
 - pinned root, requests and results folder IDs must correspond to the selected mailbox;
 - `active_requests` and STARTED-without-FINISHED counts inform pending/recovery work.
 
-A stale heartbeat is advisory, not proof of a dead daemon. Check the exact result and local process/journal state before any restart. The source of truth for installation/upgrade is [V6_PRODUCTION_OPERATIONS.md](../../shell_bridge/V6_PRODUCTION_OPERATIONS.md).
+A stale heartbeat is advisory, not proof of a dead daemon. Check the exact result and local process/journal state before any restart. The source of truth for installation/upgrade is [V6_PRODUCTION_OPERATIONS.md](https://github.com/krahd/llm-git-bridge/blob/main/shell_bridge/V6_PRODUCTION_OPERATIONS.md).
 
 ## Submit one bounded raw request
 
@@ -89,8 +89,8 @@ The coordinator creates isolated branches/worktrees and pushed checkpoints. Inte
 
 ## Production and safety boundary
 
-Never run daemon installation, upgrade, cutover, consolidation, launchd maintenance, or migration **through its own mailbox**. Those operations must follow [canonical production operations](../../shell_bridge/V6_PRODUCTION_OPERATIONS.md) in an interactive operator Terminal. Preserve journals, pending approvals and old worktrees. Do not replace v6 with protocol-v2.
+Never run daemon installation, upgrade, cutover, consolidation, launchd maintenance, or migration **through its own mailbox**. Those operations must follow [canonical production operations](https://github.com/krahd/llm-git-bridge/blob/main/shell_bridge/V6_PRODUCTION_OPERATIONS.md) in an interactive operator Terminal. Preserve journals, pending approvals and old worktrees. Do not replace v6 with protocol-v2.
 
 The bridge's sandbox is not a VM. Operator-approved `system` execution has the logged-in user's authority. Keep mailbox ACLs private and minimise permitted repository roots. Public source documentation is not proof that a particular daemon or client upload path has passed end-to-end acceptance.
 
-Project documentation: [README](../../README.md), [installation](../../docs/installation.md), and [v6 architecture](../../docs/local-executor-bridge-v6.md).
+Project documentation: [README](https://github.com/krahd/llm-git-bridge/blob/main/README.md), [installation](https://github.com/krahd/llm-git-bridge/blob/main/docs/installation.md), and [v6 architecture](https://github.com/krahd/llm-git-bridge/blob/main/docs/local-executor-bridge-v6.md).
