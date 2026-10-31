@@ -80,6 +80,6 @@ python3 -m unittest discover -s shell_bridge/tests
 
 These tests are necessary but do **not** replace first-install and approval acceptance on a real macOS host. The installed daemon can lag GitHub source; check `health.json` for `bridge_version`, `build_source_commit` and `build_code_integrity` rather than assuming deployment.
 
-Measured [read-only v6 client smoke evidence](docs/v6-client-smoke-2026-10-30.md) is available; it is not a substitute for full release qualification.
+The [2026-10-30 public-client audit](docs/v6-public-client-audit-2026-10-30.md) documents corrected defects, tests and unresolved release gates. Measured [read-only v6 client smoke evidence](docs/v6-client-smoke-2026-10-30.md) is also available; neither substitutes for full release qualification.
 
 Contributions: [CONTRIBUTING.md](CONTRIBUTING.md). Legacy protocol-v2 installation (historical only): [archive](docs/legacy-protocol-v2-installation.md).
