@@ -4,7 +4,9 @@ A **local-first, operator-controlled bridge** for letting an LLM or agent perfor
 
 **Status:** Local Executor Bridge v6 is the supported production architecture in this repository. The older protocol-v2 Git bridge remains as compatibility and historical code, **not a second service to run**. The code is available for independent installations, but this repository does not claim a universally qualified, one-click release or completed third-party macOS acceptance testing.
 
-**Licensing:** This repository is publicly readable and cloneable, but no licence has yet been selected. Do not assume rights to redistribute or incorporate the code in another product. See [licence decision issue #82](https://github.com/krahd/llm-git-bridge/issues/82).\n\n## What it does
+**Licensing:** This repository is publicly readable and cloneable, but no licence has yet been selected. Do not assume rights to redistribute or incorporate the code in another product. See [licence decision issue #82](https://github.com/krahd/llm-git-bridge/issues/82).
+
+## What it does
 
 - Runs read-only shell queries with filesystem and network restrictions.
 - Allows scoped writes within an existing Git repository/worktree while keeping raw shell network disabled.
@@ -30,7 +32,7 @@ The installer asks for an existing allowed local root (for example `$HOME/repos`
 
 The top-level `sh install.sh` is a compatibility wrapper for the same v6 installer when run from a full checkout. Old tutorials recommending the top-level bootstrap script to install protocol-v2 are obsolete.
 
-For a complete first-install walkthrough and client setup, see [installation](docs/installation.md). For architecture and security detail, see [v6 design](docs/local-executor-bridge-v6.md) and [shell bridge reference](shell_bridge/README.md).
+For a complete first-install walkthrough, see [installation](docs/installation.md). For submitting and verifying requests, see the [v6 client guide](docs/v6-client-guide.md) and [offline client validator](skills/mac-git-bridge/scripts/v6_client_check.py). For architecture and security detail, see [v6 design](docs/local-executor-bridge-v6.md) and [shell bridge reference](shell_bridge/README.md).
 
 ## Connect an agent
 
@@ -52,7 +54,7 @@ Each request needs a unique ID and a truthful plain-language `explanation`:
 
 Upload as `requests/example-read-2026-001.json`. Read the **exact** `results/example-read-2026-001.json` and check terminal status and `exit_code`. If the result is not yet available, inspect `health.json` once, not a tight polling loop. After ambiguous delivery, reconcile the exact request before resubmitting any mutation. Reusing an ID is never a valid retry.
 
-The supplied [agent skill](skills/mac-git-bridge/SKILL.md) describes the transport, permission model, workspace coordinator, and safe recovery workflow. Each operator must configure their own allowed root and mailbox IDs; example paths/IDs are not credentials or production defaults.
+The supplied [agent skill](skills/mac-git-bridge/SKILL.md) includes a portable offline request/result validator. It describes the transport, permission model, workspace coordinator, and safe recovery workflow. Each operator must configure their own allowed root and mailbox IDs; example paths/IDs are not credentials or production defaults.
 
 ## Security model
 
@@ -78,4 +80,6 @@ python3 -m unittest discover -s shell_bridge/tests
 
 These tests are necessary but do **not** replace first-install and approval acceptance on a real macOS host. The installed daemon can lag GitHub source; check `health.json` for `bridge_version`, `build_source_commit` and `build_code_integrity` rather than assuming deployment.
 
-Measured [read-only v6 client smoke evidence](docs/v6-client-smoke-2026-10-30.md) is available; it is not a substitute for full release qualification.\n\nContributions: [CONTRIBUTING.md](CONTRIBUTING.md). Legacy protocol-v2 installation (historical only): [archive](docs/legacy-protocol-v2-installation.md).
+Measured [read-only v6 client smoke evidence](docs/v6-client-smoke-2026-10-30.md) is available; it is not a substitute for full release qualification.
+
+Contributions: [CONTRIBUTING.md](CONTRIBUTING.md). Legacy protocol-v2 installation (historical only): [archive](docs/legacy-protocol-v2-installation.md).
