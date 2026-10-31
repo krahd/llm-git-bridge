@@ -1,4 +1,6 @@
-# Protocol v2
+# Legacy protocol v2
+
+**Compatibility reference only:** This protocol is not the Local Executor Bridge v6 shell mailbox. New clients should follow the [v6 client guide](v6-client-guide.md) and the v6 `protocol: 1` request envelope. Do not submit the transactions below to a v6 mailbox or start a separate protocol-v2 watcher against it.
 
 The protocol is provider-neutral. A client needs read/write access to the selected mailbox transport.
 
