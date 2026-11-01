@@ -97,6 +97,10 @@ python3 ~/.local/share/local-executor-bridge/workspace.py integrate \
 
 The coordinator creates isolated branches/worktrees and pushed checkpoints. Integration checks latest target, ancestry, changed-path/resource overlap, validation, canonical push and independent remote ref. Inspect `workspace.py list/show` on resumption to avoid duplicating jobs. Do not edit canonical `main` directly for substantive work.
 
+## Apple silicon / macOS 28 compatibility
+
+macOS 28 removes general Rosetta support for Intel-only apps. If a user receives an Intel-app compatibility warning, do not infer that the v6 protocol is unsupported or upgrade the production daemon through its own mailbox. Read the [macOS 28 compatibility guide](https://github.com/krahd/llm-git-bridge/blob/main/docs/macos28-compatibility.md). Verify the actual native approval app, configured Python interpreter and external-tool architectures **from an operator Terminal**. The source installer now requires an arm64 approval app on Apple silicon, but this does not certify an existing installed build or third-party dependencies.
+
 ## Production and safety boundary
 
 Never run daemon installation, upgrade, cutover, consolidation, launchd maintenance, or migration **through its own mailbox**. Those operations must follow [canonical production operations](https://github.com/krahd/llm-git-bridge/blob/main/shell_bridge/V6_PRODUCTION_OPERATIONS.md) in an interactive operator Terminal. Preserve journals, pending approvals and old worktrees. Do not replace v6 with protocol-v2.
