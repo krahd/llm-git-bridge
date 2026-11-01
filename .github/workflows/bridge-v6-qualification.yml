@@ -48,6 +48,14 @@ jobs:
           grep -q 'inventory_only_no_mutation=1' "$RUNNER_TEMP/bridge-runtime-inventory.txt"
       - name: Typecheck native approval application
         run: xcrun swiftc -typecheck -framework AppKit shell_bridge/approval_gui.swift
+      - name: Verify ARM64 approval app build for macOS 28
+        run: |
+          SDK="$(xcrun --sdk macosx --show-sdk-path)"
+          xcrun swiftc -target arm64-apple-macos11.0 -sdk "$SDK" \
+            shell_bridge/approval_gui.swift -framework AppKit -framework Foundation \
+            -o "$RUNNER_TEMP/arm64-local-executor-approval"
+          lipo -archs "$RUNNER_TEMP/arm64-local-executor-approval" | grep -qw arm64
+
 
   core-repository-regressions:
     runs-on: ubuntu-latest
