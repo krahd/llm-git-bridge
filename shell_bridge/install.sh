@@ -498,8 +498,22 @@ bundle_id='net.laurenzo.local-executor-approval.'+hashlib.sha256(label.encode('u
 obj={'CFBundleIdentifier':bundle_id,'CFBundleName':'Local Executor Approval','CFBundleDisplayName':'Local Executor Approval','CFBundlePackageType':'APPL','CFBundleExecutable':'local-executor-approval','CFBundleVersion':version.split('.')[0],'CFBundleShortVersionString':version if '.' in version else version+'.0','BridgeVersion':version,'BridgeSourceCommit':source_commit,'BridgeSourceUpdatedAt':source_updated_at,'LSUIElement':True,'NSHighResolutionCapable':True,'ApprovalRoot':approval_root,'ApprovalHelperPath':helper_path,'ApprovalPythonPath':python_path,'ApprovalInstanceLabel':label}
 with open(path,'wb') as f: plistlib.dump(obj,f,fmt=plistlib.FMT_XML,sort_keys=True)
 PYAPPPLIST
-"$SWIFTC_BIN" -sdk "$SWIFT_SDK" "$SCRIPT_DIR/approval_gui.swift" -framework AppKit -framework Foundation -o "$APP_BUNDLE/Contents/MacOS/local-executor-approval"
-chmod 700 "$APP_BUNDLE/Contents/MacOS/local-executor-approval"
+# Target the physical Mac architecture, not the architecture of a shell
+# translated by Rosetta. macOS 28 removes general Intel app translation.
+if [ "$(/usr/sbin/sysctl -n hw.optional.arm64 2>/dev/null || printf 0)" = "1" ]; then
+  APPROVAL_TARGET_ARCH="arm64"
+else
+  APPROVAL_TARGET_ARCH="x86_64"
+fi
+APP_EXEC="$APP_BUNDLE/Contents/MacOS/local-executor-approval"
+"$SWIFTC_BIN" -target "$APPROVAL_TARGET_ARCH-apple-macos11.0" -sdk "$SWIFT_SDK" "$SCRIPT_DIR/approval_gui.swift" -framework AppKit -framework Foundation -o "$APP_EXEC"
+# Do not publish a release containing an Intel-only approval app on Apple silicon.
+APP_ARCHS="$(/usr/bin/lipo -archs "$APP_EXEC")" || fail "cannot inspect approval app architecture"
+case " $APP_ARCHS " in
+  *" $APPROVAL_TARGET_ARCH "*) ;;
+  *) fail "approval app lacks required native architecture $APPROVAL_TARGET_ARCH (found: $APP_ARCHS)" ;;
+esac
+chmod 700 "$APP_EXEC"
 
 
 PATH_VALUE="$(dirname "$RCLONE_BIN"):$(dirname "$PYTHON_BIN"):/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin:/usr/sbin:/sbin"
