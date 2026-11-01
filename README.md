@@ -32,6 +32,8 @@ The installer asks for an existing allowed local root (for example `$HOME/repos`
 
 The top-level `sh install.sh` is a compatibility wrapper for the same v6 installer when run from a full checkout. Old tutorials recommending the top-level bootstrap script to install protocol-v2 are obsolete.
 
+**macOS 28 compatibility:** Apple is retiring general Rosetta translation after macOS 27. The native approval app must contain an ARM64 slice on Apple silicon. See [Rosetta compatibility diagnostics](docs/macos28-compatibility.md) before attributing an Intel-only app warning to the bridge or upgrading an existing installation.
+
 For a complete first-install walkthrough, see [installation](docs/installation.md). For submitting and verifying requests, see the [v6 client guide](docs/v6-client-guide.md) and [offline client validator](skills/mac-git-bridge/scripts/v6_client_check.py). For architecture and security detail, see [v6 design](docs/local-executor-bridge-v6.md) and [shell bridge reference](shell_bridge/README.md).
 
 ## Connect an agent
