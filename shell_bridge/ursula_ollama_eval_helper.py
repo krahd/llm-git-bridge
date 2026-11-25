@@ -87,16 +87,27 @@ def sandbox_profile(repo: Path, scratch: Path) -> str:
     ])
 
 
+class NoRedirect(urllib.request.HTTPRedirectHandler):
+    def redirect_request(self, req, fp, code, msg, headers, newurl):
+        return None
+
+
 def local_model_status() -> int:
     req = urllib.request.Request("http://127.0.0.1:11434/api/tags", method="GET")
-    with urllib.request.urlopen(req, timeout=8) as res:
+    # An agent cannot redirect this privileged preflight to another host and
+    # inherited HTTP proxy environment is never consulted.
+    opener = urllib.request.build_opener(urllib.request.ProxyHandler({}), NoRedirect())
+    with opener.open(req, timeout=8) as res:
         if res.status != 200:
             fail(f"Ollama returned HTTP {res.status}")
         content = res.read(256 * 1024 + 1)
         if len(content) > 256 * 1024:
             fail("Ollama response exceeds limit")
     tags = json.loads(content)
-    model_names = {model.get("name") for model in tags.get("models", [])}
+    models = tags.get("models") if isinstance(tags, dict) else None
+    if not isinstance(models, list):
+        fail("Ollama returned invalid model list")
+    model_names = {model.get("name") for model in models if isinstance(model, dict)}
     if MODEL not in model_names:
         fail("required Qwen model is not installed: " + MODEL)
     print("Local Ollama reachable; expected model installed:", MODEL)
