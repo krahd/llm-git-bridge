@@ -89,11 +89,21 @@ class HelperTests(unittest.TestCase):
             status = 200
             def __enter__(self): return self
             def __exit__(self, *args): self.close()
-        with patch.object(helper.urllib.request, "urlopen", return_value=FakeResponse(
-            json.dumps({"models": [{"name": "other:latest"}]}).encode()
-        )):
+        class FakeOpener:
+            def open(self, request, timeout=0):
+                self.request = request
+                self.timeout = timeout
+                return FakeResponse(json.dumps(
+                    {"models": [{"name": "other:latest"}]}).encode())
+        instance = FakeOpener()
+        with patch.object(helper.urllib.request, "build_opener", return_value=instance) as factory:
             with self.assertRaisesRegex(RuntimeError, "not installed"):
                 helper.local_model_status()
+        self.assertEqual(instance.request.full_url, "http://127.0.0.1:11434/api/tags")
+        self.assertEqual(instance.timeout, 8)
+        self.assertIsInstance(factory.call_args.args[0], helper.urllib.request.ProxyHandler)
+        self.assertEqual(factory.call_args.args[0].proxies, {})
+        self.assertIsInstance(factory.call_args.args[1], helper.NoRedirect)
 
 
 if __name__ == "__main__":
