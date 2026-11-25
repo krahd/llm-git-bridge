@@ -8,7 +8,7 @@ import unittest
 from unittest.mock import patch
 
 SPEC = importlib.util.spec_from_file_location(
-    "ursula_eval_helper", Path(__file__).with_name("ursula_ollama_eval_helper.py")
+    "ursula_eval_helper", Path(__file__).parent.parent / "ursula_ollama_eval_helper.py"
 )
 helper = importlib.util.module_from_spec(SPEC)
 SPEC.loader.exec_module(helper)
