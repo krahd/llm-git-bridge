@@ -70,7 +70,10 @@ class EnrollmentTests(unittest.TestCase):
         self.assertEqual(registered["executable_sha256"], enrol.sha256(helper))
         self.assertEqual(registered["permitted_roots"], [str(self.repo)])
         self.assertEqual(set(registered["permitted_actions"]), set(enrol.ACTIONS))
-        self.assertEqual(len(list(self.config_dir.glob("config.json.before-ursula-*"))), 1)
+        backups = list(self.config_dir.glob("config.json.before-ursula-*"))
+        self.assertEqual(len(backups), 1)
+        self.assertEqual(backups[0].stat().st_mode & 0o777, 0o600)
+        self.assertEqual(self.config.stat().st_mode & 0o777, 0o600)
         second = self.invoke(apply=True)
         self.assertFalse(second.called)
 
