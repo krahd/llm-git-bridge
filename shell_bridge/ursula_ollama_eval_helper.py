@@ -80,7 +80,7 @@ def sandbox_profile(repo: Path, scratch: Path) -> str:
         f'(allow network-bind (local ip "localhost:{STUDIO_PORT}"))',
         f'(allow network-inbound (local ip "localhost:{STUDIO_PORT}"))',
         "(deny file-write*)",
-        f'(allow file-write* (literal "/dev/null") (subpath {quote(repo / "dist")}) (subpath {quote(repo / "data" )}) (subpath {quote(scratch)}))',
+        f'(allow file-write* (literal "/dev/null") (subpath {quote(repo / "dist")}) (subpath {quote(repo / "data/local/evals")}) (subpath {quote(scratch)}))',
         f'(deny file-read* (subpath {quote(home)}))',
         f'(allow file-read-metadata (literal {quote(home)}) (literal {quote(home.parent)}))',
         f'(allow file-read* (subpath {quote(repo)}) (subpath {quote(scratch)}))',
