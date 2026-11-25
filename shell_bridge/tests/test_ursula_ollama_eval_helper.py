@@ -43,7 +43,8 @@ class HelperTests(unittest.TestCase):
             self.assertIn("(deny file-write*)", profile)
             self.assertIn("(deny file-read*", profile)
             self.assertIn(str(repo / "dist"), profile)
-            self.assertIn(str(repo / "data"), profile)
+            self.assertIn(str(repo / "data/local/evals"), profile)
+            self.assertNotIn('(subpath "' + str(repo / "data") + '"), profile)
             self.assertNotIn("(subpath \"/\")", profile)
 
     @unittest.skipUnless(helper.sys.platform == "darwin", "macOS Seatbelt qualification only")
