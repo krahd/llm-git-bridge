@@ -46,6 +46,20 @@ class HelperTests(unittest.TestCase):
             self.assertIn(str(repo / "data"), profile)
             self.assertNotIn("(subpath \"/\")", profile)
 
+    @unittest.skipUnless(helper.sys.platform == "darwin", "macOS Seatbelt qualification only")
+    def test_profile_is_accepted_by_macos_sandbox_exec(self):
+        import subprocess
+        with tempfile.TemporaryDirectory(dir=str(Path.home())) as directory:
+            home = Path(directory)
+            repo = home / "tom-repos/projects/ursula/apps/storytelling/prototype-0"
+            scratch = repo / "data/local/evals/test-scratch"
+            scratch.mkdir(parents=True)
+            profile = helper.sandbox_profile(repo, scratch)
+            result = subprocess.run(["/usr/bin/sandbox-exec", "-p", profile, "/usr/bin/true"],
+                                    capture_output=True, text=True, timeout=10)
+            self.assertEqual(result.returncode, 0,
+                             "Seatbelt refused narrow evaluator profile: " + result.stderr)
+
     def test_repo_must_match_canonical_origin_and_clean_tracked_tree(self):
         with tempfile.TemporaryDirectory() as directory:
             repo = Path(directory) / "prototype-0"
