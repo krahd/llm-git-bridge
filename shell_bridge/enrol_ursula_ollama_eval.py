@@ -29,6 +29,21 @@ def sha256(path: Path) -> str:
     return hashlib.sha256(path.read_bytes()).hexdigest()
 
 
+def write_exclusive(path: Path, payload: bytes, mode: int) -> None:
+    """Create sensitive files with restrictive mode from the first byte."""
+    flags = os.O_WRONLY | os.O_CREAT | os.O_EXCL | getattr(os, "O_NOFOLLOW", 0)
+    fd = os.open(path, flags, mode)
+    try:
+        os.fchmod(fd, mode)
+        with os.fdopen(fd, "wb") as out:
+            out.write(payload)
+            out.flush()
+            os.fsync(out.fileno())
+    except BaseException:
+        path.unlink(missing_ok=True)
+        raise
+
+
 def main() -> None:
     p = argparse.ArgumentParser(description=__doc__)
     p.add_argument("--apply", action="store_true", help="Operator approval to modify trusted local config and restart v6")
@@ -97,27 +112,15 @@ def main() -> None:
         return
     if not dst.exists():
         tmp = install / (src.name + ".tmp-" + str(os.getpid()))
-        with tmp.open("xb") as f:
-            f.write(src.read_bytes())
-            f.flush()
-            os.fsync(f.fileno())
-        tmp.chmod(0o700)
+        write_exclusive(tmp, src.read_bytes(), 0o700)
         os.replace(tmp, dst)
     registry = dict(registry)
     registry[NAME] = descriptor
     cfg["trusted_operations"] = registry
     backup = config_path.with_name("config.json.before-ursula-" + datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%SZ"))
-    with backup.open("xb") as f:
-        f.write(config_path.read_bytes())
-        f.flush()
-        os.fsync(f.fileno())
-    backup.chmod(0o600)
+    write_exclusive(backup, config_path.read_bytes(), 0o600)
     temporary = config_path.with_name(config_path.name + ".tmp-" + str(os.getpid()))
-    with temporary.open("xb") as f:
-        f.write((json.dumps(cfg, indent=2, sort_keys=True) + "\n").encode("utf-8"))
-        f.flush()
-        os.fsync(f.fileno())
-    temporary.chmod(0o600)
+    write_exclusive(temporary, (json.dumps(cfg, indent=2, sort_keys=True) + "\n").encode("utf-8"), 0o600)
     os.replace(temporary, config_path)
     # Do not restart through the bridge itself: the owner is already in an
     # interactive Terminal and must initiate this --apply explicitly.
