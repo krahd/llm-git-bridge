@@ -72,6 +72,12 @@ def sandbox_profile(repo: Path, scratch: Path) -> str:
     quote = lambda p: json.dumps(str(p))
     if not str(repo).startswith(str(home) + "/"):
         fail("repository must be inside the operator home for read isolation")
+    # The local web status endpoint calls git from the canonical Ursula root.
+    # It must read .git and tracked content outside the nested prototype,
+    # without being able to write there. No other home directories are readable.
+    ursula_root = repo.parents[2]
+    if ursula_root.name != "ursula" or repo != ursula_root / "apps/storytelling/prototype-0":
+        fail("trusted study root must be inside the canonical Ursula repository")
     return "\n".join([
         "(version 1)", "(allow default)",
         "(deny network*)",
@@ -83,7 +89,7 @@ def sandbox_profile(repo: Path, scratch: Path) -> str:
         f'(allow file-write* (literal "/dev/null") (subpath {quote(repo / "dist")}) (subpath {quote(repo / "data/local/evals")}) (subpath {quote(scratch)}))',
         f'(deny file-read* (subpath {quote(home)}))',
         f'(allow file-read-metadata (literal {quote(home)}) (literal {quote(home.parent)}))',
-        f'(allow file-read* (subpath {quote(repo)}) (subpath {quote(scratch)}))',
+        f'(allow file-read* (subpath {quote(ursula_root)}) (subpath {quote(scratch)}))',
     ])
 
 
