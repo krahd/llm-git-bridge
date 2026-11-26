@@ -18,7 +18,7 @@ class EnrollmentTests(unittest.TestCase):
     def setUp(self):
         self.temp = tempfile.TemporaryDirectory()
         self.addCleanup(self.temp.cleanup)
-        self.home = Path(self.temp.name)
+        self.home = Path(self.temp.name).resolve()
         self.install = self.home / ".local/share/local-executor-bridge"
         self.install.mkdir(parents=True)
         (self.install / "bridge.py").write_text("# fake installed bridge\n")
