@@ -2,6 +2,7 @@
 import importlib.util
 import os
 import io
+import sys
 import json
 from pathlib import Path
 import tempfile
@@ -78,6 +79,24 @@ class HelperTests(unittest.TestCase):
             self.assertEqual(status.returncode, 0,
                              "Seatbelt blocked source provenance Git reads: " + status.stderr)
             self.assertIn("README.md", status.stdout)
+            # This is a runtime network test, not merely a profile syntax check.
+            # It exercises the trusted studio's fixed loopback bind/connect path.
+            socket_script = (
+                "import socket; "
+                "server=socket.socket(); server.settimeout(3); "
+                "server.bind(('127.0.0.1', 41731)); server.listen(1); "
+                "client=socket.socket(); client.settimeout(3); "
+                "client.connect(('127.0.0.1',41731)); "
+                "peer,_=server.accept(); peer.sendall(b'OK'); "
+                "assert client.recv(2)==b'OK'; "
+                "peer.close(); client.close(); server.close()"
+            )
+            net = subprocess.run([
+                "/usr/bin/sandbox-exec", "-p", profile, sys.executable,
+                "-c", socket_script
+            ], capture_output=True, text=True, env=env, timeout=10)
+            self.assertEqual(net.returncode, 0,
+                             "Seatbelt blocked pinned local studio TCP: " + net.stderr)
 
     def test_repo_must_match_canonical_origin_and_clean_tracked_tree(self):
         with tempfile.TemporaryDirectory() as directory:
