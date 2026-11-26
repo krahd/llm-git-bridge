@@ -1,5 +1,6 @@
 """Offline validation. A real Mac/approval/Ollama acceptance run is separate."""
 import importlib.util
+import os
 import io
 import json
 from pathlib import Path
@@ -42,6 +43,8 @@ class HelperTests(unittest.TestCase):
             self.assertNotIn('remote ip "*:', profile)
             self.assertIn("(deny file-write*)", profile)
             self.assertIn("(deny file-read*", profile)
+            self.assertIn('(subpath "' + str(repo.parents[2]) + '")', profile)
+            self.assertNotIn('(subpath "' + str(home / ".ssh") + '")', profile)
             self.assertIn(str(repo / "dist"), profile)
             self.assertIn(str(repo / "data/local/evals"), profile)
             self.assertNotIn('(subpath "' + str(repo / "data") + '")', profile)
@@ -60,6 +63,21 @@ class HelperTests(unittest.TestCase):
                                     capture_output=True, text=True, timeout=10)
             self.assertEqual(result.returncode, 0,
                              "Seatbelt refused narrow evaluator profile: " + result.stderr)
+            # The actual studio status API invokes git in the parent Ursula
+            # repository; merely parsing the profile with /usr/bin/true
+            # would not detect missing .git read permission.
+            root = repo.parents[2]
+            subprocess.run(["/usr/bin/git", "-C", str(root), "init", "-q"],
+                           check=True, capture_output=True, text=True, timeout=10)
+            (root / "README.md").write_text("outside nested prototype but inside Ursula\\n")
+            env = {**os.environ, "HOME": str(scratch), "XDG_CONFIG_HOME": str(scratch)}
+            status = subprocess.run([
+                "/usr/bin/sandbox-exec", "-p", profile, "/usr/bin/git",
+                "-C", str(root), "status", "--porcelain"
+            ], capture_output=True, text=True, env=env, timeout=10)
+            self.assertEqual(status.returncode, 0,
+                             "Seatbelt blocked source provenance Git reads: " + status.stderr)
+            self.assertIn("README.md", status.stdout)
 
     def test_repo_must_match_canonical_origin_and_clean_tracked_tree(self):
         with tempfile.TemporaryDirectory() as directory:
