@@ -31,7 +31,7 @@ class HelperTests(unittest.TestCase):
 
     def test_sandbox_scopes_network_and_writes(self):
         with tempfile.TemporaryDirectory() as directory:
-            home = Path(directory)
+            home = Path(directory).resolve()
             repo = home / "tom-repos/projects/ursula/apps/storytelling/prototype-0"
             scratch = repo / "data/local/evals/run123"
             with patch.object(helper.Path, "home", return_value=home):
@@ -51,7 +51,7 @@ class HelperTests(unittest.TestCase):
     def test_profile_is_accepted_by_macos_sandbox_exec(self):
         import subprocess
         with tempfile.TemporaryDirectory(dir=str(Path.home())) as directory:
-            home = Path(directory)
+            home = Path(directory).resolve()
             repo = home / "tom-repos/projects/ursula/apps/storytelling/prototype-0"
             scratch = repo / "data/local/evals/test-scratch"
             scratch.mkdir(parents=True)
@@ -63,7 +63,7 @@ class HelperTests(unittest.TestCase):
 
     def test_repo_must_match_canonical_origin_and_clean_tracked_tree(self):
         with tempfile.TemporaryDirectory() as directory:
-            repo = Path(directory) / "prototype-0"
+            repo = Path(directory).resolve() / "prototype-0"
             repo.mkdir()
             (repo / "package.json").write_text("{}")
             with patch.object(helper, "git", side_effect=[
