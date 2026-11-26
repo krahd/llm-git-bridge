@@ -57,7 +57,7 @@ All study actions use `qwen3:30b-a3b-instruct-2507-q4_K_M`, a 16,384-token conte
 
 - Validates the clean tracked checkout and canonical Ursula origin; it cannot execute an arbitrary repository or choose an arbitrary executable/model.
 - Removes inherited credentials and environment variables, and launches npm with a fixed argv (never a shell string).
-- Requires macOS `sandbox-exec` (no unsandboxed fallback), denies home-directory reads outside Ursula, and denies filesystem writes outside the ignored `dist/` and `data/local/evals/` trees.
+- Requires macOS `sandbox-exec` (no unsandboxed fallback), denies home-directory reads outside the Ursula repository (the web status endpoint requires read-only access to its parent `.git`), and denies filesystem writes outside the ignored `dist/` and `data/local/evals/` trees.
 - Denies arbitrary network connections, permitting only localhost Ollama TCP/11434 and the fixed local Ursula studio TCP/41731; the studio's port is pinned by `URSULA_STUDY_WEB_PORT`. These local endpoints are still trusted services and must be regarded as a bounded security exposure.
 - The native approval UI will display the registered helper's pinned digest and action. The helper never returns arbitrary secrets or credentials; study results stay local and are inspected afterwards using an ordinary read-only bridge request.
 
