@@ -363,6 +363,50 @@ class RetireTests(unittest.TestCase):
                 job_id=self.job["job_id"],worktree_root=None,push_initial=True,
                 hydrate_lfs=True))
 
+    def test_integrate_uses_deferred_lfs_for_temporary_worktree_and_squash(self):
+        """No hidden multi-GB LFS materialisation during canonical integration."""
+        args = argparse.Namespace(state_dir=str(self.state), repo=str(self.repo),
+            resource="paper:two", remote="origin", target="main",
+            job_id="scratch-lfs-test", worktree_root=None, push_initial=True)
+        job = w.create_job(args)
+        wt = Path(job["worktree"])
+        (wt / "file.txt").write_text("scratch-policy-change\n")
+        w.exec_job(argparse.Namespace(state_dir=str(self.state),job=job["job_id"],
+            command="true",timeout=30,shell="/bin/bash",no_checkpoint=False,checkpoint_message=None))
+        w.ready_job(argparse.Namespace(state_dir=str(self.state),job=job["job_id"],
+            checkpoint=False,message=None))
+        real_run = w.run
+        seen = []
+        def record(argv, **kw):
+            if "worktree" in argv and "add" in argv and ".integration" in str(argv):
+                seen.append(("add", kw.get("env", {}).get("GIT_LFS_SKIP_SMUDGE")))
+            if "merge" in argv and "--squash" in argv:
+                seen.append(("merge", kw.get("env", {}).get("GIT_LFS_SKIP_SMUDGE")))
+            return real_run(argv, **kw)
+        with patch.object(w, "run", side_effect=record):
+            integrated = w.integrate_job(argparse.Namespace(state_dir=str(self.state),
+                job=job["job_id"],message=None,validate=None,timeout=40,shell="/bin/bash"))
+        self.assertEqual(integrated["state"], "integrated")
+        self.assertEqual(seen, [("add", "1"), ("merge", "1")])
+
+    def test_explicit_hydrate_lfs_overrides_inherited_skip_smudge(self):
+        """--hydrate-lfs is a real opt-in even if the operator environment skips LFS."""
+        real_run = w.run
+        observed = []
+        def record(argv, **kw):
+            if "worktree" in argv and "add" in argv:
+                observed.append(kw.get("env", {}).get("GIT_LFS_SKIP_SMUDGE"))
+            return real_run(argv, **kw)
+        args = argparse.Namespace(state_dir=str(self.state), repo=str(self.repo),
+            resource="paper:hydrated", remote="origin", target="main",
+            job_id="explicit-hydration-test", worktree_root=None,
+            push_initial=False, hydrate_lfs=True)
+        with patch.dict(os.environ, {"GIT_LFS_SKIP_SMUDGE": "1"}):
+            with patch.object(w, "run", side_effect=record):
+                job = w.create_job(args)
+        self.assertFalse(job["lfs_deferred"])
+        self.assertEqual(observed, [None])
+
     def test_lfs_pointer_only_checkout_does_not_need_cache_object(self):
         import hashlib
         payload=b"unmaterialised-media"
