@@ -61,6 +61,37 @@ class RetireTests(unittest.TestCase):
     def tearDown(self):
         self.tmp.cleanup()
 
+    def test_atomic_job_json_syncs_parent_directory(self):
+        """A fsynced file without an fsynced rename is not a durable intent."""
+        import stat
+        observed = []
+        original = os.fsync
+        def spy(fd):
+            observed.append(stat.S_ISDIR(os.fstat(fd).st_mode))
+            return original(fd)
+        target = self.state / "workspaces" / "jobs" / "sync-probe.json"
+        with patch.object(w.os, "fsync", side_effect=spy):
+            w.atomic_json(target, {"intent": "retiring"})
+        self.assertEqual(json.loads(target.read_text()), {"intent": "retiring"})
+        self.assertIn(False, observed)  # file fsync
+        self.assertIn(True, observed)   # containing directory fsync
+
+    def test_atomic_job_json_reports_ambiguous_directory_sync_failure(self):
+        """Do not claim a durable intent if rename succeeded but dir sync failed."""
+        import stat
+        original = os.fsync
+        def fail_directory(fd):
+            if stat.S_ISDIR(os.fstat(fd).st_mode):
+                raise OSError("simulated directory fsync failure")
+            return original(fd)
+        target = self.state / "workspaces" / "jobs" / "sync-failure.json"
+        target.parent.mkdir(parents=True, exist_ok=True)
+        with patch.object(w.os, "fsync", side_effect=fail_directory):
+            with self.assertRaisesRegex(w.WorkspaceError, "durability is unverified"):
+                w.atomic_json(target, {"intent": "retiring"})
+        # After os.replace the file may be visible, but must not be reported durable.
+        self.assertTrue(target.exists())
+
     def gc(self, **overrides):
         args=dict(state_dir=str(self.state),repo=str(self.repo),job=self.job["job_id"],
                   retention_days=14,allow_legacy=False,delete_remote_branch=False,
@@ -161,6 +192,31 @@ class RetireTests(unittest.TestCase):
             with self.assertRaisesRegex(w.WorkspaceError,"modern integration unexpectedly missing"):
                 self.gc(allow_legacy=True)
         self.assertTrue(self.wt.exists())
+
+    def test_legacy_integrated_without_receipt_retires_in_one_verified_operation(self):
+        """Use real legacy-format Git trailers, not a mock of remote proof."""
+        run("git", "-C", str(self.repo), "pull", "-q", "--ff-only", "origin", "main")
+        job = w.load_job(self.state, self.job["job_id"])
+        message = ("Bridge-Job-ID: " + job["job_id"] + "\n" +
+                   "Bridge-Resource: " + job["resource"] + "\n" +
+                   "Bridge-Base: " + job["base_commit"] + "\n" +
+                   "Bridge-Checkpoint: " + job["last_checkpoint"])
+        run("git", "-C", str(self.repo), "commit", "-q", "--allow-empty",
+            "-m", "Historical integration without policy trailers", "-m", message)
+        run("git", "-C", str(self.repo), "push", "-q", "origin", "main")
+        job["integration_commit"] = run("git", "-C", str(self.repo),
+                                        "rev-parse", "HEAD").stdout.strip()
+        w.save_job(self.state, job)
+        self.receipt.unlink()
+        with patch.object(ret, "_require_operator"), patch.object(ret, "_check_handles"):
+            result = self.gc(allow_legacy=True)
+        self.assertTrue(result[0]["retired"])
+        self.assertFalse(self.wt.exists())
+        self.assertFalse(self.receipt.exists())  # Never forge a legacy receipt.
+        self.assertTrue(w.load_job(self.state, self.job["job_id"])["worktree_released_at"])
+        self.assertEqual(run("git", "-C", str(self.repo), "ls-remote", "origin",
+                             f"refs/heads/{job['branch']}").stdout.split()[0],
+                         job["last_checkpoint"])
 
     def test_malformed_receipt_hard_blocker(self):
         self.receipt.write_text("this is not JSON")
