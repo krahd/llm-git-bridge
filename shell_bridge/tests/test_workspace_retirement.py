@@ -61,6 +61,72 @@ class RetireTests(unittest.TestCase):
     def tearDown(self):
         self.tmp.cleanup()
 
+    def test_atomic_job_json_syncs_parent_directory(self):
+        """A fsynced file without an fsynced rename is not a durable intent."""
+        import stat
+        observed = []
+        original = os.fsync
+        def spy(fd):
+            observed.append(stat.S_ISDIR(os.fstat(fd).st_mode))
+            return original(fd)
+        target = self.state / "workspaces" / "jobs" / "sync-probe.json"
+        with patch.object(w.os, "fsync", side_effect=spy):
+            w.atomic_json(target, {"intent": "retiring"})
+        self.assertEqual(json.loads(target.read_text()), {"intent": "retiring"})
+        self.assertIn(False, observed)  # file fsync
+        self.assertIn(True, observed)   # containing directory fsync
+
+    def test_atomic_job_json_reports_ambiguous_directory_sync_failure(self):
+        """Do not claim a durable intent if rename succeeded but dir sync failed."""
+        import stat
+        original = os.fsync
+        def fail_directory(fd):
+            if stat.S_ISDIR(os.fstat(fd).st_mode):
+                raise OSError("simulated directory fsync failure")
+            return original(fd)
+        target = self.state / "workspaces" / "jobs" / "sync-failure.json"
+        target.parent.mkdir(parents=True, exist_ok=True)
+        with patch.object(w.os, "fsync", side_effect=fail_directory):
+            with self.assertRaisesRegex(w.WorkspaceError, "durability is unverified"):
+                w.atomic_json(target, {"intent": "retiring"})
+        # After os.replace the file may be visible, but must not be reported durable.
+        self.assertTrue(target.exists())
+
+    def test_new_immutable_receipt_syncs_parent_directory(self):
+        """A receipt must remain discoverable after power loss, not just fsync its bytes."""
+        import stat
+        observed = []
+        original = os.fsync
+        def spy(fd):
+            observed.append(stat.S_ISDIR(os.fstat(fd).st_mode))
+            return original(fd)
+        job = dict(self.job)
+        job["job_id"] = "receipt-directory-fsync"
+        with patch.object(w.os, "fsync", side_effect=spy):
+            w._write_terminal_receipt(
+                self.state, job, policy_rev=job["base_commit"],
+                policy_sha="f" * 64, candidate_tree=job["base_commit"])
+        self.assertTrue(w._receipt_file(self.state, job["job_id"]).is_file())
+        self.assertIn(False, observed)
+        self.assertIn(True, observed)
+
+    def test_immutable_receipt_directory_sync_error_is_not_success(self):
+        """A visible but unpersisted receipt must not count as completed."""
+        import stat
+        original = os.fsync
+        def fail_directory(fd):
+            if stat.S_ISDIR(os.fstat(fd).st_mode):
+                raise OSError("simulated receipt directory sync failure")
+            return original(fd)
+        job = dict(self.job)
+        job["job_id"] = "receipt-directory-failure"
+        with patch.object(w.os, "fsync", side_effect=fail_directory):
+            with self.assertRaisesRegex(w.WorkspaceError, "receipt durability is unverified"):
+                w._write_terminal_receipt(
+                    self.state, job, policy_rev=job["base_commit"],
+                    policy_sha="f" * 64, candidate_tree=job["base_commit"])
+        self.assertTrue(w._receipt_file(self.state, job["job_id"]).exists())
+
     def gc(self, **overrides):
         args=dict(state_dir=str(self.state),repo=str(self.repo),job=self.job["job_id"],
                   retention_days=14,allow_legacy=False,delete_remote_branch=False,
@@ -161,6 +227,31 @@ class RetireTests(unittest.TestCase):
             with self.assertRaisesRegex(w.WorkspaceError,"modern integration unexpectedly missing"):
                 self.gc(allow_legacy=True)
         self.assertTrue(self.wt.exists())
+
+    def test_legacy_integrated_without_receipt_retires_in_one_verified_operation(self):
+        """Use real legacy-format Git trailers, not a mock of remote proof."""
+        run("git", "-C", str(self.repo), "pull", "-q", "--ff-only", "origin", "main")
+        job = w.load_job(self.state, self.job["job_id"])
+        message = ("Bridge-Job-ID: " + job["job_id"] + "\n" +
+                   "Bridge-Resource: " + job["resource"] + "\n" +
+                   "Bridge-Base: " + job["base_commit"] + "\n" +
+                   "Bridge-Checkpoint: " + job["last_checkpoint"])
+        run("git", "-C", str(self.repo), "commit", "-q", "--allow-empty",
+            "-m", "Historical integration without policy trailers", "-m", message)
+        run("git", "-C", str(self.repo), "push", "-q", "origin", "main")
+        job["integration_commit"] = run("git", "-C", str(self.repo),
+                                        "rev-parse", "HEAD").stdout.strip()
+        w.save_job(self.state, job)
+        self.receipt.unlink()
+        with patch.object(ret, "_require_operator"), patch.object(ret, "_check_handles"):
+            result = self.gc(allow_legacy=True)
+        self.assertTrue(result[0]["retired"])
+        self.assertFalse(self.wt.exists())
+        self.assertFalse(self.receipt.exists())  # Never forge a legacy receipt.
+        self.assertTrue(w.load_job(self.state, self.job["job_id"])["worktree_released_at"])
+        self.assertEqual(run("git", "-C", str(self.repo), "ls-remote", "origin",
+                             f"refs/heads/{job['branch']}").stdout.split()[0],
+                         job["last_checkpoint"])
 
     def test_malformed_receipt_hard_blocker(self):
         self.receipt.write_text("this is not JSON")
@@ -271,6 +362,50 @@ class RetireTests(unittest.TestCase):
                 resource="paper:one",remote="origin",target="main",
                 job_id=self.job["job_id"],worktree_root=None,push_initial=True,
                 hydrate_lfs=True))
+
+    def test_integrate_uses_deferred_lfs_for_temporary_worktree_and_squash(self):
+        """No hidden multi-GB LFS materialisation during canonical integration."""
+        args = argparse.Namespace(state_dir=str(self.state), repo=str(self.repo),
+            resource="paper:two", remote="origin", target="main",
+            job_id="scratch-lfs-test", worktree_root=None, push_initial=True)
+        job = w.create_job(args)
+        wt = Path(job["worktree"])
+        (wt / "file.txt").write_text("scratch-policy-change\n")
+        w.exec_job(argparse.Namespace(state_dir=str(self.state),job=job["job_id"],
+            command="true",timeout=30,shell="/bin/bash",no_checkpoint=False,checkpoint_message=None))
+        w.ready_job(argparse.Namespace(state_dir=str(self.state),job=job["job_id"],
+            checkpoint=False,message=None))
+        real_run = w.run
+        seen = []
+        def record(argv, **kw):
+            if "worktree" in argv and "add" in argv and ".integration" in str(argv):
+                seen.append(("add", kw.get("env", {}).get("GIT_LFS_SKIP_SMUDGE")))
+            if "merge" in argv and "--squash" in argv:
+                seen.append(("merge", kw.get("env", {}).get("GIT_LFS_SKIP_SMUDGE")))
+            return real_run(argv, **kw)
+        with patch.object(w, "run", side_effect=record):
+            integrated = w.integrate_job(argparse.Namespace(state_dir=str(self.state),
+                job=job["job_id"],message=None,validate=None,timeout=40,shell="/bin/bash"))
+        self.assertEqual(integrated["state"], "integrated")
+        self.assertEqual(seen, [("add", "1"), ("merge", "1")])
+
+    def test_explicit_hydrate_lfs_overrides_inherited_skip_smudge(self):
+        """--hydrate-lfs is a real opt-in even if the operator environment skips LFS."""
+        real_run = w.run
+        observed = []
+        def record(argv, **kw):
+            if "worktree" in argv and "add" in argv:
+                observed.append(kw.get("env", {}).get("GIT_LFS_SKIP_SMUDGE"))
+            return real_run(argv, **kw)
+        args = argparse.Namespace(state_dir=str(self.state), repo=str(self.repo),
+            resource="paper:hydrated", remote="origin", target="main",
+            job_id="explicit-hydration-test", worktree_root=None,
+            push_initial=False, hydrate_lfs=True)
+        with patch.dict(os.environ, {"GIT_LFS_SKIP_SMUDGE": "1"}):
+            with patch.object(w, "run", side_effect=record):
+                job = w.create_job(args)
+        self.assertFalse(job["lfs_deferred"])
+        self.assertEqual(observed, [None])
 
     def test_lfs_pointer_only_checkout_does_not_need_cache_object(self):
         import hashlib

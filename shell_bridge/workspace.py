@@ -48,17 +48,55 @@ def git(repo: Path, *args, check=True, timeout=120):
     return run(["git", "-C", str(repo), *args], check=check, timeout=timeout)
 
 
-def atomic_json(path: Path, obj: dict) -> None:
-    path.parent.mkdir(parents=True, exist_ok=True)
-    fd, tmp = tempfile.mkstemp(prefix=path.name + ".", dir=str(path.parent))
+def _sync_directory(path: Path) -> None:
+    """Persist a directory entry; fsync of a JSON file alone is insufficient."""
+    flags = os.O_RDONLY | getattr(os, "O_DIRECTORY", 0)
+    fd = os.open(str(path), flags)
     try:
-        with os.fdopen(fd, "w", encoding="utf-8") as f:
-            json.dump(obj, f, indent=2, sort_keys=True)
-            f.write("\n")
-            f.flush(); os.fsync(f.fileno())
-        os.replace(tmp, path)
+        os.fsync(fd)
     finally:
-        if os.path.exists(tmp): os.unlink(tmp)
+        os.close(fd)
+
+
+def _ensure_parent_directory(path: Path) -> None:
+    """Persist the parent directories newly created for a durable state file."""
+    missing = []
+    cursor = path.parent
+    while not cursor.exists():
+        if cursor == cursor.parent:
+            raise WorkspaceError("cannot establish workspace state ancestry")
+        missing.append(cursor)
+        cursor = cursor.parent
+    path.parent.mkdir(parents=True, exist_ok=True)
+    for created in reversed(missing):
+        _sync_directory(created.parent)
+
+
+def atomic_json(path: Path, obj: dict) -> None:
+    """Durably record a workspace state transition, including its rename.
+
+    A retirement intent MUST survive a crash after worktree removal. Without
+    syncing the containing directory, a completed os.replace may roll back
+    following power loss, losing the only record needed for safe reconciliation.
+    """
+    _ensure_parent_directory(path)
+    try:
+        fd, tmp = tempfile.mkstemp(prefix=path.name + ".", dir=str(path.parent))
+        try:
+            with os.fdopen(fd, "w", encoding="utf-8") as f:
+                json.dump(obj, f, indent=2, sort_keys=True)
+                f.write("\n")
+                f.flush()
+                os.fsync(f.fileno())
+            os.replace(tmp, path)
+            _sync_directory(path.parent)
+        finally:
+            if os.path.exists(tmp):
+                os.unlink(tmp)
+    except OSError as exc:
+        raise WorkspaceError(
+            "workspace state durability is unverified; reconcile before retrying"
+        ) from exc
 
 
 def now_iso() -> str:
@@ -203,7 +241,9 @@ def create_job(args) -> dict:
     # checkout. Individual tasks can explicitly opt into full hydration.
     hydrate_lfs = bool(getattr(args, "hydrate_lfs", False))
     checkout_env = dict(os.environ)
-    if not hydrate_lfs:
+    if hydrate_lfs:
+        checkout_env.pop("GIT_LFS_SKIP_SMUDGE", None)
+    else:
         checkout_env["GIT_LFS_SKIP_SMUDGE"] = "1"
     run(["git", "-C", str(repo), "worktree", "add", "--lock", "--reason",
          f"ChatGPT workspace {jid}", "-b", branch, str(worktree), base],
@@ -415,37 +455,39 @@ def _run_job_shell(shell: str, command: str, cwd: Path, timeout: int):
 
 def exec_job(args) -> dict:
     state = state_root(args.state_dir)
-    job = load_job(state, args.job)
-    if job.get("state") == "integrated":
-        raise WorkspaceError("job is already integrated")
-    wt = Path(job["worktree"])
-    if not wt.is_dir():
-        raise WorkspaceError("job worktree is missing; run recover")
-    lock = _lock(state / "workspaces" / "locks" / f"job-{job['job_id']}.lock")
+    # Acquire before loading metadata: a concurrent finish/retire may change
+    # the job between an unlocked preflight and the first shell command.
+    lock = _lock(state / "workspaces" / "locks" / f"job-{args.job}.lock")
     try:
-        started = time.time()
-        rc, stdout, stderr = _run_job_shell(args.shell, args.command, wt, args.timeout)
-        out = {
-            "job_id": job["job_id"], "exit_code": rc,
-            "stdout": stdout, "stderr": stderr,
-            "duration_seconds": round(time.time()-started, 6),
-            "checkpoint": None,
-        }
-        if rc == 0 and not args.no_checkpoint and _dirty(wt):
-            out["checkpoint"] = _checkpoint(state, job, args.checkpoint_message)
-        elif rc != 0:
+        job = load_job(state, args.job)
+        if job.get("state") == "integrated" or job.get("worktree_released_at"):
+            raise WorkspaceError("job is already integrated or retired")
+        wt = Path(job["worktree"])
+        if not wt.is_dir():
+            raise WorkspaceError("job worktree is missing; run recover")
+        try:
+            started = time.time()
+            rc, stdout, stderr = _run_job_shell(args.shell, args.command, wt, args.timeout)
+            out = {
+                "job_id": job["job_id"], "exit_code": rc,
+                "stdout": stdout, "stderr": stderr,
+                "duration_seconds": round(time.time()-started, 6),
+                "checkpoint": None,
+            }
+            if rc == 0 and not args.no_checkpoint and _dirty(wt):
+                out["checkpoint"] = _checkpoint(state, job, args.checkpoint_message)
+            elif rc != 0:
+                job["state"] = "interrupted"
+                job["last_error"] = f"command exited {rc}"
+                save_job(state, job)
+            return out
+        except WorkspaceError as exc:
             job["state"] = "interrupted"
-            job["last_error"] = f"command exited {rc}"
+            job["last_error"] = str(exc)
             save_job(state, job)
-        return out
-    except WorkspaceError as exc:
-        job["state"] = "interrupted"
-        job["last_error"] = str(exc)
-        save_job(state, job)
-        raise
+            raise
     finally:
         lock.close()
-
 
 def list_jobs(args) -> list[dict]:
     state = state_root(args.state_dir)
@@ -492,19 +534,30 @@ def ready_job(args) -> dict:
 
 
 def mark_reconciled(args) -> dict:
-    state=state_root(args.state_dir); job=load_job(state,args.job); repo=Path(job["repo"])
-    git(repo,"fetch","--prune",_fetch_target(job),f"refs/heads/{job['target_branch']}:refs/remotes/{job['remote']}/{job['target_branch']}")
-    target=git(repo,"rev-parse",f"refs/remotes/{job['remote']}/{job['target_branch']}^{{commit}}").stdout.strip()
-    if args.target and args.target != target:
-        raise WorkspaceError(f"target moved: expected {args.target}, actual {target}")
-    wt = Path(job["worktree"])
-    if _dirty(wt):
-        raise WorkspaceError("job worktree is dirty; checkpoint before reconciliation")
-    checkpoint = git(wt, "rev-parse", "HEAD").stdout.strip()
-    if git(repo, "merge-base", "--is-ancestor", target, checkpoint, check=False).returncode != 0:
-        raise WorkspaceError("reconciliation not proven: canonical target is not an ancestor of the job checkpoint")
-    job["reconciled_target"]=target; save_job(state,job); return job
-
+    state = state_root(args.state_dir)
+    lock = _lock(state / "workspaces" / "locks" / f"job-{args.job}.lock")
+    try:
+        job = load_job(state, args.job)
+        if job.get("state") == "integrated" or job.get("worktree_released_at"):
+            raise WorkspaceError("integrated or retired workspace cannot be reconciled")
+        repo = Path(job["repo"])
+        git(repo, "fetch", "--prune", _fetch_target(job),
+            f"refs/heads/{job['target_branch']}:refs/remotes/{job['remote']}/{job['target_branch']}")
+        target = git(repo, "rev-parse",
+            f"refs/remotes/{job['remote']}/{job['target_branch']}^{{commit}}").stdout.strip()
+        if args.target and args.target != target:
+            raise WorkspaceError(f"target moved: expected {args.target}, actual {target}")
+        wt = Path(job["worktree"])
+        if _dirty(wt):
+            raise WorkspaceError("job worktree is dirty; checkpoint before reconciliation")
+        checkpoint = git(wt, "rev-parse", "HEAD").stdout.strip()
+        if git(repo, "merge-base", "--is-ancestor", target, checkpoint, check=False).returncode != 0:
+            raise WorkspaceError("reconciliation not proven: canonical target is not an ancestor of the job checkpoint")
+        job["reconciled_target"] = target
+        save_job(state, job)
+        return job
+    finally:
+        lock.close()
 
 def _changed_paths(repo: Path, a: str, b: str) -> set[str]:
     cp=git(repo,"diff","--name-only",f"{a}..{b}")
@@ -553,17 +606,25 @@ def _write_terminal_receipt(state: Path, job: dict, *, policy_rev: str | None,
         "verified_at": now_iso(),
     }
     path = _receipt_file(state, job["job_id"])
-    path.parent.mkdir(parents=True, exist_ok=True)
+    _ensure_parent_directory(path)
     if path.exists():
         existing=json.loads(path.read_text("utf-8"))
         if any(existing.get(k)!=receipt[k] for k in ("checkpoint","integration_commit","job_id")):
             raise WorkspaceError("terminal receipt conflicts with integrated effect; preserve evidence")
         return existing
     # Never replace a historical receipt after later main changes/reversions.
-    fd=os.open(path, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
-    with os.fdopen(fd,"w",encoding="utf-8") as out:
-        json.dump(receipt,out,sort_keys=True,indent=2)
-        out.write("\n");out.flush();os.fsync(out.fileno())
+    try:
+        fd=os.open(path, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
+        with os.fdopen(fd,"w",encoding="utf-8") as out:
+            json.dump(receipt,out,sort_keys=True,indent=2)
+            out.write("\n")
+            out.flush()
+            os.fsync(out.fileno())
+        _sync_directory(path.parent)
+    except OSError as exc:
+        raise WorkspaceError(
+            "integration receipt durability is unverified; reconcile remote effect before retrying"
+        ) from exc
     return receipt
 
 
@@ -646,8 +707,18 @@ def _integrate_job_locked(args) -> dict:
         integ_root=repo.parent/".worktrees"/job["repo_id"]/".integration"
         integ_root.mkdir(parents=True,exist_ok=True)
         tmp=integ_root/f"{job['job_id']}-{secrets.token_hex(3)}"
-        git(repo,"worktree","add","--detach",str(tmp),current)
-        merge=git(tmp,"merge","--squash",checkpoint,check=False,timeout=args.timeout)
+        # Integration scratch worktrees must respect the job's hydration
+        # policy too. Otherwise even deferred-smudge jobs rehydrate multi-GB
+        # repositories just to run a short validation and squash merge.
+        integration_env = dict(os.environ)
+        if job.get("lfs_deferred", False):
+            integration_env["GIT_LFS_SKIP_SMUDGE"] = "1"
+        else:
+            integration_env.pop("GIT_LFS_SKIP_SMUDGE", None)
+        run(["git", "-C", str(repo), "worktree", "add", "--detach",
+             str(tmp), current], env=integration_env)
+        merge=run(["git", "-C", str(tmp), "merge", "--squash", checkpoint],
+                  check=False, timeout=args.timeout, env=integration_env)
         if merge.returncode != 0:
             job["state"]="conflicted"; job["last_error"]=(merge.stderr or merge.stdout).strip(); save_job(state,job)
             raise WorkspaceError("squash merge conflicted; job requires reconciliation")
