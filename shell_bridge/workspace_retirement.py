@@ -407,8 +407,13 @@ def _retire_locked(w, args, state: Path) -> dict:
             w.git(repo, "worktree", "lock", "--reason",
                   f"ChatGPT workspace {args.job}", str(wt), check=False)
         raise
+    # A historical pre-receipt job can be valid only after _check_remote has
+    # independently established its exact legacy integration evidence. Do not
+    # report failure *after* removing such a verified checkout merely because
+    # its immutable receipt did not exist in the older coordinator protocol.
+    receipt = w._receipt_file(state, job["job_id"])
     _need(w, w.git(repo, "rev-parse", f"refs/heads/{job['branch']}").stdout.strip() ==
-          job["last_checkpoint"] and w._receipt_file(state, job["job_id"]).is_file(),
+          job["last_checkpoint"] and (receipt.is_file() or args.allow_legacy),
           "worktree removed but recovery references changed: investigate before retrying")
     job["worktree_released_at"] = w.now_iso()
     job.pop("retirement_intent", None)
