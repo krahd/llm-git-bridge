@@ -48,17 +48,50 @@ def git(repo: Path, *args, check=True, timeout=120):
     return run(["git", "-C", str(repo), *args], check=check, timeout=timeout)
 
 
-def atomic_json(path: Path, obj: dict) -> None:
-    path.parent.mkdir(parents=True, exist_ok=True)
-    fd, tmp = tempfile.mkstemp(prefix=path.name + ".", dir=str(path.parent))
+def _sync_directory(path: Path) -> None:
+    """Persist a directory entry; fsync of a JSON file alone is insufficient."""
+    flags = os.O_RDONLY | getattr(os, "O_DIRECTORY", 0)
+    fd = os.open(str(path), flags)
     try:
-        with os.fdopen(fd, "w", encoding="utf-8") as f:
-            json.dump(obj, f, indent=2, sort_keys=True)
-            f.write("\n")
-            f.flush(); os.fsync(f.fileno())
-        os.replace(tmp, path)
+        os.fsync(fd)
     finally:
-        if os.path.exists(tmp): os.unlink(tmp)
+        os.close(fd)
+
+
+def atomic_json(path: Path, obj: dict) -> None:
+    """Durably record a workspace state transition, including its rename.
+
+    A retirement intent MUST survive a crash after worktree removal. Without
+    syncing the containing directory, a completed os.replace may roll back
+    following power loss, losing the only record needed for safe reconciliation.
+    """
+    missing = []
+    cursor = path.parent
+    while not cursor.exists():
+        if cursor == cursor.parent:
+            raise WorkspaceError("cannot establish workspace state ancestry")
+        missing.append(cursor)
+        cursor = cursor.parent
+    path.parent.mkdir(parents=True, exist_ok=True)
+    try:
+        for created in reversed(missing):
+            _sync_directory(created.parent)
+        fd, tmp = tempfile.mkstemp(prefix=path.name + ".", dir=str(path.parent))
+        try:
+            with os.fdopen(fd, "w", encoding="utf-8") as f:
+                json.dump(obj, f, indent=2, sort_keys=True)
+                f.write("\n")
+                f.flush()
+                os.fsync(f.fileno())
+            os.replace(tmp, path)
+            _sync_directory(path.parent)
+        finally:
+            if os.path.exists(tmp):
+                os.unlink(tmp)
+    except OSError as exc:
+        raise WorkspaceError(
+            "workspace state durability is unverified; reconcile before retrying"
+        ) from exc
 
 
 def now_iso() -> str:
