@@ -449,7 +449,7 @@ def _trusted_workspace_coordinator(command: str, allowed_root: Path, state_dir: 
     if script != WORKSPACE_COORDINATOR.expanduser().resolve():
         return False
     subcommand = argv[2]
-    allowed_subcommands = {"create", "ensure", "exec", "ready", "integrate", "show", "list", "recover", "mark-reconciled", "finish"}
+    allowed_subcommands = {"create", "ensure", "exec", "ready", "integrate", "show", "list", "lifecycle", "recover", "mark-reconciled", "finish"}
     if subcommand not in allowed_subcommands:
         return False
 
@@ -461,15 +461,7 @@ def _trusted_workspace_coordinator(command: str, allowed_root: Path, state_dir: 
         return argv[i + 1] if i + 1 < len(argv) else None
 
     root = allowed_root.expanduser().resolve()
-    if subcommand in {"create", "ensure", "recover"}:
-        raw_repo = option("--repo")
-        if not raw_repo:
-            return False
-        try:
-            Path(raw_repo).expanduser().resolve().relative_to(root)
-        except (ValueError, OSError):
-            return False
-    elif subcommand == "gc":
+    if subcommand in {"create", "ensure", "recover", "lifecycle"}:
         raw_repo = option("--repo")
         if not raw_repo:
             return False

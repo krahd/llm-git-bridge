@@ -199,7 +199,15 @@ def create_job(args) -> dict:
     if worktree.exists():
         raise WorkspaceError(f"worktree path already exists: {worktree}")
     worktree.parent.mkdir(parents=True, exist_ok=True)
-    git(repo, "worktree", "add", "--lock", "--reason", f"ChatGPT workspace {jid}", "-b", branch, str(worktree), base)
+    # Avoid hydrating every historical LFS media payload in each new task
+    # checkout. Individual tasks can explicitly opt into full hydration.
+    hydrate_lfs = bool(getattr(args, "hydrate_lfs", False))
+    checkout_env = dict(os.environ)
+    if not hydrate_lfs:
+        checkout_env["GIT_LFS_SKIP_SMUDGE"] = "1"
+    run(["git", "-C", str(repo), "worktree", "add", "--lock", "--reason",
+         f"ChatGPT workspace {jid}", "-b", branch, str(worktree), base],
+        env=checkout_env)
     created = now_iso()
     job = {
         "schema": 1,
@@ -219,6 +227,7 @@ def create_job(args) -> dict:
         "updated_at": created,
         "last_checkpoint": base,
         "last_remote_checkpoint": None,
+        "lfs_deferred": not hydrate_lfs,
         "reconciled_target": base,
         "integration_commit": None,
     }
@@ -256,6 +265,8 @@ def ensure_job(args) -> dict:
         raise WorkspaceError(
             f"existing job {args.job_id} does not match requested identity: " + "; ".join(mismatches)
         )
+    if getattr(args, "hydrate_lfs", False) and job.get("lfs_deferred", False):
+        raise WorkspaceError("existing job has deferred LFS payloads; explicitly hydrate only necessary assets")
     worktree = Path(job["worktree"])
     if not worktree.is_dir():
         raise WorkspaceError(f"existing job {args.job_id} worktree is missing: {worktree}")
@@ -730,96 +741,17 @@ def recover_jobs(args) -> list[dict]:
     return recovered
 
 
-def gc_jobs(args) -> list[str]:
-    """Operator-only maintenance; remote agents cannot grant cleanup authority.
+def gc_jobs(args):
+    # Destructive lifecycle maintenance is local-only and one exact job at a time.
+    # The bridge's trusted coordinator subcommand allowlist excludes `gc`.
+    import workspace_retirement
+    return workspace_retirement.gc_jobs(args, sys.modules[__name__])
 
-    Destructive GC is disabled by default. The explicit local maintenance switch
-    exists for qualified cleanup only and must never be exposed via the mailbox.
-    Even in maintenance mode each job is independently fail-closed.
-    """
-    if not getattr(args, "enable_maintenance_gc", False):
-        raise WorkspaceError("destructive workspace GC is frozen; no artifacts removed")
-    state = state_root(args.state_dir)
-    removed = []
-    cutoff = time.time() - args.retention_days * 86400
-    for snapshot in list_jobs(argparse.Namespace(state_dir=args.state_dir, repo=args.repo)):
-        job_id = snapshot.get("job_id")
-        if not job_id:
-            continue
-        # Match exec and integration locking; retryable refusal is safer than
-        # racing another request that is checkpointing the same job.
-        lock = _lock(state / "workspaces" / "locks" / f"job-{job_id}.lock", nonblocking=True)
-        try:
-            job = load_job(state, job_id)
-            if job.get("state") != "integrated":
-                continue
-            try:
-                integrated_epoch = calendar.timegm(time.strptime(job["integrated_at"], "%Y-%m-%dT%H:%M:%SZ"))
-            except (KeyError, ValueError, TypeError):
-                continue
-            if integrated_epoch > cutoff:
-                continue
-            repo = repo_root(Path(job["repo"]))
-            wt = Path(job["worktree"])
-            checkpoint = job.get("last_remote_checkpoint")
-            integration = job.get("integration_commit")
-            if not checkpoint or not integration or checkpoint != job.get("last_checkpoint"):
-                continue
-            branch = job.get("branch", "")
-            if branch != JOB_BRANCH_PREFIX + job_id:
-                continue
-            # Proven canonical integration is historical, not inferred from
-            # the current file tree (which later work may legitimately change).
-            git(repo, "fetch", "--prune", _fetch_target(job),
-                f"refs/heads/{job['target_branch']}:refs/remotes/{job['remote']}/{job['target_branch']}")
-            current = git(repo, "rev-parse", f"refs/remotes/{job['remote']}/{job['target_branch']}^{{commit}}").stdout.strip()
-            if git(repo, "merge-base", "--is-ancestor", integration, current, check=False).returncode != 0:
-                continue
-            message = git(repo, "show", "-s", "--format=%B", integration).stdout
-            if (f"Bridge-Job-ID: {job_id}" not in message or
-                    f"Bridge-Checkpoint: {checkpoint}" not in message):
-                continue
-            local_tip = git(repo, "rev-parse", f"refs/heads/{branch}", check=False)
-            if local_tip.returncode != 0 or local_tip.stdout.strip() != checkpoint:
-                continue
-            try:
-                remote_tip = _remote_ref(repo, _fetch_target(job), branch)
-            except WorkspaceError:
-                continue
-            if remote_tip != checkpoint:
-                continue
-            if not wt.is_dir() or _dirty(wt):
-                continue
-            # Refuse a running/in-use workspace; only an explicitly unlocked
-            # worktree can be removed by local maintenance. Never force removal.
-            registered = git(repo, "worktree", "list", "--porcelain").stdout
-            record = next((block for block in registered.split("\n\n")
-                           if f"worktree {wt}" in block.splitlines()), None)
-            if record is None or any(line.startswith("locked") for line in record.splitlines()):
-                continue
-            # Check every effect, and keep metadata until all effects and
-            # their postconditions have been verified. No --force branch deletion.
-            removal = git(repo, "worktree", "remove", str(wt), check=False)
-            if removal.returncode != 0 or wt.exists():
-                continue
-            # At this point the remote checkpoint is still available. A
-            # concurrent remote advance is protected by the Git lease below.
-            if getattr(args, "delete_remote_branch", False):
-                push = git(repo, "push", f"--force-with-lease=refs/heads/{branch}:{checkpoint}",
-                           _push_target(job), f":refs/heads/{branch}", check=False)
-                if push.returncode != 0:
-                    continue
-                if git(repo, "ls-remote", "--heads", _fetch_target(job), f"refs/heads/{branch}").stdout.strip():
-                    continue
-            # Local job branch is a recovery anchor; retain it and the
-            # terminal receipt even after a successful maintenance cleanup.
-            job["worktree_released_at"] = now_iso()
-            job["gc_remote_deleted"] = bool(getattr(args, "delete_remote_branch", False))
-            save_job(state, job)
-            removed.append(job_id)
-        finally:
-            lock.close()
-    return removed
+
+def lifecycle_status(args):
+    import workspace_retirement
+    return workspace_retirement.lifecycle_status(args, sys.modules[__name__])
+
 
 def emit(value):
     print(json.dumps(value,indent=2,sort_keys=True))
@@ -829,8 +761,8 @@ def main():
     ap=argparse.ArgumentParser(description="Durable concurrent Git workspaces for ChatGPT Shell Bridge")
     ap.add_argument("--state-dir")
     sub=ap.add_subparsers(dest="cmd",required=True)
-    p=sub.add_parser("create"); p.add_argument("--repo",required=True); p.add_argument("--resource",required=True); p.add_argument("--remote",default="origin"); p.add_argument("--target",default="main"); p.add_argument("--job-id"); p.add_argument("--worktree-root"); p.add_argument("--push-initial",action="store_true"); p.set_defaults(fn=create_job)
-    p=sub.add_parser("ensure"); p.add_argument("--repo",required=True); p.add_argument("--resource",required=True); p.add_argument("--remote",default="origin"); p.add_argument("--target",default="main"); p.add_argument("--job-id",required=True); p.add_argument("--worktree-root"); p.add_argument("--push-initial",action="store_true"); p.set_defaults(fn=ensure_job)
+    p=sub.add_parser("create"); p.add_argument("--repo",required=True); p.add_argument("--resource",required=True); p.add_argument("--remote",default="origin"); p.add_argument("--target",default="main"); p.add_argument("--job-id"); p.add_argument("--worktree-root"); p.add_argument("--push-initial",action="store_true"); p.add_argument("--hydrate-lfs",action="store_true",help="opt in to full Git LFS checkout (large disk usage)"); p.set_defaults(fn=create_job)
+    p=sub.add_parser("ensure"); p.add_argument("--repo",required=True); p.add_argument("--resource",required=True); p.add_argument("--remote",default="origin"); p.add_argument("--target",default="main"); p.add_argument("--job-id",required=True); p.add_argument("--worktree-root"); p.add_argument("--push-initial",action="store_true"); p.add_argument("--hydrate-lfs",action="store_true"); p.set_defaults(fn=ensure_job)
     p=sub.add_parser("exec"); p.add_argument("--job",required=True); p.add_argument("--command",required=True); p.add_argument("--timeout",type=int,default=120); p.add_argument("--shell",default="/bin/zsh" if Path('/bin/zsh').exists() else "/bin/bash"); p.add_argument("--no-checkpoint",action="store_true"); p.add_argument("--checkpoint-message"); p.set_defaults(fn=exec_job)
     p=sub.add_parser("list"); p.add_argument("--repo"); p.set_defaults(fn=list_jobs)
     p=sub.add_parser("show"); p.add_argument("--job",required=True); p.set_defaults(fn=show_job)
@@ -839,7 +771,15 @@ def main():
     p=sub.add_parser("integrate"); p.add_argument("--job",required=True); p.add_argument("--message"); p.add_argument("--validate"); p.add_argument("--timeout",type=int,default=240); p.add_argument("--shell",default="/bin/zsh" if Path('/bin/zsh').exists() else "/bin/bash"); p.set_defaults(fn=integrate_job)
     p=sub.add_parser("finish"); p.add_argument("--job",required=True); p.add_argument("--message"); p.add_argument("--validate"); p.add_argument("--timeout",type=int,default=240); p.add_argument("--shell",default="/bin/zsh" if Path('/bin/zsh').exists() else "/bin/bash"); p.set_defaults(fn=finish_job)
     p=sub.add_parser("recover"); p.add_argument("--repo",required=True); p.add_argument("--remote",default="origin"); p.add_argument("--target",default="main"); p.set_defaults(fn=recover_jobs)
-    p=sub.add_parser("gc"); p.add_argument("--repo"); p.add_argument("--retention-days",type=int,default=14); p.add_argument("--delete-remote-branch",action="store_true"); p.add_argument("--enable-maintenance-gc",action="store_true",help="local operator only; never through remote bridge"); p.set_defaults(fn=gc_jobs)
+    p=sub.add_parser("lifecycle",help="read-only workspace lifecycle inventory"); p.add_argument("--repo"); p.set_defaults(fn=lifecycle_status)
+    p=sub.add_parser("gc", help="operator-only, single-job retirement; no bulk or remote branch deletion")
+    p.add_argument("--repo",required=True); p.add_argument("--job",required=True)
+    p.add_argument("--retention-days",type=int,default=14)
+    p.add_argument("--confirm-job", help="repeat the exact job ID before retirement")
+    p.add_argument("--allow-legacy",action="store_true",help="explicitly allow pre-receipt integration only")
+    p.add_argument("--delete-remote-branch",action="store_true",help="unsupported; remote branches are always kept")
+    p.add_argument("--enable-maintenance-gc",action="store_true",help="local operator only; never through remote bridge")
+    p.set_defaults(fn=gc_jobs)
     args=ap.parse_args()
     try:
         emit(args.fn(args)); return 0
