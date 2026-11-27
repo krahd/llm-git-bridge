@@ -77,6 +77,35 @@ class EnrollmentTests(unittest.TestCase):
         second = self.invoke(apply=True)
         self.assertFalse(second.called)
 
+    def test_symlink_refusals_identify_exact_path_without_mutation(self):
+        target_config = self.config.with_name("original-config.json")
+        self.config.rename(target_config)
+        self.config.symlink_to(target_config)
+        with self.assertRaisesRegex(SystemExit, "configuration file is a symlink"):
+            self.invoke(apply=True)
+        self.assertTrue(self.config.is_symlink())
+        self.config.unlink()
+        target_config.rename(self.config)
+
+        original_install = self.install.with_name("original-bridge-install")
+        self.install.rename(original_install)
+        self.install.symlink_to(original_install, target_is_directory=True)
+        with self.assertRaisesRegex(SystemExit, "bridge installation directory is a symlink"):
+            self.invoke(apply=True)
+        self.assertTrue(self.install.is_symlink())
+        self.install.unlink()
+        original_install.rename(self.install)
+
+        helper = self.install / "ursula_ollama_eval_helper.py"
+        other = self.install / "existing-helper-target"
+        other.write_text("do not overwrite\\n")
+        helper.symlink_to(other)
+        with self.assertRaisesRegex(SystemExit, "installed Ursula helper is a symlink"):
+            self.invoke(apply=True)
+        self.assertEqual(other.read_text(), "do not overwrite\\n")
+        self.assertTrue(helper.is_symlink())
+        self.assertEqual(json.loads(self.config.read_text())["trusted_operations"], {})
+
     def test_active_requests_prevent_enrollment(self):
         self.health["active_requests"] = ["in-flight"]
         (self.state / "health.json").write_text(json.dumps(self.health))
