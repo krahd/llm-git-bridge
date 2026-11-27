@@ -58,13 +58,8 @@ def _sync_directory(path: Path) -> None:
         os.close(fd)
 
 
-def atomic_json(path: Path, obj: dict) -> None:
-    """Durably record a workspace state transition, including its rename.
-
-    A retirement intent MUST survive a crash after worktree removal. Without
-    syncing the containing directory, a completed os.replace may roll back
-    following power loss, losing the only record needed for safe reconciliation.
-    """
+def _ensure_parent_directory(path: Path) -> None:
+    """Persist the parent directories newly created for a durable state file."""
     missing = []
     cursor = path.parent
     while not cursor.exists():
@@ -73,9 +68,19 @@ def atomic_json(path: Path, obj: dict) -> None:
         missing.append(cursor)
         cursor = cursor.parent
     path.parent.mkdir(parents=True, exist_ok=True)
+    for created in reversed(missing):
+        _sync_directory(created.parent)
+
+
+def atomic_json(path: Path, obj: dict) -> None:
+    """Durably record a workspace state transition, including its rename.
+
+    A retirement intent MUST survive a crash after worktree removal. Without
+    syncing the containing directory, a completed os.replace may roll back
+    following power loss, losing the only record needed for safe reconciliation.
+    """
+    _ensure_parent_directory(path)
     try:
-        for created in reversed(missing):
-            _sync_directory(created.parent)
         fd, tmp = tempfile.mkstemp(prefix=path.name + ".", dir=str(path.parent))
         try:
             with os.fdopen(fd, "w", encoding="utf-8") as f:
@@ -586,17 +591,25 @@ def _write_terminal_receipt(state: Path, job: dict, *, policy_rev: str | None,
         "verified_at": now_iso(),
     }
     path = _receipt_file(state, job["job_id"])
-    path.parent.mkdir(parents=True, exist_ok=True)
+    _ensure_parent_directory(path)
     if path.exists():
         existing=json.loads(path.read_text("utf-8"))
         if any(existing.get(k)!=receipt[k] for k in ("checkpoint","integration_commit","job_id")):
             raise WorkspaceError("terminal receipt conflicts with integrated effect; preserve evidence")
         return existing
     # Never replace a historical receipt after later main changes/reversions.
-    fd=os.open(path, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
-    with os.fdopen(fd,"w",encoding="utf-8") as out:
-        json.dump(receipt,out,sort_keys=True,indent=2)
-        out.write("\n");out.flush();os.fsync(out.fileno())
+    try:
+        fd=os.open(path, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
+        with os.fdopen(fd,"w",encoding="utf-8") as out:
+            json.dump(receipt,out,sort_keys=True,indent=2)
+            out.write("\n")
+            out.flush()
+            os.fsync(out.fileno())
+        _sync_directory(path.parent)
+    except OSError as exc:
+        raise WorkspaceError(
+            "integration receipt durability is unverified; reconcile remote effect before retrying"
+        ) from exc
     return receipt
 
 
