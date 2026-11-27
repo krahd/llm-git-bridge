@@ -241,7 +241,9 @@ def create_job(args) -> dict:
     # checkout. Individual tasks can explicitly opt into full hydration.
     hydrate_lfs = bool(getattr(args, "hydrate_lfs", False))
     checkout_env = dict(os.environ)
-    if not hydrate_lfs:
+    if hydrate_lfs:
+        checkout_env.pop("GIT_LFS_SKIP_SMUDGE", None)
+    else:
         checkout_env["GIT_LFS_SKIP_SMUDGE"] = "1"
     run(["git", "-C", str(repo), "worktree", "add", "--lock", "--reason",
          f"ChatGPT workspace {jid}", "-b", branch, str(worktree), base],
@@ -692,8 +694,18 @@ def _integrate_job_locked(args) -> dict:
         integ_root=repo.parent/".worktrees"/job["repo_id"]/".integration"
         integ_root.mkdir(parents=True,exist_ok=True)
         tmp=integ_root/f"{job['job_id']}-{secrets.token_hex(3)}"
-        git(repo,"worktree","add","--detach",str(tmp),current)
-        merge=git(tmp,"merge","--squash",checkpoint,check=False,timeout=args.timeout)
+        # Integration scratch worktrees must respect the job's hydration
+        # policy too. Otherwise even deferred-smudge jobs rehydrate multi-GB
+        # repositories just to run a short validation and squash merge.
+        integration_env = dict(os.environ)
+        if job.get("lfs_deferred", False):
+            integration_env["GIT_LFS_SKIP_SMUDGE"] = "1"
+        else:
+            integration_env.pop("GIT_LFS_SKIP_SMUDGE", None)
+        run(["git", "-C", str(repo), "worktree", "add", "--detach",
+             str(tmp), current], env=integration_env)
+        merge=run(["git", "-C", str(tmp), "merge", "--squash", checkpoint],
+                  check=False, timeout=args.timeout, env=integration_env)
         if merge.returncode != 0:
             job["state"]="conflicted"; job["last_error"]=(merge.stderr or merge.stdout).strip(); save_job(state,job)
             raise WorkspaceError("squash merge conflicted; job requires reconciliation")
