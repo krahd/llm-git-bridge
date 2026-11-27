@@ -455,37 +455,39 @@ def _run_job_shell(shell: str, command: str, cwd: Path, timeout: int):
 
 def exec_job(args) -> dict:
     state = state_root(args.state_dir)
-    job = load_job(state, args.job)
-    if job.get("state") == "integrated":
-        raise WorkspaceError("job is already integrated")
-    wt = Path(job["worktree"])
-    if not wt.is_dir():
-        raise WorkspaceError("job worktree is missing; run recover")
-    lock = _lock(state / "workspaces" / "locks" / f"job-{job['job_id']}.lock")
+    # Acquire before loading metadata: a concurrent finish/retire may change
+    # the job between an unlocked preflight and the first shell command.
+    lock = _lock(state / "workspaces" / "locks" / f"job-{args.job}.lock")
     try:
-        started = time.time()
-        rc, stdout, stderr = _run_job_shell(args.shell, args.command, wt, args.timeout)
-        out = {
-            "job_id": job["job_id"], "exit_code": rc,
-            "stdout": stdout, "stderr": stderr,
-            "duration_seconds": round(time.time()-started, 6),
-            "checkpoint": None,
-        }
-        if rc == 0 and not args.no_checkpoint and _dirty(wt):
-            out["checkpoint"] = _checkpoint(state, job, args.checkpoint_message)
-        elif rc != 0:
+        job = load_job(state, args.job)
+        if job.get("state") == "integrated" or job.get("worktree_released_at"):
+            raise WorkspaceError("job is already integrated or retired")
+        wt = Path(job["worktree"])
+        if not wt.is_dir():
+            raise WorkspaceError("job worktree is missing; run recover")
+        try:
+            started = time.time()
+            rc, stdout, stderr = _run_job_shell(args.shell, args.command, wt, args.timeout)
+            out = {
+                "job_id": job["job_id"], "exit_code": rc,
+                "stdout": stdout, "stderr": stderr,
+                "duration_seconds": round(time.time()-started, 6),
+                "checkpoint": None,
+            }
+            if rc == 0 and not args.no_checkpoint and _dirty(wt):
+                out["checkpoint"] = _checkpoint(state, job, args.checkpoint_message)
+            elif rc != 0:
+                job["state"] = "interrupted"
+                job["last_error"] = f"command exited {rc}"
+                save_job(state, job)
+            return out
+        except WorkspaceError as exc:
             job["state"] = "interrupted"
-            job["last_error"] = f"command exited {rc}"
+            job["last_error"] = str(exc)
             save_job(state, job)
-        return out
-    except WorkspaceError as exc:
-        job["state"] = "interrupted"
-        job["last_error"] = str(exc)
-        save_job(state, job)
-        raise
+            raise
     finally:
         lock.close()
-
 
 def list_jobs(args) -> list[dict]:
     state = state_root(args.state_dir)
@@ -532,19 +534,30 @@ def ready_job(args) -> dict:
 
 
 def mark_reconciled(args) -> dict:
-    state=state_root(args.state_dir); job=load_job(state,args.job); repo=Path(job["repo"])
-    git(repo,"fetch","--prune",_fetch_target(job),f"refs/heads/{job['target_branch']}:refs/remotes/{job['remote']}/{job['target_branch']}")
-    target=git(repo,"rev-parse",f"refs/remotes/{job['remote']}/{job['target_branch']}^{{commit}}").stdout.strip()
-    if args.target and args.target != target:
-        raise WorkspaceError(f"target moved: expected {args.target}, actual {target}")
-    wt = Path(job["worktree"])
-    if _dirty(wt):
-        raise WorkspaceError("job worktree is dirty; checkpoint before reconciliation")
-    checkpoint = git(wt, "rev-parse", "HEAD").stdout.strip()
-    if git(repo, "merge-base", "--is-ancestor", target, checkpoint, check=False).returncode != 0:
-        raise WorkspaceError("reconciliation not proven: canonical target is not an ancestor of the job checkpoint")
-    job["reconciled_target"]=target; save_job(state,job); return job
-
+    state = state_root(args.state_dir)
+    lock = _lock(state / "workspaces" / "locks" / f"job-{args.job}.lock")
+    try:
+        job = load_job(state, args.job)
+        if job.get("state") == "integrated" or job.get("worktree_released_at"):
+            raise WorkspaceError("integrated or retired workspace cannot be reconciled")
+        repo = Path(job["repo"])
+        git(repo, "fetch", "--prune", _fetch_target(job),
+            f"refs/heads/{job['target_branch']}:refs/remotes/{job['remote']}/{job['target_branch']}")
+        target = git(repo, "rev-parse",
+            f"refs/remotes/{job['remote']}/{job['target_branch']}^{{commit}}").stdout.strip()
+        if args.target and args.target != target:
+            raise WorkspaceError(f"target moved: expected {args.target}, actual {target}")
+        wt = Path(job["worktree"])
+        if _dirty(wt):
+            raise WorkspaceError("job worktree is dirty; checkpoint before reconciliation")
+        checkpoint = git(wt, "rev-parse", "HEAD").stdout.strip()
+        if git(repo, "merge-base", "--is-ancestor", target, checkpoint, check=False).returncode != 0:
+            raise WorkspaceError("reconciliation not proven: canonical target is not an ancestor of the job checkpoint")
+        job["reconciled_target"] = target
+        save_job(state, job)
+        return job
+    finally:
+        lock.close()
 
 def _changed_paths(repo: Path, a: str, b: str) -> set[str]:
     cp=git(repo,"diff","--name-only",f"{a}..{b}")
