@@ -92,6 +92,41 @@ class RetireTests(unittest.TestCase):
         # After os.replace the file may be visible, but must not be reported durable.
         self.assertTrue(target.exists())
 
+    def test_new_immutable_receipt_syncs_parent_directory(self):
+        """A receipt must remain discoverable after power loss, not just fsync its bytes."""
+        import stat
+        observed = []
+        original = os.fsync
+        def spy(fd):
+            observed.append(stat.S_ISDIR(os.fstat(fd).st_mode))
+            return original(fd)
+        job = dict(self.job)
+        job["job_id"] = "receipt-directory-fsync"
+        with patch.object(w.os, "fsync", side_effect=spy):
+            w._write_terminal_receipt(
+                self.state, job, policy_rev=job["base_commit"],
+                policy_sha="f" * 64, candidate_tree=job["base_commit"])
+        self.assertTrue(w._receipt_file(self.state, job["job_id"]).is_file())
+        self.assertIn(False, observed)
+        self.assertIn(True, observed)
+
+    def test_immutable_receipt_directory_sync_error_is_not_success(self):
+        """A visible but unpersisted receipt must not count as completed."""
+        import stat
+        original = os.fsync
+        def fail_directory(fd):
+            if stat.S_ISDIR(os.fstat(fd).st_mode):
+                raise OSError("simulated receipt directory sync failure")
+            return original(fd)
+        job = dict(self.job)
+        job["job_id"] = "receipt-directory-failure"
+        with patch.object(w.os, "fsync", side_effect=fail_directory):
+            with self.assertRaisesRegex(w.WorkspaceError, "receipt durability is unverified"):
+                w._write_terminal_receipt(
+                    self.state, job, policy_rev=job["base_commit"],
+                    policy_sha="f" * 64, candidate_tree=job["base_commit"])
+        self.assertTrue(w._receipt_file(self.state, job["job_id"]).exists())
+
     def gc(self, **overrides):
         args=dict(state_dir=str(self.state),repo=str(self.repo),job=self.job["job_id"],
                   retention_days=14,allow_legacy=False,delete_remote_branch=False,
