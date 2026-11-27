@@ -131,6 +131,35 @@ class WorkspaceTests(unittest.TestCase):
         with self.assertRaisesRegex(w.WorkspaceError,'does not match'):
             w.ensure_job(args)
 
+    def test_exec_reloads_job_after_lock_and_preserves_terminal_state(self):
+        """Concurrent terminal transition must not be overwritten as interrupted."""
+        from unittest.mock import patch
+        job=self.create('research:exec-lock-race')
+        original=w._lock
+        def transition_before_return(path,*args,**kwargs):
+            handle=original(path,*args,**kwargs)
+            if path.name == f"job-{job['job_id']}.lock":
+                live=w.load_job(self.state,job['job_id'])
+                live['state']='integrated'
+                w.save_job(self.state,live)
+            return handle
+        with patch.object(w,'_lock',side_effect=transition_before_return):
+            with self.assertRaisesRegex(w.WorkspaceError,'already integrated'):
+                self.exec(job['job_id'],"printf 'unsafe\n' > paper-a.txt")
+        self.assertEqual(w.load_job(self.state,job['job_id'])['state'],'integrated')
+        self.assertEqual((Path(job['worktree'])/'paper-a.txt').read_text(),'a0\n')
+
+    def test_reconciliation_uses_exact_job_lock(self):
+        """Reconciliation may not race an executor checkpoint on that job."""
+        from unittest.mock import patch
+        job=self.create('research:reconciliation-lock')
+        with patch.object(w,'_lock',wraps=w._lock) as seen:
+            out=w.mark_reconciled(argparse.Namespace(state_dir=str(self.state),
+                                                    job=job['job_id'],target=None))
+        self.assertEqual(out['reconciled_target'],job['base_commit'])
+        self.assertTrue(any(c.args and c.args[0].name ==
+                            f"job-{job['job_id']}.lock" for c in seen.call_args_list))
+
     def test_same_resource_requires_reconcile(self):
         a=self.create('research:paper:a'); b=self.create('research:paper:a')
         self.exec(a['job_id'],"printf 'a1\\n' > paper-a.txt")
