@@ -59,8 +59,15 @@ def main() -> None:
         die("reviewed helper source is unavailable or is symlinked")
     if not (install / "bridge.py").is_file() or not config_path.is_file():
         die("installed v6 bridge or configuration missing")
-    if config_path.is_symlink() or install.is_symlink() or dst.is_symlink():
-        die("configuration or installed helper contains a symlink")
+    # Identify the exact forbidden link without following or changing it.
+    # The operator must inspect its ownership and intended target separately.
+    for label, candidate in (
+        ("configuration file", config_path),
+        ("bridge installation directory", install),
+        ("installed Ursula helper", dst),
+    ):
+        if candidate.is_symlink():
+            die(f"{label} is a symlink: {candidate} -> {os.readlink(candidate)!r}; no changes made")
     cfg = json.loads(config_path.read_text("utf-8"))
     allowed_root = Path(cfg["allowed_root"]).resolve()
     repo = allowed_root / "projects/ursula/apps/storytelling/prototype-0"
