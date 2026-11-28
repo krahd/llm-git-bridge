@@ -129,6 +129,41 @@ class GeminiDriveHelperTests(unittest.TestCase):
         with self.assertRaises(drive.DrivePolicyError):
             drive.run_bounded([sys.executable, "-c", "import time; time.sleep(5)"], max_bytes=256, timeout=1)
 
+    def test_end_to_end_with_fake_rclone_process(self):
+        program = """#!/usr/bin/env python3
+import sys
+if 'lsf' in sys.argv:
+    print('gemini-bridge-request-20261127-b1.txt')
+elif 'cat' in sys.argv and 'bridge-external-result-test.txt' in ' '.join(sys.argv):
+    print('{"request_id":"external-test-001","status":"completed","output":"BRIDGE-RESULT-84726"}')
+elif 'cat' in sys.argv and 'gemini-bridge-request-20261127-b1.txt' in ' '.join(sys.argv):
+    print('{"kind":"bridge_poc_request","id":"gemini-doc-poc-20261127-b1","action":"diagnostic_echo","value":"GEMINI-TO-MAC-58319"}')
+else:
+    sys.exit(7)
+"""
+        self.binary.write_text(program, encoding="utf-8")
+        self.binary.chmod(0o700)
+        self.policy["rclone_sha256"] = hashlib.sha256(self.binary.read_bytes()).hexdigest()
+        self.write_policy()
+        for action, expected in (("probe-test", "BRIDGE-RESULT-84726"),
+                                 ("inspect-requests", "GEMINI-TO-MAC-58319")):
+            with self.subTest(action=action):
+                stream = io.StringIO()
+                with contextlib.redirect_stdout(stream):
+                    self.assertEqual(drive.main(["helper", action, str(self.policy_dir)]), 0)
+                self.assertIn(expected, json.dumps(json.loads(stream.getvalue())))
+
+    def test_rclone_stderr_never_leaks_credentials(self):
+        self.binary.write_text("#!/bin/sh\necho 'SECRET-TOKEN-DO-NOT-PRINT' >&2\nexit 3\n")
+        self.binary.chmod(0o700)
+        self.policy["rclone_sha256"] = hashlib.sha256(self.binary.read_bytes()).hexdigest()
+        self.write_policy()
+        stream = io.StringIO()
+        with contextlib.redirect_stderr(stream):
+            self.assertEqual(drive.main(["helper", "probe-test", str(self.policy_dir)]), 2)
+        self.assertIn("PINNED_DRIVE_DENIED", stream.getvalue())
+        self.assertNotIn("SECRET-TOKEN", stream.getvalue())
+
     def test_unknown_action_is_denied_before_policy_access(self):
         with contextlib.redirect_stderr(io.StringIO()):
             self.assertEqual(drive.main(["helper", "arbitrary-shell", str(self.policy_dir)]), 2)
