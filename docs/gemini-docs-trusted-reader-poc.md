@@ -19,7 +19,7 @@ The user also reports that Gemini uploaded a ZIP file directly to Google Drive. 
 
 It pins the remote, rclone executable SHA-256, explicit private rclone config file, exact document namespace, output byte caps and a 20-second subprocess timeout. It suppresses rclone stderr in remote responses, never returns OAuth tokens, and rejects extra fields, duplicate JSON keys, malformed names, unsafe file permissions and modified binaries. These safeguards are **local prototype invariants** and need adversarial review before live enrollment.
 
-All remote actions operate against the operator's **read-only PEDECIBA Drive OAuth grant**. The production v6 sandbox remains unchanged. A trusted helper runs with extra authority, so the installed executable and its operator-owned configuration must be outside `/Users/tom/tom-repos` and must be registered by the operator with the existing v6 trusted-operation mechanism. Every invocation requires native local approval.
+Before activation, independently verify that the PEDECIBA rclone OAuth grant uses `drive.readonly`; the scope was not established by the Terminal listing alone. Regardless of token scope, the helper invokes only read-only rclone commands. The production v6 sandbox remains unchanged. A trusted helper runs with extra authority, so the installed executable and its operator-owned configuration must be outside `/Users/tom/tom-repos` and must be registered by the operator with the existing v6 trusted-operation mechanism. Every invocation requires native local approval.
 
 ## Offline verification
 
